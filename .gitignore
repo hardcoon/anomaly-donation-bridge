@@ -1,0 +1,14 @@
+*.exe
+*.dll
+*.zip
+*.7z
+*.pdb
+*.log
+*.docx
+.env*
+settings.json
+secrets*
+history*
+processed-donations*
+work/
+artifacts/
