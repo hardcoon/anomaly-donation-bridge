@@ -3,8 +3,6 @@
 Донаты DonationAlerts запускают выбранные вами эффекты в S.T.A.L.K.E.R. Anomaly 1.5.3.
 Для Windows x64. Версия программы — 1.0.59 Beta, аддона — 1.0.30.
 
-Изменения версии: [новая лицензия без права перепродажи](docs/RELEASE_1.0.59_BETA_RU.md).
-
 ## Установка
 
 Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.0.59-beta.1/AnomalyDonationBridge-1.0.59-beta.1-win-x64.zip),
