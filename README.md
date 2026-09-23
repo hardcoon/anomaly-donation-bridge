@@ -1,13 +1,13 @@
 # Anomaly Donation Bridge
 
 Донаты DonationAlerts запускают выбранные вами эффекты в S.T.A.L.K.E.R. Anomaly 1.5.3.
-Для Windows x64. Версия программы — 1.0.61 Beta, аддона — 1.0.32.
+Для Windows x64. Версия программы — 1.0.62 Beta, аддона — 1.0.33.
 
-Изменения версии: [профили, глобальные горячие клавиши и новые пресеты](docs/RELEASE_1.0.61_BETA_RU.md).
+Изменения версии: [сохранение временных эффектов, имя напарника и оформление профилей](docs/RELEASE_1.0.62_BETA_RU.md).
 
 ## Установка
 
-Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.0.61-beta.1/AnomalyDonationBridge-1.0.61-beta.1-win-x64.zip),
+Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.0.62-beta.1/AnomalyDonationBridge-1.0.62-beta.1-win-x64.zip),
 распакуйте целиком в удобную папку и запустите `AnomalyDonationBridge.exe`.
 Папки `addon-package` и `effects` оставьте рядом с программой. В архиве нет
 рабочих документов, старых скриптов, пользовательских настроек и истории.
