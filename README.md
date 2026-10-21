@@ -21,6 +21,12 @@
 
 ## Установка
 
+Для полноценной работы некоторых шаблонов требуются
+[Modded Exes (xray-monolith)](https://github.com/themrdemonized/xray-monolith/releases/latest).
+На штатных EXE Anomaly отдельные шаблоны или их функции могут не работать.
+MT не обязателен — можно использовать обычную Standard-сборку. Устанавливайте
+пакет движка целиком по инструкции автора, а не заменяйте только EXE.
+
 Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.2.1-rel/AnomalyDonationBridge-1.2.1-rel-win-x64.zip),
 распакуйте целиком в удобную папку и запустите `AnomalyDonationBridge.exe`.
 Папки `addon-package`, `effects` и скрытую служебную `_internal` оставьте рядом
