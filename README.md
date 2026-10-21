@@ -2,7 +2,7 @@
 
 Донаты DonationAlerts и DonateX запускают выбранные вами эффекты в S.T.A.L.K.E.R. Anomaly 1.5.3.
 Оба сервиса можно подключить одновременно: программа собирает события в одну
-последовательную очередь. Для Windows x64. Версия программы — 1.2.1,
+последовательную очередь. Для Windows x64. Версия программы — 1.2.2,
 аддона — 1.0.109. Всего 59 файловых шаблонов.
 
 ## Установка
@@ -13,7 +13,7 @@
 MT не обязателен — можно использовать обычную Standard-сборку. Устанавливайте
 пакет движка целиком по инструкции автора, а не заменяйте только EXE.
 
-Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.2.1-rel/AnomalyDonationBridge-1.2.1-rel-win-x64.zip),
+Скачайте [ZIP с программой](https://github.com/hardcoon/anomaly-donation-bridge/releases/download/v1.2.2-rel/AnomalyDonationBridge-1.2.2-rel-win-x64.zip),
 распакуйте целиком в удобную папку и запустите `AnomalyDonationBridge.exe`.
 Папки `addon-package`, `effects` и скрытую служебную `_internal` оставьте рядом
 с программой. Наблюдатель «Защита от вылетов» запускается автоматически;
