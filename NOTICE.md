@@ -23,3 +23,11 @@ remains the property of its respective rights holders; the Hardcoon software
 license does not claim ownership of or relicense their underlying artwork.
 Use requires a compatible Anomaly installation. The game itself, its runtime,
 stock textures and sounds are not supplied by this package.
+
+The private item-roulette component is based on Anomaly Item Upgrader 0.2.5,
+Copyright (c) 2026 Hardcoon, under the MIT license. Its scripts, authored UI
+atlas and procedural wheel tick remain under MIT; the Bridge license does not
+replace those terms. Integration renames modules/resources/save keys, disables
+the standalone F6 binding, and adds requested-series and risk-policy handling.
+The coin sound is from Kenney RPG Audio (CC0). Original notices and license
+terms are included in `_internal/licenses/roulette/`.
