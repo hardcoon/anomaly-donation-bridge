@@ -2,9 +2,9 @@
 
 Донаты **DonationAlerts** и **DonateX** запускают настроенные эффекты в S.T.A.L.K.E.R. Anomaly.
 
-**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.4](docs/RELEASE_1.3.4_RU.md)
+**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.3](docs/RELEASE_1.3.3_RU.md)
 
-Windows x64 · Anomaly 1.5.3 · Программа **1.3.4** · Аддон **1.0.135**
+Windows x64 · Anomaly 1.5.3 · Программа **1.3.3** · Аддон **1.0.135**
 
 ## Инструкции
 
