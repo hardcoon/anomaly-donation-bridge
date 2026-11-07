@@ -1,10 +1,10 @@
 # Anomaly Donation Bridge
 
-Донаты **DonationAlerts** и **DonateX** запускают настроенные эффекты в S.T.A.L.K.E.R. Anomaly.
+Донаты **DonationAlerts** и **DonateX** запускают настроенные эффекты в S.T.A.L.K.E.R. Anomaly. Зрители **YouTube** могут выбирать эффекты через голосования в чате.
 
-**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.14](docs/RELEASE_1.3.14_RU.md)
+**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.15](docs/RELEASE_1.3.15_RU.md)
 
-Windows x64 · Anomaly 1.5.3 · Программа **1.3.14** · Аддон **1.0.168**
+Windows x64 · Anomaly 1.5.3 · Программа **1.3.15** · Аддон **1.0.168**
 
 ## Инструкции
 
@@ -64,7 +64,7 @@ Windows x64 · Anomaly 1.5.3 · Программа **1.3.14** · Аддон **1.
 
 ### 5. Подключите сервис донатов
 
-В **Настройки → Интеграция** подключите **[DonationAlerts](docs/DONATIONALERTS_SETUP_RU.md)** или **[DonateX](docs/DONATEX_SETUP_RU.md)**. Можно подключить оба сервиса.
+В **Настройки → Интеграция** подключите **[DonationAlerts](docs/DONATIONALERTS_SETUP_RU.md)**, **[DonateX](docs/DONATEX_SETUP_RU.md)** или **[Чат YouTube](docs/YOUTUBE_CHAT_SETUP_RU.md)**. Интеграции можно использовать одновременно; чат YouTube — для голосований.
 
 ### 6. Включите обработку
 
