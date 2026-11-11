@@ -2,9 +2,9 @@
 
 Донаты **DonationAlerts** и **DonateX** запускают настроенные эффекты в S.T.A.L.K.E.R. Anomaly. Зрители **YouTube** могут выбирать эффекты через голосования в чате.
 
-**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.19](docs/RELEASE_1.3.19_RU.md)
+**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.3.20](docs/RELEASE_1.3.20_RU.md)
 
-Windows x64 · Anomaly 1.5.3 · Программа **1.3.19** · Аддон **1.0.173**
+Windows x64 · Anomaly 1.5.3 · Программа **1.3.20** · Аддон **1.0.177**
 
 ## Инструкции
 
