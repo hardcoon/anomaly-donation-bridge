@@ -1,0 +1,231 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.wandering_trader",
+  "displayName": "Странствующий торговец",
+  "description": "Создаёт торговца с именем донатера, неуязвимого до окончания таймера. Он гуляет по локации и продаёт случайные исправные товары со скидкой от номинальной цены. Вещи игрока не покупает. Ассортимент формируется из предметов установленной сборки один раз и сохраняется вместе с торговцем. По истечении времени торговец умирает. Если открыт разговор или торговля, он ждёт закрытия окна. Купленные предметы остаются у игрока, непроданные товары забрать с тела нельзя.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "visuals",
+      "displayName": "Внешность торговца",
+      "kind": "MultiChoice",
+      "catalogKind": "Npc",
+      "minimumSelections": 1,
+      "defaultValue": ""
+    },
+    {
+      "key": "duration_seconds",
+      "displayName": "Время присутствия, сек. (0 — без ограничения)",
+      "kind": "Integer",
+      "minimum": 0,
+      "maximum": 999999,
+      "defaultValue": "180"
+    },
+    {
+      "key": "spawn_radius",
+      "displayName": "Дальность появления, м (0 — рядом)",
+      "kind": "Integer",
+      "minimum": 0,
+      "maximum": 999,
+      "defaultValue": "150"
+    },
+    {
+      "key": "discount_percent",
+      "displayName": "Скидка от номинальной цены, %",
+      "kind": "Integer",
+      "minimum": 0,
+      "maximum": 99,
+      "defaultValue": "80"
+    },
+    {
+      "key": "map_marker",
+      "displayName": "Метка на карте",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "weapons_enabled",
+      "displayName": "Оружие",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "weapons_count",
+      "displayName": "Оружие — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 20,
+      "defaultValue": "3"
+    },
+    {
+      "key": "ammo_enabled",
+      "displayName": "Патроны к оружию (пачек на оружие)",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "ammo_count",
+      "displayName": "Патроны к оружию (пачек на оружие) — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 50,
+      "defaultValue": "10"
+    },
+    {
+      "key": "helmets_enabled",
+      "displayName": "Шлемы",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "helmets_count",
+      "displayName": "Шлемы — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 10,
+      "defaultValue": "1"
+    },
+    {
+      "key": "armor_enabled",
+      "displayName": "Броня",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "armor_count",
+      "displayName": "Броня — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 10,
+      "defaultValue": "1"
+    },
+    {
+      "key": "artifacts_enabled",
+      "displayName": "Артефакты",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "artifacts_count",
+      "displayName": "Артефакты — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 20,
+      "defaultValue": "2"
+    },
+    {
+      "key": "medicine_enabled",
+      "displayName": "Медицина",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "medicine_count",
+      "displayName": "Медицина — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 30,
+      "defaultValue": "5"
+    },
+    {
+      "key": "food_enabled",
+      "displayName": "Еда",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "food_count",
+      "displayName": "Еда — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 30,
+      "defaultValue": "5"
+    },
+    {
+      "key": "devices_enabled",
+      "displayName": "Электроника и приборы",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "devices_count",
+      "displayName": "Электроника и приборы — количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 20,
+      "defaultValue": "2"
+    }
+  ],
+  "parameters": {
+    "visuals": "",
+    "duration_seconds": "180",
+    "spawn_radius": "150",
+    "discount_percent": "80",
+    "map_marker": "true",
+    "weapons_enabled": "true",
+    "weapons_count": "3",
+    "ammo_enabled": "true",
+    "ammo_count": "10",
+    "helmets_enabled": "true",
+    "helmets_count": "1",
+    "armor_enabled": "true",
+    "armor_count": "1",
+    "artifacts_enabled": "true",
+    "artifacts_count": "2",
+    "medicine_enabled": "true",
+    "medicine_count": "5",
+    "food_enabled": "true",
+    "food_count": "5",
+    "devices_enabled": "true",
+    "devices_count": "2"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+function on_game_start()
+    local impl=anomaly_donation_bridge_wandering_trader
+    impl.start()
+    anomaly_donation_bridge_registry.register_builtin("hardcoon.adb.wandering_trader",{
+        can_execute=impl.can_execute,execute=impl.execute,update=impl.update,
+        is_supported=impl.supported,support_probe_is_hint=true,
+        on_game_load=impl.on_game_load,on_level_changing=impl.on_level_changing})
+end

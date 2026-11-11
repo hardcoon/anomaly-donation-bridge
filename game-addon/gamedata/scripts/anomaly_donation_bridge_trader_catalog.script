@@ -1,0 +1,219 @@
+-- Runtime-only stock catalogue. No exported price list or modpack item list.
+local categories={"weapons","ammo","helmets","armor","artifacts","medicine","food","devices"}
+local maxima={20,50,10,10,20,30,30,20}
+local defaults={3,10,1,1,2,5,5,2}
+-- Match the native equipment factories accepted by the main game catalogue.
+-- E_STLK is only the scripted binding (mostly heavy outfits in Anomaly);
+-- ordinary jackets, Sunrise and SEVA use EQU_STLK and must also be eligible.
+local outfit_classes={EQU_SCIE=true,EQU_STLK=true,EQU_MLTR=true,EQU_EXO=true,E_STLK=true}
+local helmet_classes={EQ_HLMET=true,E_HLMET=true}
+-- Launcher rounds are CWeaponAmmo too, with native and scripted factories.
+-- Do not include the separate G_* projectile objects used when firing them.
+local shell_classes={A_VOG25=true,A_OG7B=true,A_M209=true,S_VOG25=true,S_OG7B=true,S_M209=true}
+local launcher_classes={WP_RG6=true,WP_RPG7=true}
+local cache,scan,blocked_sections
+local function read(ini,section,key)
+    return anomaly_donation_bridge_roulette_catalog.read(ini,section,key)
+end
+local function false_value(v) return v=="false" or v=="off" or v=="0" end
+local function true_value(v) return v=="true" or v=="on" or v=="1" end
+local function integer(value,default,minimum,maximum)
+    local n=tonumber(value==nil and default or value)
+    if not n or n~=n or n~=math.floor(n) or n<minimum or n>maximum then return end
+    return n
+end
+
+function options(params)
+    params=params or {}
+    local o={duration=integer(params.duration_seconds,180,0,999999),
+        radius=integer(params.spawn_radius,150,0,999),discount=integer(params.discount_percent,80,0,99),stock={}}
+    if not o.duration or not o.radius or not o.discount then return nil,"trader_parameters_invalid" end
+    if params.map_marker~=nil and params.map_marker~="true" and params.map_marker~="false" then
+        return nil,"trader_marker_invalid"
+    end
+    o.marker=params.map_marker~="false"
+    local selected=0
+    for i,key in ipairs(categories) do
+        local enabled=params[key.."_enabled"]
+        if enabled~=nil and enabled~="true" and enabled~="false" then return nil,"trader_category_invalid" end
+        local count=integer(params[key.."_count"],defaults[i],1,maxima[i])
+        if not count then return nil,"trader_quantity_invalid_"..key end
+        o.stock[key]={enabled=enabled~="false",count=count}
+        if enabled~="false" then selected=selected+1 end
+    end
+    if selected==0 then return nil,"trader_no_categories_selected" end
+    return o
+end
+
+function item_category(ini,section)
+    local class=(read(ini,section,"class") or ""):upper()
+    local kind=read(ini,section,"kind") or ""
+    -- Slots are not types: PDA/backpacks can use equipment slots in modpacks.
+    if helmet_classes[class] then return "helmets" end
+    if outfit_classes[class] then return "armor" end
+    if class:find("^AMMO") or shell_classes[class] then return "ammo" end
+    -- The roulette groups w_explosive with grenades; a tradeable RPG/RG-6/M79
+    -- is still a weapon and needs matching ammunition in this catalogue.
+    if launcher_classes[class] then return "weapons" end
+    local family=anomaly_donation_bridge_roulette_catalog.item_category({class=class,kind=kind})
+    if family=="weapon" and class:find("^WP_") then return "weapons" end
+    if family=="artefact" then return "artifacts" end
+    if kind=="i_medical" then return "medicine" end
+    if kind=="i_food" or kind=="i_drink" or kind=="i_mutant_cooked" then return "food" end
+    if kind=="i_device" or class:find("^DET_") or class=="II_PDA" or class=="WP_BINOC" then return "devices" end
+end
+
+function safe_item(ini,section)
+    if not ini:section_exist(section) then return false end
+    local name,visual=read(ini,section,"inv_name"),read(ini,section,"visual")
+    local cost=tonumber(read(ini,section,"cost"))
+    if not name or name=="default" or not visual or not cost or cost<=0 or cost>1000000 or
+        (tonumber(read(ini,section,"inv_grid_width")) or 0)<=0 or
+        (tonumber(read(ini,section,"inv_grid_height")) or 0)<=0 then return false end
+    if false_value(read(ini,section,"can_trade")) or false_value(read(ini,section,"can_take")) or
+        false_value(read(ini,section,"$spawn")) or true_value(read(ini,section,"quest_item")) or
+        section:find("^mp_") or section:find("^tch_") or read(ini,section,"kind")=="i_quest" then return false end
+    local path=visual:gsub("/","\\")
+    if path:sub(-4):lower()~=".ogf" then path=path..".ogf" end
+    if path:find("..",1,true) or not getFS():exist("$game_meshes$",path) then return false end
+    local kind=item_category(ini,section)
+    if kind=="ammo" then
+        local box=tonumber(read(ini,section,"box_size"))
+        if not box or box<1 or box>65535 or box~=math.floor(box) then return false end
+    end
+    for _,key in ipairs({"story_id","spawn_story_id"}) do
+        local id=read(ini,section,key)
+        if id and id~="" and id~="-1" and id~="none" and id~="4294967295" then return false end
+    end
+    return item_category(ini,section)~=nil
+end
+
+function collect(ini)
+    local pools={}
+    for _,key in ipairs(categories) do pools[key]={} end
+    ini:section_for_each(function(section)
+        if safe_item(ini,section) then
+            local kind=item_category(ini,section)
+            if kind~="ammo" or (tonumber(read(ini,section,"box_size")) or 0)>0 then
+                pools[kind][#pools[kind]+1]=section
+            end
+        end
+        return false -- native section_for_each requires a bool callback
+    end)
+    for _,pool in pairs(pools) do table.sort(pool) end
+    return pools
+end
+
+-- INI sections are immutable during a game process. Build this private runtime
+-- index once, in bounded batches; it is never exported to or loaded from ADB.
+function prepare(ini)
+    if cache then return cache end
+    if not scan then
+        scan={sections={},index=1,pools={},ini=ini}
+        for _,key in ipairs(categories) do scan.pools[key]={} end
+        ini:section_for_each(function(s) scan.sections[#scan.sections+1]=s;return false end)
+    end
+end
+function advance()
+    if not scan then return end
+    local start=time_global()
+    for _=1,160 do
+        local section=scan.sections[scan.index]
+        if not section then
+            for _,pool in pairs(scan.pools) do table.sort(pool) end
+            cache=scan.pools;scan=nil;return
+        end
+        if safe_item(scan.ini,section) then
+            local pool=scan.pools[item_category(scan.ini,section)]
+            pool[#pool+1]=section
+        end
+        scan.index=scan.index+1
+        if time_global()-start>=2 then return end
+    end
+end
+
+local function pick(pool,count,repeat_allowed,random)
+    local chosen,copy={},{}
+    for _,s in ipairs(pool) do copy[#copy+1]=s end
+    for _=1,count do
+        if #copy==0 then break end
+        local index=random(1,#copy)
+        chosen[#chosen+1]=copy[index]
+        if not repeat_allowed then table.remove(copy,index) end
+    end
+    return chosen
+end
+
+function ammunition(ini,weapon)
+    for s in (read(ini,weapon,"ammo_class") or ""):gmatch("[^,%s]+") do
+        if safe_item(ini,s) and item_category(ini,s)=="ammo" and
+            (tonumber(read(ini,s,"box_size")) or 0)>0 then return s end
+    end
+end
+
+function stock_plan(ini,o,actor,random,pools)
+    random=random or math.random
+    pools=pools or collect(ini)
+    local plan,weapons={},{}
+    for _,key in ipairs(categories) do
+        local option=o.stock[key]
+        if key~="ammo" and option.enabled then
+            for _,s in ipairs(pick(pools[key],option.count,key=="food" or key=="medicine",random)) do
+                plan[#plan+1]=s
+                if key=="weapons" then weapons[#weapons+1]=s end
+            end
+        end
+    end
+    if not o.stock.weapons.enabled and actor then
+        for _,slot in ipairs({2,3}) do
+            local obj=actor:item_in_slot(slot)
+            if obj then
+                local section=obj:section()
+                if item_category(ini,section)=="weapons" then weapons[#weapons+1]=section end
+            end
+        end
+    end
+    if o.stock.ammo.enabled then
+        for _,weapon in ipairs(weapons) do
+            local s=ammunition(ini,weapon)
+            if s then for _=1,o.stock.ammo.count do plan[#plan+1]=s end end
+        end
+    end
+    if #plan==0 then return nil,"trader_stock_empty_for_selected_categories" end
+    return plan
+end
+
+-- This INI belongs to one merchant. Empty buy lines disable selling to him;
+-- empty sell lines also prevent engine-generated equipment entering his shop.
+function trade_rules(ini,plan,factors)
+    -- Game config sections do not change in this process. Enumerating the full
+    -- modpack for each trade refresh caused large unnecessary allocations.
+    if not blocked_sections then
+        local lines={"[buy]"}
+        ini:section_for_each(function(section) lines[#lines+1]=section.." =";return false end)
+        blocked_sections=table.concat(lines,"\n").."\n"
+    end
+    local sell,seen={"[sell]:buy"},{}
+    for _,section in ipairs(plan) do
+        local factor=not factors and 1 or factors[section]
+        if factor and not seen[section] then
+            sell[#sell+1]=section..string.format(" = %.12g, %.12g",factor,factor)
+            seen[section]=true
+        end
+    end
+    return blocked_sections..table.concat(sell,"\n").."\n"
+end
+
+function price_factor(discount) return (100-discount)/100 end
+
+function nominal_sale_factor(ini,section,item,discount)
+    local nominal=tonumber(read(ini,section,"cost"))
+    local actual=item:cost()
+    if not nominal or not actual or actual<=0 then return end
+    -- The native weapon price includes its loaded rounds and attachments.
+    -- Neutralise that per section, not by replacing the game's payment code.
+    local desired=math.max(1,math.floor(nominal*price_factor(discount)+.000001))
+    local condition=item:condition()*.9+.1
+    -- A small sub-rouble margin keeps native float/floor rounding exact.
+    return (desired+.25)/(actual*condition)
+end

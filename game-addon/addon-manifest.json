@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "product": "AnomalyDonationBridge",
+  "addonVersion": "1.0.181",
+  "protocolVersion": "1",
+  "pipeName": "AnomalyDonationBridge.v1",
+  "files": [
+    {
+      "path": "gamedata/configs/gameplay/dialogs_anomaly_donation_bridge.xml",
+      "sha256": "2C1A367F2FA251BD6A3F45058346AD647A0C5225406844BCAC4C42596EA9A339"
+    },
+    {
+      "path": "gamedata/configs/misc/task/tm_anomaly_donation_bridge.ltx",
+      "sha256": "C09EE815F1C317A39DE20E39C2F89D108D0516CF5B0AE82F409913466B34D043"
+    },
+    {
+      "path": "gamedata/configs/misc/trade/anomaly_donation_bridge_wandering_trader.ltx",
+      "sha256": "2E63E9842E897DCC0CAA7ED451AA715FA836ACD72F04B071C2D76BAACE08DD64"
+    },
+    {
+      "path": "gamedata/configs/mod_system_anomaly_donation_bridge.ltx",
+      "sha256": "44F544AC82051AD2D75ABBAB8A318B40AD8BC63CD6B6C811D4C79743B2F79BC9"
+    },
+    {
+      "path": "gamedata/configs/models/weapons/anomaly_donation_bridge_stationary_mgun.ltx",
+      "sha256": "4504D711E7E50CADCE5A11CCCCDF22B26F0B3228DE9843BFF005FC90D70C609B"
+    },
+    {
+      "path": "gamedata/configs/scripts/anomaly_donation_bridge_annoying_fan.ltx",
+      "sha256": "1DD48E2B8C24C2AC02530F78167DD1299D3FFBBC88640C7E7F0E947C962B342E"
+    },
+    {
+      "path": "gamedata/configs/scripts/anomaly_donation_bridge_wandering_trader.ltx",
+      "sha256": "3AACF3F8B0334B90CCAF8BB501773694AF9735B67B30EC405294819ADDC7546F"
+    },
+    {
+      "path": "gamedata/configs/text/rus/st_anomaly_donation_bridge_roulette.xml",
+      "sha256": "C8E5A3F19C5EF14F9DF98777FBB3120DF495C709FE8BC2A739CD0E6AA2D5ECEF"
+    },
+    {
+      "path": "gamedata/configs/ui/anomaly_donation_bridge_mutant_v2.xml",
+      "sha256": "4053BC54D898144D26F977184230B14E6852F883AF526B8101BADCDD15759158"
+    },
+    {
+      "path": "gamedata/configs/ui/anomaly_donation_bridge_voting.xml",
+      "sha256": "42DAECF02EE5AE10E34026E83B37CC92DED4909C5D1CB631CD7A8E1908A04347"
+    },
+    {
+      "path": "gamedata/configs/ui/textures_descr/anomaly_donation_bridge_burer_form.xml",
+      "sha256": "8B654997AD3087FD1EB4D6C0F01A154042DBDA1089B6EF6377CB9D0CFFBD3305"
+    },
+    {
+      "path": "gamedata/configs/ui/textures_descr/anomaly_donation_bridge_mutant_v2.xml",
+      "sha256": "47AC48799FFE350838132619427CA3F5ECDA89642E99AEDD8863D396D39CA243"
+    },
+    {
+      "path": "gamedata/configs/ui/textures_descr/anomaly_donation_bridge_roulette.xml",
+      "sha256": "91515EE5B8B05A79035114EAD14763A345004192870A8F5EEB6FBDEB80A6AE48"
+    },
+    {
+      "path": "gamedata/configs/ui/textures_descr/anomaly_donation_bridge_voting.xml",
+      "sha256": "9C2E18741D817D75581123F3DE8A94EDAED3FCFC1F9CECA674E8884B8A4452FC"
+    },
+    {
+      "path": "gamedata/meshes/anomaly_donation_bridge/btr_olive.ogf",
+      "sha256": "79A473310C0045667C623FC4B7EA80362FC9B7E1618BB707371A062C06ABBD1C"
+    },
+    {
+      "path": "gamedata/meshes/anomaly_donation_bridge/stationary_mgun_r060.ogf",
+      "sha256": "101E7BCAC08896678614ACFE89BD78B88F53CFFE74768D750D4BE84726856C7D"
+    },
+    {
+      "path": "gamedata/meshes/anomaly_donation_bridge/stationary_mgun_r090.ogf",
+      "sha256": "21FEF6B9608D27E134BEEABF29A675761DAD59AD1776276020BC9126734A7D3A"
+    },
+    {
+      "path": "gamedata/meshes/anomaly_donation_bridge/stationary_mgun_r120.ogf",
+      "sha256": "34EFB05AFD52A8F3103268F429CF936B300535CA864F76FC360321EB32E8B8CF"
+    },
+    {
+      "path": "gamedata/meshes/anomaly_donation_bridge/stationary_mgun.ogf",
+      "sha256": "0F1004A1D1CD36641E0EC0BD29D43D53540F2E00EA021C00DB915D92DB0107EF"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_azazel_hud.script",
+      "sha256": "2B8788C1F77BB7223CDF10F853AEE69B157596B21B655D9FB467012ECF2681A7"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_btr_ai.script",
+      "sha256": "14DBFAD77BCBB9CE58A75BCDA2140517CD6798AA75F6EEC65E0E7423C9C6533E"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_catalog.script",
+      "sha256": "467A4E2CA625267C6C8960C0094C168E07647CCF1251CED02B733BE34EF9A986"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_common.script",
+      "sha256": "2F30E47D8A8B5E1711F38D50A3DA21BF582F48FD1BC359865B24FF4142A6A918"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_effects_direct_spawn.script",
+      "sha256": "91F45CFAE8E24B4599C8D7049B7F6D108AFEC99C3791CBDAF1B631461BA983A8"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_main.script",
+      "sha256": "4D1B05B27CC11F70A53287B6700FF8C4EF17059E1ADCC9B2C1CAF6C7CA303AB7"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_named_companion.script",
+      "sha256": "D8F9A73BFDFED4EE980F7C46F5A37F1A903028AC09BEAB3BAEC30C12E0F27641"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_npc_visuals.script",
+      "sha256": "357F9508BE315BC27128F2ADAC90CE7BE88D7AB3077B27A89A0667B60467745B"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_protocol.script",
+      "sha256": "2E8AF2C1B23BFE873DBA22E87578D514645B54010456AA4838D308738B239179"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_registry.script",
+      "sha256": "C3E0BB558A37D658C3273DB2D9848A1BB8C980492CD2946E474737F92650FDA3"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_reincarnation.script",
+      "sha256": "57EBC01EFDBC62168C8068C0C1196A6100CB3256B7B0BE21B41EA207A8A4AEC5"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_relife_companions.script",
+      "sha256": "4F22843FF4BD9C56ED20E86AD0E81EEC8FA913FCDE4B3FDF2088AE92994AD3BB"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_roulette_art.script",
+      "sha256": "AA997832F24F338AF67404BDD6CD6575C9DCFB7B2153AA039E6B31D57F87527F"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_roulette_catalog.script",
+      "sha256": "C0809FB6EA1CF50B37DFD52155E96D9B0D85938354D0B99F873ED5CF7FFCEA59"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_roulette_core.script",
+      "sha256": "B5B816C435B99799BC61A9F2CD60EF66BF79FF3873F162B97F841160ADC5F326"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_roulette_ui.script",
+      "sha256": "338C8C7FC51170D0E10C34693A759219BB18963FE810B114E4E7CA98F834B871"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_roulette.script",
+      "sha256": "75ACE91818F4FDAD746150C0DCB6ABCFE750C36F5D7A4F328B044FE0814878C4"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
+      "sha256": "209DC68EE12459ABDCF0CE6C042977AFB313E4E8E779262C4AEA59F7A3927848"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",
+      "sha256": "3B0A3CAC7F25F4399B134F655CE07BE14C27DB6091106BFAF44E99C6F331228F"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_trader_catalog.script",
+      "sha256": "5A1A789EF5C3A6BF8B07786F1DB8992F6B464567836C02F17B0517077D4A1631"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_transport.script",
+      "sha256": "6A4A3CD3DF7F60544DA97DCA31761059D80225136639B02AC6CD66944C358EC6"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_vehicle_catalog.script",
+      "sha256": "CAB9588B8610BCE0F899AA395FBC77E3BBA1C6BB269388D00AEDA1B73DB5A539"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_vehicle_controls.script",
+      "sha256": "C75ECBADE8C073997F20479857B3E09533FCFD8ECE0B60F28839B26AC67EB734"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_vehicle_navigation.script",
+      "sha256": "C82823E45861387D3FDBC5E62693F72E653BBCE9300E9F2DDCF9D342BF93E1BE"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_visual_safety.script",
+      "sha256": "3EC1644C00F7427F79B1B725D708232D35C39D7482E1F65A91F090F99CD39F70"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_voting_ui.script",
+      "sha256": "AF1CAF13C1B98892C0B1B41571F64ABA36103E5447FE55B94A474B2BA4392F61"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_voting.script",
+      "sha256": "665EC2CF898FBB4B9A29A6AFD6F88171BF9A9B9C0926E2FE41BF446FB7038DFA"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_wandering_trader.script",
+      "sha256": "7E13FFDD14AA13FB2764ADB1467F9210710A158B47ED2D3B999E906E13BBE890"
+    },
+    {
+      "path": "gamedata/sounds/ui/anomaly_donation_bridge_roulette_coins.ogg",
+      "sha256": "3508235B6A9D0C160B262DED6B1883BD75ADE79ADD198AEFA4CACB657F3889E1"
+    },
+    {
+      "path": "gamedata/sounds/ui/anomaly_donation_bridge_roulette_tick.ogg",
+      "sha256": "CF70EF084D8B406E1D618B66F63A8C7DA85EBFB68ED98402A8A3E085B66549FE"
+    },
+    {
+      "path": "gamedata/textures/anomaly_donation_bridge/btr_olive.dds",
+      "sha256": "8837EED5E6ACC537682F3BF208F22D57F9C46553F8F728D01106E9A6BFE79301"
+    },
+    {
+      "path": "gamedata/textures/ui/anomaly_donation_bridge_burer_form.dds",
+      "sha256": "EF5C57120C2D9DBF00C15AA0A8BCDECA464C977474A3E42FFE02FE8CAACA85F2"
+    },
+    {
+      "path": "gamedata/textures/ui/anomaly_donation_bridge_mutant_v2.dds",
+      "sha256": "97A4444A0B65ADFA5711265A670DA3C9BD685983946E841B0BF321A77A0CA8B1"
+    },
+    {
+      "path": "gamedata/textures/ui/anomaly_donation_bridge_roulette_atlas.dds",
+      "sha256": "D406F7831B91498D201810AC066B4404A533B4955A51BFCD11E156788EFA4CAC"
+    },
+    {
+      "path": "gamedata/textures/ui/anomaly_donation_bridge_voting_material.dds",
+      "sha256": "9EB070B8C06DFF3D855BB7F5BDF469E408EDF899D3F44A755DFD33CD14850A3B"
+    }
+  ]
+}

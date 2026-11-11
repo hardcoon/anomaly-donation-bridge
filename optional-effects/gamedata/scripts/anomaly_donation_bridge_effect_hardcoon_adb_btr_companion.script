@@ -1,0 +1,39 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.btr_companion",
+  "displayName": "БТР-напарник (экспериментально)",
+  "description": "БТР следует за игроком и прикрывает его. Хоткей задаёт точку под прицелом: БТР едет к ней с обходом препятствий и остаётся ждать. Приблизьтесь на 10 м, чтобы он снова следовал за вами. Внутри БТР игрок управляет машиной, а башня продолжает выбирать цели сама. Оставшееся время и указанная позиция сохраняются вместе с БТР. Для старого движка AnomalyDX11-2026.5.15.exe включите «Legacy api управление».",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"vehicle_sections","displayName":"Допустимые модели БТР","kind":"MultiChoice","catalogKind":"ArmedVehicle","minimumSelections":1,"defaultValue":""},
+    {"key":"legacy_api","displayName":"Legacy api управление","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"duration_seconds","displayName":"Время работы, сек.","kind":"Integer","minimum":10,"maximum":99999999,"defaultValue":"60"},
+    {"key":"follow_distance","displayName":"Расстояние следования, м","kind":"Integer","minimum":5,"maximum":100,"defaultValue":"20"},
+    {"key":"extend_current","displayName":"Продлевать время текущего БТР","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"drive_key","displayName":"Движение к точке под прицелом","kind":"KeyboardKey","defaultValue":"RCTRL"}
+  ],
+  "parameters":{"vehicle_sections":"","legacy_api":"false","duration_seconds":"60","follow_distance":"20","extend_current":"true","drive_key":"RCTRL"},
+  "itemSpawns":[], "spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+-- The template requests a spawn; the installed game module owns its lifetime.
+local function ai() return anomaly_donation_bridge_btr_ai end
+function passenger_object() return ai().passenger_object() end
+function passenger_command(...) return ai().passenger_command(...) end
+function spawn_anchor(...) return ai().spawn_anchor(...) end
+-- Existing saves and generated vehicle sections retain these entry points.
+function bind(object) return ai().bind(object) end
+function before_hit(...) return ai().before_hit(...) end
+local registered=false
+function on_game_start()
+    if registered then return end
+    registered=true
+    ai().on_game_start()
+    anomaly_donation_bridge_registry.register("hardcoon.adb.btr_companion",{
+        is_supported=function() return not not ai().supported(),"btr_native_api_unavailable" end,
+        can_execute=function(...) return ai().can_execute(...) end,
+        execute=function(...) return ai().execute(...) end})
+end

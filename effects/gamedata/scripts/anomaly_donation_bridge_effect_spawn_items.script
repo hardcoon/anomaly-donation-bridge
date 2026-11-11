@@ -1,0 +1,342 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_items",
+  "displayName": "Выдать предметы в инвентарь",
+  "description": "Добавляет выбранные предметы из безопасных категорий игрового спавнера.",
+  "category": "inventory",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"section_id","displayName":"Предмет","kind":"ItemChoice","catalogKind":"Item","defaultValue":""},
+    {"key":"count","displayName":"Количество","kind":"Integer","minimum":1,"maximum":50,"defaultValue":"1"},
+    {"key":"weapon_options","displayName":"Для оружия","kind":"MultiChoice","options":["equip","add_ammo"],"optionLabels":{"equip":"Брать выданное оружие в руки","add_ammo":"При выдаче оружия добавить патроны"},"defaultValue":"","minimumSelections":0},
+    {"key":"ammo_packs","displayName":"Пачек патронов на каждое оружие","kind":"Integer","minimum":1,"maximum":50,"defaultValue":"1"}
+  ],
+  "parameters": {"section_id":"","count":"1","weapon_options":"","ammo_packs":"1"},
+  "itemSpawns": [{"itemId":"","count":1}]
+}
+ADB_PRESET_END]]
+
+local GEAR_SLOTS = {
+	outfit = { { name = "outfit", slot = 7 } },
+	helmet = { { name = "helmet", slot = 12 } },
+	-- Remove the independent helmet first. Some outfits occupy/block the helmet
+	-- slot and refresh both equipment slots when the outfit leaves the actor.
+	both = { { name = "helmet", slot = 12 }, { name = "outfit", slot = 7 } }
+}
+local EATABLE_CLASSES = {
+	II_FOOD = true, S_FOOD = true, II_ANTIR = true,
+	II_MEDKI = true, II_BOTTL = true, II_BANDG = true
+}
+local RANDOM_WEAPON_SECTION = "__adb_random_weapon__"
+local RANDOM_OUTFIT_SECTION = "__adb_random_outfit__"
+local RANDOM_HELMET_SECTION = "__adb_random_helmet__"
+local RANDOM_ARTIFACT_SECTION = "__adb_random_artifact__"
+local PDA_RECEIVED = string.char(207, 238, 235, 243, 247, 229, 237, 238, 58, 32)
+local PDA_MULTIPLY = string.char(245)
+local STATE_KEY = "__anomaly_donation_bridge_inventory_actions_v1"
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { pending_equip = nil }
+	rawset(_G, STATE_KEY, state)
+end
+
+local function register(action_id, can_execute, execute, is_supported, update,
+	on_game_load, on_level_changing)
+	return anomaly_donation_bridge_registry.register_builtin(action_id, {
+		can_execute = can_execute, execute = execute, is_supported = is_supported,
+		update = update, on_game_load = on_game_load,
+		on_level_changing = on_level_changing,
+		support_probe_is_hint = true
+	})
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function object_has_any_method(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if ok and type(method) == "function" then return true end
+	end
+	return false
+end
+
+local function drop_item_physically(actor, item)
+	if actor == nil or item == nil then return false end
+	local method_ok, teleport_method = pcall(function()
+		return actor.drop_item_and_teleport
+	end)
+	if method_ok and type(teleport_method) == "function" then
+		local position_ok, position = pcall(function() return actor:position() end)
+		if not position_ok or position == nil then return false end
+		return pcall(function() actor:drop_item_and_teleport(item, position) end)
+	end
+	local drop_ok, drop_method = pcall(function() return actor.drop_item end)
+	if not drop_ok or type(drop_method) ~= "function" then return false end
+	return pcall(function() actor:drop_item(item) end)
+end
+
+local function catalog_api_supported()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+local function alife_api_supported(methods)
+	if type(alife) ~= "function" then return false end
+	local ok, life = pcall(alife)
+	return ok and object_has_methods(life, methods)
+end
+
+local function pda_tip(actor, text)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function pda_item_name(display_name, section)
+	local name = anomaly_donation_bridge_common.trim(display_name)
+	name = anomaly_donation_bridge_common.game_text_cp1251(name)
+	if name == nil or name == "" then name = tostring(section or "") end
+	name = name:gsub("[\r\n\t]", " "):gsub("%s%s+", " ")
+	return name:sub(1, 160)
+end
+
+local function parse_item_rows(value)
+	value = tostring(value or "")
+	if value == "" or #value > 4000 or value:sub(1, 1) == ";" or
+		value:sub(-1) == ";" or value:find(";;", 1, true) then
+		return nil, "item_bundle_invalid"
+	end
+	local rows, total = {}, 0
+	for encoded in value:gmatch("[^;]+") do
+		local section, count_text = encoded:match("^([^%*]+)%*(%d+)$")
+		local count = tonumber(count_text)
+		if section == nil or not anomaly_donation_bridge_common.valid_section_id(section) or
+			count == nil or count < 1 or count > 50 or count ~= math.floor(count) then
+			return nil, "item_bundle_invalid"
+		end
+		total = total + count
+		if total > 500 or #rows >= 256 then return nil, "item_bundle_too_large" end
+		rows[#rows + 1] = { requested_section = section, count = count }
+	end
+	return #rows > 0 and rows or nil, #rows > 0 and nil or "item_bundle_invalid"
+end
+
+local function spawn_items_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		items = true, section_id = true, count = true, catalog_revision = true,
+		weapon_options = true, ammo_packs = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local requested_rows, rows_error
+	if params.items ~= nil then
+		requested_rows, rows_error = parse_item_rows(params.items)
+	else
+		local count, count_error = anomaly_donation_bridge_common.parse_integer(
+			params.count, 1, 1, 50, "item_count_invalid")
+		if count == nil then return false, "rejected", count_error end
+		requested_rows = { { requested_section = tostring(params.section_id or ""),
+			count = count } }
+	end
+	if requested_rows == nil then return false, "rejected", rows_error end
+	local rows, first_weapon = {}, nil
+	for _, requested in ipairs(requested_rows) do
+		local entry, catalog_error
+		if requested.requested_section == RANDOM_WEAPON_SECTION then
+			entry, catalog_error = anomaly_donation_bridge_catalog.random_available_weapon()
+		elseif requested.requested_section == RANDOM_OUTFIT_SECTION then
+			entry, catalog_error = anomaly_donation_bridge_catalog.random_available_outfit()
+		elseif requested.requested_section == RANDOM_HELMET_SECTION then
+			entry, catalog_error = anomaly_donation_bridge_catalog.random_available_helmet()
+		elseif requested.requested_section == RANDOM_ARTIFACT_SECTION then
+			entry, catalog_error = anomaly_donation_bridge_catalog.random_available_artifact()
+		else
+			entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+				catalog_revision = params.catalog_revision,
+				section_id = requested.requested_section
+			}, "section_id", "item")
+		end
+		if entry == nil then return false, "rejected", catalog_error end
+		local is_weapon = anomaly_donation_bridge_catalog.is_weapon(entry.section_id)
+		rows[#rows + 1] = {
+			section = entry.section_id, count = requested.count,
+			display_name = entry.display_name, is_weapon = is_weapon,
+			is_random_weapon = requested.requested_section == RANDOM_WEAPON_SECTION
+		}
+		if first_weapon == nil and is_weapon then first_weapon = #rows end
+	end
+	local equip_weapon, add_ammo = false, false
+	local weapon_options = tostring(params.weapon_options or "")
+	if weapon_options ~= "" then
+		local selections, selections_error =
+			anomaly_donation_bridge_common.split_csv(weapon_options)
+		if selections == nil then return false, "rejected", selections_error end
+		local seen = {}
+		for _, selection in ipairs(selections) do
+			if seen[selection] or (selection ~= "equip" and selection ~= "add_ammo") then
+				return false, "rejected", "weapon_options_invalid"
+			end
+			seen[selection] = true
+			if selection == "equip" then equip_weapon = true end
+			if selection == "add_ammo" then add_ammo = true end
+		end
+	end
+	local ammo_packs, ammo_error = anomaly_donation_bridge_common.parse_integer(
+		params.ammo_packs, 1, 1, 50, "ammo_pack_count_invalid")
+	if ammo_packs == nil then return false, "rejected", ammo_error end
+	if equip_weapon and first_weapon == nil then
+		return false, "rejected", "equip_requires_weapon"
+	end
+	if add_ammo then
+		for _, row in ipairs(rows) do
+			if row.is_weapon then
+				row.ammo_section = anomaly_donation_bridge_catalog.compatible_ammo(row.section)
+			end
+		end
+	end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if type(alife_create_item) ~= "function" or alife == nil or alife() == nil then
+		return false, "deferred", "alife_unavailable"
+	end
+	context.options = { rows = rows, equip_weapon = equip_weapon,
+		add_ammo = add_ammo, ammo_packs = ammo_packs,
+		first_weapon = first_weapon }
+	return true
+end
+
+local function server_object_id(object)
+	local ok, object_id = pcall(function() return tonumber(object.id) end)
+	if ok and object_id ~= nil then return object_id end
+	ok, object_id = pcall(function() return tonumber(object:id()) end)
+	return ok and object_id or nil
+end
+
+local function spawn_items_execute(context)
+	local created, first_weapon_object, total = {}, nil, 0
+	local ammo_total, ammo_failures = 0, 0
+	for row_index, row in ipairs(context.options.rows) do
+		if not anomaly_donation_bridge_catalog.is_available(row.section, "item") then
+			return "rejected", "catalog_selection_stale_or_quarantined"
+		end
+		for _ = 1, row.count do
+			local ok, object = pcall(function()
+				return alife_create_item(row.section, context.actor)
+			end)
+			if not ok then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "item_spawn_failed_rolled_back" or
+					"item_spawn_failed_state_unknown"
+			end
+			if object == nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "item_spawn_failed_rolled_back" or
+					"item_spawn_failed_rollback_incomplete"
+			end
+			created[#created + 1] = object
+			total = total + 1
+			if row_index == context.options.first_weapon and first_weapon_object == nil then
+				first_weapon_object = object
+			end
+			if context.options.add_ammo and row.is_weapon and row.ammo_section ~= nil then
+				for _ = 1, context.options.ammo_packs do
+					local ammo_ok, ammo = pcall(function()
+						return alife_create_item(row.ammo_section, context.actor)
+					end)
+					if ammo_ok and ammo ~= nil then
+						created[#created + 1] = ammo
+						ammo_total = ammo_total + 1
+					else
+						ammo_failures = ammo_failures + 1
+					end
+				end
+			end
+		end
+	end
+	if context.options.equip_weapon then
+		local object_id = server_object_id(first_weapon_object)
+		if object_id == nil then
+			local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+			return rolled_back and "rejected" or "uncertain",
+				rolled_back and "weapon_spawn_id_missing_rolled_back" or
+				"weapon_spawn_id_missing_rollback_incomplete"
+		end
+		state.pending_equip = {
+			object_id = object_id,
+			section = context.options.rows[context.options.first_weapon].section,
+			expires_at = (tonumber(context.now) or (time_global and time_global() or 0)) + 5000
+		}
+	end
+	local notified = true
+	for _, row in ipairs(context.options.rows) do
+		local message = PDA_RECEIVED .. '"' ..
+			pda_item_name(row.display_name, row.section) ..
+			'" ' .. PDA_MULTIPLY .. tostring(row.count)
+		if not pda_tip(context.actor, message) then notified = false end
+	end
+	return "executed", "spawned_item_groups_" .. tostring(#context.options.rows) ..
+		"_total_" .. tostring(total) ..
+		(ammo_total > 0 and "_ammo_packs_" .. tostring(ammo_total) or "") ..
+		(ammo_failures > 0 and "_ammo_incomplete_" .. tostring(ammo_failures) or "") ..
+		(context.options.equip_weapon and "_equip_pending" or "") ..
+		(notified and "" or "_notification_unavailable")
+end
+
+local function spawn_items_update(now)
+	local pending = state.pending_equip
+	if type(pending) ~= "table" then return end
+	if now > tonumber(pending.expires_at or 0) then
+		state.pending_equip = nil
+		return
+	end
+	if db == nil or db.actor == nil or level == nil or
+		type(level.object_by_id) ~= "function" then return end
+	local ok, equipped = pcall(function()
+		local item = level.object_by_id(pending.object_id)
+		if item == nil or item:section() ~= pending.section then return false end
+		db.actor:make_item_active(item)
+		return true
+	end)
+	if ok and equipped then state.pending_equip = nil end
+end
+
+local function clear_pending_equip()
+	state.pending_equip = nil
+end
+
+
+local function spawn_items_supported(context)
+	local supported = catalog_api_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "position", "level_vertex_id", "game_vertex_id", "id", "make_item_active" }) and
+		type(alife_create_item) == "function" and alife_api_supported({ "release" })
+	return supported, supported and nil or "item_spawn_api_unsupported"
+end
+
+
+function on_game_start()
+	local ok, reason = register("spawn_items", spawn_items_can, spawn_items_execute,
+		spawn_items_supported, spawn_items_update, clear_pending_equip, clear_pending_equip)
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_items registration failed: %s", tostring(reason))
+	end
+end

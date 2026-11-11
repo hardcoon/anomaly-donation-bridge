@@ -1,0 +1,588 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,"handlerId":"hardcoon.adb.play_guitar","displayName":"Сыграть на гитаре",
+  "description":"Герой садится и играет одну случайную композицию из отмеченных. Камера свободно вращается мышью, на время исполнения герой неуязвим. Esc — прервать. Композиции берутся из живого каталога игры; необходима поддержка гитарных анимаций текущей моделью героя.",
+  "category":"player_state","cooldownSeconds":3,
+  "parameterDefinitions":[{"key":"song_sections","displayName":"Гитарные композиции","kind":"MultiChoice","catalogKind":"GuitarMusic","minimumSelections":1,"defaultValue":""}],
+  "parameters":{"song_sections":""},"itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local HANDLER="hardcoon.adb.play_guitar"
+local MODULE="anomaly_donation_bridge_effect_hardcoon_adb_play_guitar"
+local SECTION="adb_guitar_double"
+local SAVE="adb_guitar_scene_v1"
+local UI_NAME="ADBGuitarScene"
+local MOTIONS={"idle_0_to_sit_1","sit_1_guitar_0_0","sit_1_guitar_0_1","guitar_0",
+    "guitar_0_sit_1_0","guitar_0_sit_1_1","sit_1_to_idle_0"}
+local scene,registered,recovering=nil,false,false
+local raw_mouse=false
+local forward_key=nil
+local save_journal_pending=false
+local service_save=nil
+local doubles={}
+local finish
+local function a() return db and db.actor end
+local function life() return type(alife)=="function" and alife() end
+local function storage() return alife_storage_manager and alife_storage_manager.get_state() end
+local function saved() local s=storage();return s and s[SAVE] end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function point(p) return {x=p.x,y=p.y,z=p.z} end
+local function call(o,m,...)
+    if not o then return nil end
+    local args={...};local ok,result=pcall(function() return o[m](o,unpack(args)) end)
+    if ok then return result end
+end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e8 end
+local function online(id) return id and level.object_by_id(id) end
+local function server(id) return id and call(life(),"object",id,true) end
+local function owns(o,r,section,is_server)
+    return o and r and call(o,is_server and "section_name" or "section")==section and call(o,"name")==r.name
+end
+local function release(r,section)
+    local s=r and server(r.id)
+    if owns(s,r,section,true) then life():release(s,true) end
+end
+local function clear_double_loadout(r)
+    local parent=r and r.double and server(r.double.id)
+    if not owns(parent,r and r.double,SECTION,true) then error("guitar_double_missing") end
+    -- Stock xrs_rnd_npc_loadout (or a mod) can supply even an empty NPC
+    -- profile. Snapshot first: never invalidate the native child iterator.
+    local extras={}
+    for id in life():get_children(parent) do
+        local child=server(id)
+        if child and child.parent_id==parent.id and not owns(child,r.guitar,"guitar_a",true) then
+            extras[#extras+1]={id=id,name=child:name(),section=child:section_name()}
+        end
+    end
+    for _,item in ipairs(extras) do
+        local child=server(item.id)
+        if child and child.parent_id==parent.id and owns(child,item,item.section,true) then
+            -- Online release is an asynchronous GE_DESTROY. Wait for it
+            -- instead of sending the same destruction every bridge tick.
+            local pending=scene.removing and scene.removing[item.id]
+            if not pending or pending.name~=item.name or time_global()-pending.sent>=1000 then
+                scene.removing=scene.removing or {}
+                scene.removing[item.id]={name=item.name,sent=time_global()}
+                life():release(child,true)
+            end
+        end
+    end
+    return #extras
+end
+local function ini(s,k) return anomaly_donation_bridge_common.ini_string(system_ini(),s,k) end
+local function trader_profile()
+    -- The merged game's order defines community_index; the following number
+    -- is its team, NOT its index. Mods may change either of them.
+    local text=ini("game_relations","communities")
+    if type(text)~="string" then return end
+    local tokens={}
+    for token in (text..","):gmatch("(.-),") do tokens[#tokens+1]=token:match("^%s*(.-)%s*$") end
+    if #tokens%2~=0 then return end
+    local profile,seen=nil,{}
+    for i=1,#tokens,2 do
+        local name,team=tokens[i],tonumber(tokens[i+1])
+        if name=="" or seen[name] or not team or team%1~=0 or team<0 or team>255 then return end
+        seen[name]=true
+        if name=="trader" then profile={index=(i-1)/2,team=team} end
+    end
+    return profile
+end
+local function transient_flags(flags)
+    if type(flags)~="number" or flags~=flags or flags%1~=0 or flags < -2147483648 or flags > 2147483647 then
+        error("guitar_server_flags_unavailable")
+    end
+    -- CSE_ALifeObject::flCanSave (1 << 9). Preserve every other flag,
+    -- including signed packet values. Binder net_save_relevant alone does
+    -- NOT exclude CEntityAlive from the native ALife object registry save.
+    return flags-(flags%1024>=512 and 512 or 0)
+end
+local function prepare_double(object,r)
+    if not owns(object,r.double,SECTION,true) then error("guitar_double_missing") end
+    local data=utils_stpk.get_stalker_data(object)
+    data.visual_name=r.visual;data.object_flags=transient_flags(data.object_flags)
+    data.community_index=r.trader.index;data.g_team=r.trader.team;data.g_squad=0;data.g_group=0
+    utils_stpk.set_stalker_data(data,object)
+    local actual=utils_stpk.get_stalker_data(object)
+    if actual.object_flags~=data.object_flags or actual.community_index~=r.trader.index or actual.g_team~=r.trader.team then
+        error("guitar_double_packet_not_applied")
+    end
+end
+local function prepare_guitar(object)
+    local data=utils_stpk.get_item_data(object)
+    data.object_flags=transient_flags(data.object_flags)
+    utils_stpk.set_item_data(data,object)
+    if utils_stpk.get_item_data(object).object_flags~=data.object_flags then error("guitar_item_packet_not_applied") end
+end
+local function exists(alias,path)
+    local ok,result=pcall(function() return getFS():exist(alias,path) end)
+    return ok and not not result
+end
+local function normalize_visual(v) return tostring(v or ""):lower():gsub("/","\\"):gsub("%.ogf$","") end
+local function bones(o)
+    local result={};local any_visible=false
+    for id,name in pairs(o:list_bones(false)) do
+        if type(id)~="number" or type(name)~="string" then error("guitar_bones_invalid") end
+        result[name]=o:bone_visible(id,false)==true
+        any_visible=any_visible or result[name]
+    end
+    if next(result)==nil or not any_visible then error("guitar_bones_missing") end
+    return result
+end
+local function restore_actor(r)
+    local actor=a()
+    -- Only guitar.1/.2 journals need bone recovery. New scenes never change the
+    -- actor's skeleton, including on cleanup (a redundant native show is unsafe).
+    if not actor or not r or r.actor_bones_untouched or normalize_visual(actor:get_visual_name())~=normalize_visual(r.visual) then return end
+    for id,name in pairs(actor:list_bones(false)) do
+        local visible=r.bones and r.bones[name]
+        if type(visible)=="boolean" and actor:bone_visible(id,false)~=visible then
+            actor:set_bone_visible(id,visible,false,false)
+        end
+    end
+end
+local function body_render_mode_safe()
+    -- The native first-eye/custom camera hides the actor without modifying its
+    -- bones or bounds. An optional engine debug override would draw it anyway;
+    -- do not silently rewrite the user's console settings to defeat that.
+    local ok,mode=pcall(function() return get_console():get_string("show_actor_body") end)
+    return ok and (mode==nil or tonumber(mode)==0)
+end
+local function ui_free()
+    local actor=a()
+    if not actor or not actor:alive() or device():is_paused() or _HUD_STATE~=true then return false end
+    if not actor_menu or not actor_menu.is_hud_free() or actor:is_talking() then return false end
+    -- Stock Anomaly exposes get_current_holder(), not IsInCar(). A holder also
+    -- covers stationary guns, where replacing the actor with a prop is unsafe.
+    local holder_ok,holder=pcall(function() return actor:get_current_holder() end)
+    if not holder_ok then return false,"guitar_holder_api_unavailable" end
+    if holder~=nil then return false,"actor_in_vehicle" end
+    if not body_render_mode_safe() then return false,"guitar_actor_body_debug_enabled" end
+    if type(Check_UI)=="function" and Check_UI() then return false end
+    if type(_GUIs)=="table" and next(_GUIs) then return false end
+    return actor_effects==nil or actor_effects.item_not_in_use~=false
+end
+local function supported()
+    return object_binder~=nil and CUIScriptWnd~=nil and game and type(game.motion_exists)=="function" and
+        callback and callback.script_animation~=nil and
+        level and type(level.set_cam_custom_position_direction)=="function" and
+        type(level.remove_cam_custom_position_direction)=="function" and type(level.get_active_cam)=="function" and
+        type(level.set_active_cam)=="function" and type(level.ray_pick)=="function" and
+        type(RegisterScriptCallback)=="function" and type(Register_UI)=="function" and type(Unregister_UI)=="function" and
+        type(show_indicators)=="function" and type(alife_create)=="function" and type(alife_create_item)=="function" and
+        type(getFS)=="function" and type(get_console)=="function" and type(SetCursorPosition)=="function" and sound_object~=nil and
+        object and object.idle~=nil and life() and type(life().get_children)=="function" and
+        utils_stpk and type(utils_stpk.get_stalker_data)=="function" and type(utils_stpk.set_stalker_data)=="function" and
+        type(utils_stpk.get_item_data)=="function" and type(utils_stpk.set_item_data)=="function" and
+        USE_MARSHAL==true and storage()~=nil
+end
+local function validate_actor()
+    local actor=a();local visual=actor:get_visual_name()
+    if not visual or visual=="" or not exists("$game_meshes$",normalize_visual(visual)..".ogf") then return nil,"guitar_actor_model_missing" end
+    for _,motion in ipairs(MOTIONS) do
+        if not game.motion_exists(visual,motion) then return nil,"guitar_actor_animation_missing_"..motion end
+    end
+    local ok,visibility=pcall(bones,actor)
+    if not ok then return nil,"guitar_actor_bones_unavailable" end
+    -- Safe attachment requires the model's actual hand bone, not a guessed ID.
+    local attach=ini("guitar_a","attach_bone_name")
+    if ini("guitar_a","class")~="II_ATTCH" or not attach or visibility[attach]==nil then return nil,"guitar_attachment_unsupported" end
+    local model=ini("guitar_a","visual")
+    if not model or not exists("$game_meshes$",normalize_visual(model)..".ogf") then return nil,"guitar_instrument_model_missing" end
+    return {visual=visual,bones=visibility,actor_bones_untouched=true,pos=point(actor:position()),direction=point(actor:direction()),
+        camera=level.get_active_cam()}
+end
+local function can_execute(context,params)
+    local valid,why=anomaly_donation_bridge_common.params_only(params,{song_sections=true,catalog_revision=true})
+    if not valid then return false,"rejected",why end
+    if not supported() then return false,"deferred","guitar_api_unavailable" end
+    if scene or saved() then return false,"deferred","guitar_scene_busy" end
+    local free,free_reason=ui_free()
+    if not free then return false,"deferred",free_reason or "guitar_waiting_for_free_actor" end
+    if ini(SECTION,"class")~="AI_STL_S" or ini(SECTION,"script_binding")~=MODULE..".bind" then
+        return false,"deferred","guitar_update_addon_restart_game"
+    end
+    local cat=anomaly_donation_bridge_catalog
+    local entries,reason=cat.validate_sections(params,"song_sections","guitar_music")
+    if not entries then return false,reason=="catalog_revision_mismatch" and "deferred" or "rejected",reason end
+    if #entries==0 then return false,"rejected","selection_empty" end
+    local profile,profile_reason=validate_actor()
+    if not profile then return false,"deferred",profile_reason end
+    profile.trader=trader_profile()
+    if not profile.trader then return false,"deferred","guitar_trader_community_unavailable" end
+    local speed_ok,speed=pcall(function()
+        if type(a().set_movement_speed)~="function" then return nil end
+        return a():get_movement_speed()
+    end)
+    if not speed_ok or not speed or not finite(speed.x) or not finite(speed.y) or not finite(speed.z) then
+        return false,"deferred","guitar_movement_api_unavailable"
+    end
+    -- Do not freeze a jump/fall to start a sitting scene. Walking/running on
+    -- the ground is allowed; the owned UI stops input before anchoring it.
+    if math.abs(speed.y)>0.3 then return false,"deferred","guitar_waiting_for_ground" end
+    profile.song=entries[math.random(1,#entries)].section_id
+    profile.path=cat.guitar_sound(profile.song)
+    if not profile.path then return false,"deferred","guitar_song_unavailable" end
+    context.options=profile;return true
+end
+local function notice(reason)
+    if type(printf)=="function" then printf("[ADB] guitar scene stopped: %s",tostring(reason)) end
+end
+local function acquire_debug_invisible()
+    if DEV_DEBUG~=true then return end
+    -- Optional stock debug-menu command, NOT a native console command and
+    -- NOT actor:set_invisible (that API is for bloodsuckers). Never load or
+    -- enable the debug tools ourselves if this build does not provide them.
+    local tools=rawget(_G,"xrs_debug_tools")
+    local commands=type(tools)=="table" and rawget(tools,"CMD")
+    if type(commands)~="table" or type(rawget(commands,"invisible"))~="function" then return end
+    local previous=rawget(tools,"debug_invis")
+    if previous==true or previous~=nil and previous~=false then return end
+    -- This debug flag is not saved by the game. Keep ownership runtime-only:
+    -- loading an old journal must not turn off a user's NEW debug setting.
+    scene.debug_invisible={tools=tools,was_nil=previous==nil}
+    rawset(tools,"debug_invis",true)
+end
+local function restore_debug_invisible(current)
+    local lease=current and current.debug_invisible
+    if type(lease)~="table" or type(lease.was_nil)~="boolean" then return end
+    local tools=lease.tools
+    if type(tools)=="table" and rawget(tools,"debug_invis")==true then
+        if lease.was_nil then rawset(tools,"debug_invis",nil)
+        else rawset(tools,"debug_invis",false) end
+    end
+    -- A manual off during the scene is respected. A pre-existing on was never
+    -- acquired, so it is never switched off by this effect.
+    current.debug_invisible=nil
+end
+finish=function(reason,stale_ui)
+    local current=scene;local r=current and current.record or saved()
+    scene=nil;GUI=nil;service_save=nil
+    pcall(restore_debug_invisible,current)
+    if current and current.sound then pcall(function() current.sound:stop() end);current.sound=nil end
+    if current and current.menu and not stale_ui then pcall(function() current.menu:HideDialog() end) end
+    if current and current.registered then pcall(Unregister_UI,UI_NAME) end
+    -- The journal comes from THIS save. Do not restore a future scene over a
+    -- before save, access a destroyed HUD, or release a recycled object ID.
+    if r then
+        pcall(restore_actor,r)
+        if r.camera_owned then pcall(level.remove_cam_custom_position_direction);pcall(level.set_active_cam,r.camera) end
+        if r.hidden_hud then pcall(show_indicators,true) end -- native AF_GODMODE_RT, not persistent g_god
+        pcall(release,r.guitar,"guitar_a")
+        pcall(release,r.double,SECTION)
+    end
+    local s=storage();if s then s[SAVE]=nil end
+    if reason and reason~="complete" and reason~="cancelled" and reason~="load" then notice(reason) end
+end
+local function camera_update()
+    local r=scene.record;local target={x=r.pos.x,y=r.pos.y+0.85,z=r.pos.z}
+    local radius=3.8;local cp=math.cos(scene.pitch)
+    local desired={x=target.x+math.sin(scene.yaw)*radius*cp,
+        y=math.max(r.pos.y+0.35,target.y+math.sin(scene.pitch)*radius),z=target.z+math.cos(scene.yaw)*radius*cp}
+    local d=vector():set(desired.x-target.x,desired.y-target.y,desired.z-target.z)
+    local length=math.sqrt(d.x*d.x+d.y*d.y+d.z*d.z);d:mul(1/length)
+    -- One nearest-hit query per rendered frame, not up to 17 raycasts.
+    local result=rq_result()
+    if level.ray_pick(vec(target),d,length+0.15,rq_target.rqtStatic,result,a()) then
+        if not finite(result.range) or result.range<0.8 then error("guitar_camera_obstructed") end
+        local distance=math.min(length,result.range-0.2)
+        desired={x=target.x+d.x*distance,y=target.y+d.y*distance,z=target.z+d.z*distance}
+    end
+    local direction=vector():set(target.x-desired.x,target.y-desired.y,target.z-desired.z)
+    r.camera_owned=true
+    level.set_cam_custom_position_direction(vec(desired),vector():set(direction:getH(),direction:getP(),0),1,false,false)
+end
+local function on_mouse(dx,dy,disabled,flags)
+    if not scene or not raw_mouse or disabled or device():is_paused() or
+        scene.menu~=GUI or not scene.menu or not scene.menu:IsShown() or
+        type(flags)~="table" or flags.ret_value==true or not finite(dx) or not finite(dy) or dx==0 and dy==0 then return end
+    -- Read native relative movement BEFORE CDialogHolder converts it to a
+    -- desktop cursor position. A hidden/recentred OS cursor can stay at the
+    -- same coordinates while DirectInput still supplies real mouse deltas.
+    flags.ret_value=true
+    scene.yaw=(scene.yaw+dx*0.003)%(math.pi*2)
+    scene.pitch=math.max(-0.1,math.min(0.95,scene.pitch+dy*0.003))
+end
+local function ensure_menu()
+    if adb_guitar_orbit_menu then return end
+    class "adb_guitar_orbit_menu" (CUIScriptWnd)
+    function adb_guitar_orbit_menu:__init()
+        super();self:SetAutoDelete(false);self:SetWndRect(Frect():set(0,0,1024,768))
+        self:AllowMovement(false);self:AllowCursor(false);self:AllowCenterCursor(false)
+    end
+    function adb_guitar_orbit_menu:OnMouse(x,y,event)
+        -- Older engines without the raw callback keep the original UI path.
+        -- Never apply both paths to the same movement on supported engines.
+        if scene and scene.menu==self and not raw_mouse and event==ui_events.WINDOW_MOUSE_MOVE then
+            scene.yaw=scene.yaw+(x-512)*0.006
+            scene.pitch=math.max(-0.1,math.min(0.95,scene.pitch+(y-384)*0.006))
+            SetCursorPosition(vector2():set(512,384))
+        end
+        return true
+    end
+    function adb_guitar_orbit_menu:Update()
+        CUIScriptWnd.Update(self)
+        if not scene or scene.menu~=self or not scene.record.camera_owned or device():is_paused() then return end
+        -- CDialogHolder may call the top window twice in a frame. Camera input
+        -- runs at render frequency, independently of the bridge's 100 ms tick.
+        local frame=device().frame
+        if frame~=nil and scene.camera_frame==frame then return end
+        scene.camera_frame=frame
+        local ok,why=pcall(camera_update)
+        if not ok then finish(why) end
+    end
+    function adb_guitar_orbit_menu:OnKeyboard(dik,event)
+        if event==ui_events.WINDOW_KEY_PRESSED and (dik==DIK_keys.DIK_ESCAPE or dik==DIK_keys.DIK_F5 or dik==DIK_keys.DIK_F9) then
+            finish("cancelled")
+            if dik~=DIK_keys.DIK_ESCAPE then forward_key=dik end
+        end
+        return true
+    end
+    function adb_guitar_orbit_menu:Close() finish("cancelled") end
+end
+local function capture_control()
+    ensure_menu();scene.menu=adb_guitar_orbit_menu();GUI=scene.menu
+    scene.registered=true;Register_UI(UI_NAME,MODULE)
+    -- Native StartDialog/AllowMovement(false) calls CActor::StopAnyMove.
+    -- Clear residual physics velocity ONCE, before taking the spawn position.
+    -- Never teleport/freeze the actor on every update or rewrite its bones.
+    scene.menu:ShowDialog(false)
+    a():set_movement_speed(vector():set(0,0,0))
+    scene.record.hidden_hud=true;show_indicators(false)
+    acquire_debug_invisible()
+    if not raw_mouse then SetCursorPosition(vector2():set(512,384)) end
+end
+local function animate(npc,motion,stage)
+    npc:clear_animations();npc:add_animation(motion,false,false)
+    scene.stage=stage;scene.deadline=time_global()+30000
+end
+local function begin(npc)
+    local r=scene.record
+    if npc:character_community()~="trader" then error("guitar_double_community_mismatch") end
+    npc:invulnerable(true);npc:enable_vision(false);npc:movement_enabled(false)
+    npc:set_enable_movement_collision(false);npc:disable_talk()
+    -- No numeric inventory slots: Activate() asserts on an out-of-range slot,
+    -- and a native fatal assertion cannot be recovered by Lua pcall. Loadout
+    -- removal plus the stock no-item goal is sufficient for this scene prop.
+    npc:set_item(object.idle)
+    npc:set_visual_name(r.visual,false)
+    local actual=normalize_visual(npc:get_visual_name())
+    if actual~=normalize_visual(r.visual) then error("guitar_double_visual_mismatch") end
+    -- Native ChangeVisual reloads movement/animation managers. Apply the prop
+    -- constraints AFTER that reload, not only before it.
+    npc:invulnerable(true);npc:enable_vision(false);npc:movement_enabled(false)
+    npc:set_enable_movement_collision(false);npc:disable_talk()
+    for id,name in pairs(npc:list_bones(false)) do
+        if r.bones[name]~=nil and npc:bone_visible(id,false)~=r.bones[name] then
+            npc:set_bone_visible(id,r.bones[name],false,false)
+        end
+    end
+    prepare_double(server(r.double.id),r)
+    -- NEVER hide every actor bone: CKinematics computes its bounds from visible
+    -- bones; an empty set produces a huge radius and touches distant changers.
+    -- First-eye rendering plus the native custom camera hides the real body
+    -- (and first-person legs) without moving the actor or altering its bounds.
+    if not body_render_mode_safe() then error("guitar_actor_body_debug_enabled") end
+    r.camera_owned=true
+    level.set_active_cam(0)
+    camera_update()
+    animate(npc,MOTIONS[1],"sit")
+end
+local function execute(context)
+    if scene or saved() then return "deferred","guitar_scene_busy" end
+    local free,free_reason=ui_free()
+    if not free then return "deferred",free_reason or "guitar_waiting_for_free_actor" end
+    local r=context.options
+    if not r or not anomaly_donation_bridge_catalog.guitar_sound(r.song) then return "deferred","guitar_song_unavailable" end
+    -- Re-read immediately before spawn, without relying on a stale options
+    -- snapshot or a hard-coded faction ID from another installation.
+    r.trader=trader_profile()
+    if not r.trader then return "deferred","guitar_trader_community_unavailable" end
+    local s=storage();s[SAVE]=r
+    scene={record=r,stage="spawn",deadline=time_global()+10000,yaw=r.direction.x==0 and r.direction.z==0 and 0 or
+        vector():set(r.direction.x,r.direction.y,r.direction.z):getH(),pitch=0.24,last=time_global()}
+    local ok,why=pcall(function()
+        -- Preconditions and spawn can be separated by a moving frame. Capture
+        -- input first and anchor to the current actor, not the earlier snapshot.
+        capture_control()
+        r.pos=point(a():position());r.direction=point(a():direction())
+        scene.yaw=vec(r.direction):getH()
+        local object=alife_create(SECTION,vec(r.pos),a():level_vertex_id(),a():game_vertex_id())
+        if not object then error("guitar_double_spawn_failed") end
+        r.double={id=object.id,name=object:name()}
+        life():set_switch_online(object.id,false)
+        prepare_double(object,r)
+        clear_double_loadout(r)
+        life():set_switch_offline(object.id,false);life():set_switch_online(object.id,true)
+    end)
+    if not ok then finish(why);return "rejected","guitar_scene_setup_failed" end
+    return "executed","guitar_scene_started"
+end
+local function step(now)
+    if save_journal_pending then
+        save_journal_pending=false
+        local s=storage();if s then s[SAVE]=nil end
+    end
+    if recovering then
+        recovering=false;finish("load",true)
+    end
+    if forward_key then
+        local dik=forward_key;forward_key=nil
+        if type(level.press_action)=="function" then level.press_action(dik) end
+        return
+    end
+    for id,r in pairs(doubles) do
+        if not scene or not scene.record.double or scene.record.double.id~=id then
+            release(r,SECTION);doubles[id]=nil
+        end
+    end
+    if not scene then return end
+    local r=scene.record;local actor=a()
+    if not actor or not actor:alive() then finish("actor_unavailable");return end
+    if actor:get_visual_name()~=r.visual then finish("actor_model_changed");return end
+    if not body_render_mode_safe() then finish("guitar_actor_body_debug_enabled");return end
+    if device():is_paused() then scene.last=now;return end
+    local elapsed=math.max(0,now-scene.last);scene.last=now
+    local npc=online(r.double and r.double.id)
+    if scene.menu and not scene.menu:IsShown() then finish("cancelled");return end
+    local extra_items=clear_double_loadout(r)
+    if scene.stage=="spawn" then
+        if now>scene.deadline then error("guitar_double_online_timeout") end
+        if extra_items==0 and npc and owns(npc,r.double,SECTION,false) then begin(npc) end
+        return
+    end
+    if not owns(npc,r.double,SECTION,false) or not npc:alive() then error("guitar_double_missing") end
+    if math.abs(actor:position().x-r.pos.x)>0.5 or math.abs(actor:position().z-r.pos.z)>0.5 or math.abs(actor:position().y-r.pos.y)>0.5 then
+        finish("actor_moved");return
+    end
+    if scene.stage=="playing" then
+        scene.remaining=scene.remaining-elapsed
+        if scene.remaining<=0 or not scene.sound:playing() then
+            scene.sound:stop();scene.sound=nil;animate(npc,MOTIONS[5],"put_away");return
+        end
+        if npc:animation_count()==0 then npc:add_animation(MOTIONS[4],false,false) end
+        return
+    end
+    if now>scene.deadline then error("guitar_animation_timeout_"..scene.stage) end
+    if scene.stage=="attach" then
+        local item=online(r.guitar and r.guitar.id)
+        if item and owns(item,r.guitar,"guitar_a",false) then
+            item:enable_attachable_item(true);animate(npc,MOTIONS[3],"take_out")
+        end
+        return
+    end
+    if npc:animation_count()>0 then return end
+    if scene.stage=="sit" then animate(npc,MOTIONS[2],"reach_guitar")
+    elseif scene.stage=="reach_guitar" then
+        local guitar=alife_create_item("guitar_a",npc)
+        if not guitar then error("guitar_attachment_spawn_failed") end
+        r.guitar={id=guitar.id,name=guitar:name()};scene.stage="attach";scene.deadline=now+10000
+        prepare_guitar(guitar)
+    elseif scene.stage=="take_out" then
+        local path=anomaly_donation_bridge_catalog.guitar_sound(r.song)
+        if not path then error("guitar_song_unavailable") end
+        scene.sound=sound_object(path)
+        local duration=scene.sound:length()
+        if not finite(duration) or duration<100 or duration>1800000 then error("guitar_sound_duration_invalid") end
+        scene.sound:play_at_pos(npc,vec(r.pos),0,0)
+        scene.remaining=duration+250;scene.stage="playing";scene.last=now
+        npc:add_animation(MOTIONS[4],false,false)
+    elseif scene.stage=="put_away" then
+        release(r.guitar,"guitar_a");r.guitar=nil;animate(npc,MOTIONS[6],"unpack")
+    elseif scene.stage=="unpack" then animate(npc,MOTIONS[7],"stand")
+    elseif scene.stage=="stand" then finish("complete") end
+end
+local function update(now)
+    local ok,why=pcall(step,now or time_global())
+    if not ok then finish(why) end
+end
+local function on_load()
+    -- The old HUD has already been destroyed. Only stop Lua-owned audio and
+    -- unregister its name here; restore the LOADED journal on the next update.
+    if scene and scene.sound then pcall(function() scene.sound:stop() end) end
+    -- debug_invis is a Lua-global debug flag, not actor state from a save.
+    -- Release our OLD live lease before dropping it, even when loading a
+    -- before-save with no guitar journal; actor/camera recovery still uses
+    -- only the journal from the newly LOADED save on the next update.
+    if scene then pcall(restore_debug_invisible,scene) end
+    scene=nil;GUI=nil;forward_key=nil;save_journal_pending=false;service_save=nil;pcall(Unregister_UI,UI_NAME);recovering=true
+end
+local function effect_save(stage,name,success)
+    if stage=="before" and scene then
+        if service_save then return false end
+        -- Only the runtime's explicit save transaction owns this exemption.
+        -- Never recognize saves by filename/prefix or leave an exemption for
+        -- a future unrelated autosave. Both supported engine generations run
+        -- single-player console saves inside exec_console_cmd.
+        service_save={name=name,owner=scene,record=scene.record}
+    elseif stage=="after" and service_save and service_save.name==name then
+        local request=service_save;service_save=nil
+        if scene~=request.owner or scene.record~=request.record then return end
+        if success~=true then finish("guitar_service_save_failed");return end
+        -- save_state temporarily replaced the live marshal entry with a small
+        -- recovery marker. Serialization has finished: retain the exact scene,
+        -- prop, animation, audio and input owner rather than restarting them.
+        if request.observed then
+            local s=storage();if s then s[SAVE]=request.record end
+        end
+    end
+end
+local function on_save(data)
+    local r=scene and scene.record or saved()
+    if not r then return end
+    -- This callback also runs for console saves and autosaves, after client
+    -- packets but BEFORE native objects().save(). GE_DESTROY is asynchronous;
+    -- the private props already have flCanSave cleared, so they cannot enter
+    -- the save even if their destruction has not been processed yet.
+    local request=service_save
+    local preserve=scene and request and request.owner==scene and request.record==r and type(data)=="table"
+    if preserve then request.observed=true else finish("cancelled") end
+    if type(data)=="table" then
+        -- Only an idempotent camera/HUD recovery marker, never a clone, item,
+        -- animation, input lock or debug flag. ClientSave ran before this hook.
+        data[SAVE]={actor_bones_untouched=true,camera=r.camera,
+            camera_owned=r.camera_owned,hidden_hud=r.hidden_hud}
+        save_journal_pending=not preserve
+    end
+end
+
+class "adb_guitar_double_binder" (object_binder)
+function adb_guitar_double_binder:__init(obj) super(obj) end
+function adb_guitar_double_binder:on_animation() end
+function adb_guitar_double_binder:net_spawn(s)
+    if not object_binder.net_spawn(self,s) then return false end
+    -- This actor is a disposable scene prop, not a simulation squad/member:
+    -- no stock motivator, loot generation, smart terrain or story callbacks.
+    self.object:invulnerable(true);self.object:enable_vision(false);self.object:movement_enabled(false)
+    self.object:set_enable_movement_collision(false);self.object:disable_talk()
+    -- Native need_update() keeps script animations advancing outside the
+    -- actor's original view frustum only when this callback is installed.
+    self.object:set_callback(callback.script_animation,self.on_animation,self)
+    doubles[self.object:id()]={id=self.object:id(),name=self.object:name()}
+    return true
+end
+function adb_guitar_double_binder:net_save_relevant() return false end
+function adb_guitar_double_binder:net_destroy()
+    self.object:set_callback(callback.script_animation,nil)
+    doubles[self.object:id()]=nil;object_binder.net_destroy(self)
+end
+function bind(obj) obj:bind_object(adb_guitar_double_binder(obj)) end
+function on_game_start()
+    if registered then return end;registered=true
+    raw_mouse=level_input~=nil and type(level_input.on_mouse_move)=="function"
+    if raw_mouse then RegisterScriptCallback("on_before_mouse_move",on_mouse) end
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=function() return not not supported() end,
+        is_blocking=function() return scene~=nil end,
+        can_execute=can_execute,execute=execute,update=update,on_game_load=on_load,
+        on_effect_save=effect_save,
+        on_level_changing=function() finish("cancelled") end})
+    RegisterScriptCallback("on_before_load_input",function() finish("cancelled") end)
+    RegisterScriptCallback("on_before_save_input",function() finish("cancelled") end)
+    RegisterScriptCallback("save_state",on_save)
+    RegisterScriptCallback("GUI_on_show",function(name) if scene and name~=UI_NAME then finish("cancelled") end end)
+    RegisterScriptCallback("main_menu_on_quit",function() finish("cancelled") end)
+    RegisterScriptCallback("actor_on_before_death",function() finish("cancelled") end)
+    RegisterScriptCallback("actor_on_before_hit",function(_,_,flags)
+        if scene and scene.record.hidden_hud and type(flags)=="table" then flags.ret_value=false end
+    end)
+end

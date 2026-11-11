@@ -1,0 +1,700 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "damage_equipment",
+  "displayName": "Повредить экипировку",
+  "description": "Уменьшает текущее состояние брони, шлема или обоих предметов на выбранный процент.",
+  "category": "inventory",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "target",
+      "displayName": "Что повредить",
+      "kind": "Choice",
+      "minimum": null,
+      "maximum": null,
+      "options": [
+        "outfit",
+        "helmet",
+        "both"
+      ],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "outfit",
+      "catalogKind": null,
+      "minimumSelections": 0
+    },
+    {
+      "key": "percent",
+      "displayName": "Уменьшить состояние на, %",
+      "kind": "Percent",
+      "minimum": 1,
+      "maximum": 100,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "25",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "target": "outfit",
+    "percent": "25"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local GEAR_SLOTS = {
+	outfit = { { name = "outfit", slot = 7 } },
+	helmet = { { name = "helmet", slot = 12 } },
+	-- Remove the independent helmet first. Some outfits occupy/block the helmet
+	-- slot and refresh both equipment slots when the outfit leaves the actor.
+	both = { { name = "helmet", slot = 12 }, { name = "outfit", slot = 7 } }
+}
+local EATABLE_CLASSES = {
+	II_FOOD = true, S_FOOD = true, II_ANTIR = true,
+	II_MEDKI = true, II_BOTTL = true, II_BANDG = true
+}
+local RANDOM_WEAPON_SECTION = "__adb_random_weapon__"
+local PDA_RECEIVED = string.char(207, 238, 235, 243, 247, 229, 237, 238, 58, 32)
+local PDA_MULTIPLY = string.char(245)
+local STATE_KEY = "__anomaly_donation_bridge_inventory_actions_v1"
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { pending_equip = nil }
+	rawset(_G, STATE_KEY, state)
+end
+
+local function register(action_id, can_execute, execute, is_supported, update,
+	on_game_load, on_level_changing)
+	return anomaly_donation_bridge_registry.register_builtin(action_id, {
+		can_execute = can_execute, execute = execute, is_supported = is_supported,
+		update = update, on_game_load = on_game_load,
+		on_level_changing = on_level_changing,
+		support_probe_is_hint = true
+	})
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function object_has_any_method(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if ok and type(method) == "function" then return true end
+	end
+	return false
+end
+
+local function drop_item_physically(actor, item)
+	if actor == nil or item == nil then return false end
+	local method_ok, teleport_method = pcall(function()
+		return actor.drop_item_and_teleport
+	end)
+	if method_ok and type(teleport_method) == "function" then
+		local position_ok, position = pcall(function() return actor:position() end)
+		if not position_ok or position == nil then return false end
+		return pcall(function() actor:drop_item_and_teleport(item, position) end)
+	end
+	local drop_ok, drop_method = pcall(function() return actor.drop_item end)
+	if not drop_ok or type(drop_method) ~= "function" then return false end
+	return pcall(function() actor:drop_item(item) end)
+end
+
+local function catalog_api_supported()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+local function alife_api_supported(methods)
+	if type(alife) ~= "function" then return false end
+	local ok, life = pcall(alife)
+	return ok and object_has_methods(life, methods)
+end
+
+local function pda_tip(actor, text)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function pda_item_name(display_name, section)
+	local name = anomaly_donation_bridge_common.trim(display_name)
+	name = anomaly_donation_bridge_common.game_text_cp1251(name)
+	if name == nil or name == "" then name = tostring(section or "") end
+	name = name:gsub("[\r\n\t]", " "):gsub("%s%s+", " ")
+	return name:sub(1, 160)
+end
+
+local function parse_item_rows(value)
+	value = tostring(value or "")
+	if value == "" or #value > 4000 or value:sub(1, 1) == ";" or
+		value:sub(-1) == ";" or value:find(";;", 1, true) then
+		return nil, "item_bundle_invalid"
+	end
+	local rows, total = {}, 0
+	for encoded in value:gmatch("[^;]+") do
+		local section, count_text = encoded:match("^([^%*]+)%*(%d+)$")
+		local count = tonumber(count_text)
+		if section == nil or not anomaly_donation_bridge_common.valid_section_id(section) or
+			count == nil or count < 1 or count > 50 or count ~= math.floor(count) then
+			return nil, "item_bundle_invalid"
+		end
+		total = total + count
+		if total > 500 or #rows >= 256 then return nil, "item_bundle_too_large" end
+		rows[#rows + 1] = { requested_section = section, count = count }
+	end
+	return #rows > 0 and rows or nil, #rows > 0 and nil or "item_bundle_invalid"
+end
+
+local function spawn_items_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		items = true, section_id = true, count = true, catalog_revision = true,
+		weapon_options = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local requested_rows, rows_error
+	if params.items ~= nil then
+		requested_rows, rows_error = parse_item_rows(params.items)
+	else
+		local count, count_error = anomaly_donation_bridge_common.parse_integer(
+			params.count, 1, 1, 50, "item_count_invalid")
+		if count == nil then return false, "rejected", count_error end
+		requested_rows = { { requested_section = tostring(params.section_id or ""),
+			count = count } }
+	end
+	if requested_rows == nil then return false, "rejected", rows_error end
+	local rows, first_weapon = {}, nil
+	for _, requested in ipairs(requested_rows) do
+		local entry, catalog_error
+		if requested.requested_section == RANDOM_WEAPON_SECTION then
+			entry, catalog_error = anomaly_donation_bridge_catalog.random_available_weapon()
+		else
+			entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+				catalog_revision = params.catalog_revision,
+				section_id = requested.requested_section
+			}, "section_id", "item")
+		end
+		if entry == nil then return false, "rejected", catalog_error end
+		local is_weapon = anomaly_donation_bridge_catalog.is_weapon(entry.section_id)
+		rows[#rows + 1] = {
+			section = entry.section_id, count = requested.count,
+			display_name = entry.display_name, is_weapon = is_weapon,
+			is_random_weapon = requested.requested_section == RANDOM_WEAPON_SECTION
+		}
+		if first_weapon == nil and is_weapon then first_weapon = #rows end
+	end
+	local weapon_options = tostring(params.weapon_options or "")
+	if weapon_options ~= "" and weapon_options ~= "equip" then
+		return false, "rejected", "weapon_options_invalid"
+	end
+	local equip_weapon = weapon_options == "equip"
+	if equip_weapon and first_weapon == nil then
+		return false, "rejected", "equip_requires_weapon"
+	end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if type(alife_create_item) ~= "function" or alife == nil or alife() == nil then
+		return false, "deferred", "alife_unavailable"
+	end
+	context.options = { rows = rows, equip_weapon = equip_weapon,
+		first_weapon = first_weapon }
+	return true
+end
+
+local function server_object_id(object)
+	local ok, object_id = pcall(function() return tonumber(object.id) end)
+	if ok and object_id ~= nil then return object_id end
+	ok, object_id = pcall(function() return tonumber(object:id()) end)
+	return ok and object_id or nil
+end
+
+local function spawn_items_execute(context)
+	local created, first_weapon_object, total = {}, nil, 0
+	for row_index, row in ipairs(context.options.rows) do
+		if not anomaly_donation_bridge_catalog.is_available(row.section, "item") then
+			return "rejected", "catalog_selection_stale_or_quarantined"
+		end
+		for _ = 1, row.count do
+			local ok, object = pcall(function()
+				return alife_create_item(row.section, context.actor)
+			end)
+			if not ok then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "item_spawn_failed_rolled_back" or
+					"item_spawn_failed_state_unknown"
+			end
+			if object == nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "item_spawn_failed_rolled_back" or
+					"item_spawn_failed_rollback_incomplete"
+			end
+			created[#created + 1] = object
+			total = total + 1
+			if row_index == context.options.first_weapon and first_weapon_object == nil then
+				first_weapon_object = object
+			end
+		end
+	end
+	if context.options.equip_weapon then
+		local object_id = server_object_id(first_weapon_object)
+		if object_id == nil then
+			local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+			return rolled_back and "rejected" or "uncertain",
+				rolled_back and "weapon_spawn_id_missing_rolled_back" or
+				"weapon_spawn_id_missing_rollback_incomplete"
+		end
+		state.pending_equip = {
+			object_id = object_id,
+			section = context.options.rows[context.options.first_weapon].section,
+			expires_at = (tonumber(context.now) or (time_global and time_global() or 0)) + 5000
+		}
+	end
+	local notified = true
+	for _, row in ipairs(context.options.rows) do
+		local message = PDA_RECEIVED .. '"' ..
+			pda_item_name(row.display_name, row.section) ..
+			'" ' .. PDA_MULTIPLY .. tostring(row.count)
+		if not pda_tip(context.actor, message) then notified = false end
+	end
+	return "executed", "spawned_item_groups_" .. tostring(#context.options.rows) ..
+		"_total_" .. tostring(total) ..
+		(context.options.equip_weapon and "_equip_pending" or "") ..
+		(notified and "" or "_notification_unavailable")
+end
+
+local function spawn_items_update(now)
+	local pending = state.pending_equip
+	if type(pending) ~= "table" then return end
+	if now > tonumber(pending.expires_at or 0) then
+		state.pending_equip = nil
+		return
+	end
+	if db == nil or db.actor == nil or level == nil or
+		type(level.object_by_id) ~= "function" then return end
+	local ok, equipped = pcall(function()
+		local item = level.object_by_id(pending.object_id)
+		if item == nil or item:section() ~= pending.section then return false end
+		db.actor:make_item_active(item)
+		return true
+	end)
+	if ok and equipped then state.pending_equip = nil end
+end
+
+local function clear_pending_equip()
+	state.pending_equip = nil
+end
+
+local function parse_target(params, with_percent)
+	local allowed = with_percent and { target = true, percent = true } or { target = true }
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, allowed)
+	if not valid then return nil, nil, error_code end
+	local target = tostring(params.target or "both"):lower()
+	if GEAR_SLOTS[target] == nil then return nil, nil, "gear_target_invalid" end
+	if not with_percent then return target end
+	local percent, percent_error = anomaly_donation_bridge_common.parse_number(
+		params.percent, 25, 1, 100, "gear_damage_percent_invalid")
+	if percent == nil then return nil, nil, percent_error end
+	return target, percent
+end
+
+local function gear_items(actor, target)
+	if actor == nil then return nil, "actor_unavailable" end
+	local result = {}
+	for _, requested in ipairs(GEAR_SLOTS[target]) do
+		local ok, item = pcall(function() return actor:item_in_slot(requested.slot) end)
+		if not ok then return nil, "equipped_gear_state_unavailable" end
+		if item == nil then
+			if target ~= "both" then return nil, "removable_gear_required" end
+		elseif anomaly_donation_bridge_common.protected_object(item) then
+			if target ~= "both" then return nil, "equipped_gear_protected" end
+		else
+			local id_ok, item_id = pcall(function() return tonumber(item:id()) end)
+			local section_ok, section = pcall(function() return item:section() end)
+			if not id_ok or item_id == nil or not section_ok then
+				return nil, "equipped_gear_identity_unavailable"
+			end
+			result[#result + 1] = {
+				item = item, item_id = item_id, section = section,
+				slot = requested.slot, name = requested.name
+			}
+		end
+	end
+	if #result == 0 then return nil, "removable_gear_required" end
+	return result
+end
+
+local function slot_has_expected_item(actor, entry)
+	local ok, current_id, current_section = pcall(function()
+		local current = actor:item_in_slot(entry.slot)
+		if current == nil then return nil, nil end
+		return tonumber(current:id()), current:section()
+	end)
+	return ok and current_id == entry.item_id and current_section == entry.section
+end
+
+local function damage_gear_can(context, params)
+	local target, percent, parse_error = parse_target(params, true)
+	if target == nil then return false, "rejected", parse_error end
+	local items, item_error = gear_items(context.actor, target)
+	if items == nil then return false, "rejected", item_error end
+	for _, entry in ipairs(items) do
+		local ok, condition = pcall(function() return entry.item:condition() end)
+		condition = tonumber(condition)
+		if not ok or condition == nil or condition ~= condition then
+			return false, "rejected", "gear_condition_unavailable"
+		end
+		if condition < 0 or condition > 1 then
+			return false, "rejected", "gear_condition_scale_unsupported"
+		end
+		entry.before = condition
+		entry.after = math.max(0, entry.before - percent / 100)
+	end
+	context.options = { target = target, percent = percent, items = items }
+	return true
+end
+
+local function damage_gear_execute(context)
+	for _, entry in ipairs(context.options.items) do
+		if not slot_has_expected_item(context.actor, entry) then
+			return "rejected", "equipped_gear_changed"
+		end
+	end
+	local changed = 0
+	for _, entry in ipairs(context.options.items) do
+		local ok = pcall(function() entry.item:set_condition(entry.after) end)
+		if not ok then return changed > 0 and "uncertain" or "rejected", "gear_condition_change_failed" end
+		changed = changed + 1
+		local read_ok, actual = pcall(function() return entry.item:condition() end)
+		actual = tonumber(actual)
+		if not read_ok or actual == nil or math.abs(actual - entry.after) > 0.005 then
+			return "uncertain", "gear_condition_result_uncertain"
+		end
+	end
+	return "executed", "equipment_damaged_" .. context.options.target
+end
+
+local function removable_gear_items(actor, target)
+	if actor == nil then return nil, "actor_unavailable" end
+	local result = {}
+	for _, requested in ipairs(GEAR_SLOTS[target]) do
+		local ok, item = pcall(function() return actor:item_in_slot(requested.slot) end)
+		if not ok then return nil, "equipped_gear_state_unavailable" end
+		if item ~= nil then
+			if anomaly_donation_bridge_common.protected_object(item) then
+				return nil, "equipped_gear_protected"
+			end
+			local id_ok, item_id = pcall(function() return tonumber(item:id()) end)
+			local section_ok, section = pcall(function() return item:section() end)
+			if not id_ok or item_id == nil or not section_ok then
+				return nil, "equipped_gear_identity_unavailable"
+			end
+			result[#result + 1] = { item = item, item_id = item_id,
+				section = section, slot = requested.slot }
+		elseif target ~= "both" then
+			return nil, "removable_gear_required"
+		end
+	end
+	if #result == 0 then return nil, "removable_gear_required" end
+	return result
+end
+
+local function remove_gear_can(context, params)
+	local target, _, parse_error = parse_target(params, false)
+	if target == nil then return false, "rejected", parse_error end
+	local items, item_error = removable_gear_items(context.actor, target)
+	if items == nil then return false, "rejected", item_error end
+	context.options = { target = target, items = items }
+	return true
+end
+
+local function remove_gear_execute(context)
+	for _, entry in ipairs(context.options.items) do
+		if not slot_has_expected_item(context.actor, entry) then
+			return "rejected", "equipped_gear_changed"
+		end
+	end
+	local moved = 0
+	for _, entry in ipairs(context.options.items) do
+		local ok = pcall(function() context.actor:move_to_ruck(entry.item) end)
+		local slot_clear = not slot_has_expected_item(context.actor, entry)
+		if ok and slot_clear then moved = moved + 1 end
+	end
+	if moved ~= #context.options.items then
+		return moved > 0 and "uncertain" or "rejected",
+			moved > 0 and "equipment_remove_partial" or "equipment_remove_failed"
+	end
+	return "executed", "equipment_removed_to_inventory_" .. context.options.target
+end
+
+local function collect_random_items(actor)
+	local life_ok, simulator = pcall(function()
+		return type(alife) == "function" and alife() or nil
+	end)
+	if not life_ok or simulator == nil then return nil, "alife_unavailable" end
+	local result, seen = {}, {}
+	local ok = pcall(function()
+		-- iterate_ruck is the only engine-independent way to prove that an item
+		-- is neither equipped nor on the belt.  Scanning guessed slot numbers is
+		-- unsafe: LAST_SLOT differs between vanilla, xray-monolith and IX-Ray.
+		actor:iterate_ruck(function(_, item)
+			if item == nil then return end
+			local id_ok, item_id = pcall(function() return item:id() end)
+			local section_ok, section = pcall(function() return item:section() end)
+			local server_ok, server_object = pcall(function()
+				return id_ok and item_id ~= nil and simulator:object(item_id, true) or nil
+			end)
+			if id_ok and item_id ~= nil and not seen[item_id] and section_ok and
+				server_ok and server_object ~= nil and
+				not anomaly_donation_bridge_common.protected_object(item) and
+				anomaly_donation_bridge_catalog.is_available(section, "item") then
+				seen[item_id] = true
+				result[#result + 1] = item
+			end
+		end, actor)
+	end)
+	if not ok then return nil, "ruck_enumeration_unavailable" end
+	return result
+end
+
+local function drop_random_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, { count = true })
+	if not valid then return false, "rejected", error_code end
+	local count, count_error = anomaly_donation_bridge_common.parse_integer(
+		params.count, 1, 1, 10, "random_item_count_invalid")
+	if count == nil then return false, "rejected", count_error end
+	local candidates, collect_error = collect_random_items(context.actor)
+	if candidates == nil then return false, "deferred", collect_error end
+	if #candidates == 0 then return false, "rejected", "random_item_pool_empty" end
+	for index = #candidates, 2, -1 do
+		local other = math.random(index)
+		candidates[index], candidates[other] = candidates[other], candidates[index]
+	end
+	local selected = {}
+	for index = 1, math.min(count, #candidates) do selected[index] = candidates[index] end
+	context.options = { selected = selected, requested = count }
+	return true
+end
+
+local function drop_random_execute(context)
+	local available, collect_error = collect_random_items(context.actor)
+	if available == nil then return "deferred", collect_error end
+	local available_ids = {}
+	for _, item in ipairs(available) do
+		local id_ok, item_id = pcall(function() return item:id() end)
+		if id_ok and item_id ~= nil then available_ids[item_id] = true end
+	end
+	local dropped, selected_ids = 0, {}
+	for _, item in ipairs(context.options.selected) do
+		local id_ok, item_id = pcall(function() return item:id() end)
+		if not id_ok or item_id == nil or selected_ids[item_id] or
+			not available_ids[item_id] then
+			return dropped > 0 and "uncertain" or "rejected", "random_item_pool_changed"
+		end
+		selected_ids[item_id] = true
+		local ok = drop_item_physically(context.actor, item)
+		if not ok then return dropped > 0 and "uncertain" or "rejected", "random_item_drop_failed" end
+		dropped = dropped + 1
+	end
+	return "executed", "random_items_dropped_" .. tostring(dropped)
+end
+
+local function quick_slot_sections()
+	if type(get_console) ~= "function" then return nil end
+	local ok, console = pcall(get_console)
+	if not ok or not object_has_methods(console, { "get_string" }) then return nil end
+	local sections = {}
+	for slot = 0, 3 do
+		local read_ok, section = pcall(function()
+			return console:get_string("slot_" .. tostring(slot))
+		end)
+		if not read_ok then return nil end
+		section = anomaly_donation_bridge_common.trim(section)
+		if section ~= "" and section ~= "(NULL)" and
+			anomaly_donation_bridge_common.valid_section_id(section) then
+			sections[section] = true
+		end
+	end
+	return sections
+end
+
+local function consumable_section(section)
+	if not anomaly_donation_bridge_common.valid_section_id(section) then return false end
+	local ini = system_ini and system_ini() or nil
+	local class_name = anomaly_donation_bridge_common.ini_string(ini, section, "class")
+	return class_name ~= nil and EATABLE_CLASSES[class_name:upper()] == true
+end
+
+local function collect_consumables(actor, include_hotbar, include_inventory, hotbar)
+	local result, seen = {}, {}
+	local ok = pcall(function()
+		actor:iterate_inventory(function(_, item)
+			if item == nil then return end
+			local id_ok, item_id = pcall(function() return item:id() end)
+			local section_ok, section = pcall(function() return item:section() end)
+			local assigned = section_ok and hotbar[section] == true
+			if id_ok and item_id ~= nil and not seen[item_id] and section_ok and
+				consumable_section(section) and
+				not anomaly_donation_bridge_common.protected_object(item) and
+				((assigned and include_hotbar) or
+					(not assigned and include_inventory)) then
+				seen[item_id] = true
+				result[#result + 1] = item
+			end
+		end, actor)
+	end)
+	return ok and result or nil
+end
+
+local function remaining_uses(item)
+	local ok, value = pcall(function() return item:get_remaining_uses() end)
+	value = tonumber(value)
+	if not ok or value == nil or value ~= value or value < 0 then return nil end
+	return value
+end
+
+local function use_consumable_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params,
+		{ sources = true })
+	if not valid then return false, "rejected", error_code end
+	local sources, parse_error = anomaly_donation_bridge_common.split_csv(params.sources)
+	if sources == nil then return false, "rejected", parse_error end
+	local include_hotbar, include_inventory = false, false
+	for _, source in ipairs(sources) do
+		if source == "hotbar" then include_hotbar = true
+		elseif source == "inventory" then include_inventory = true
+		else return false, "rejected", "consumable_source_invalid" end
+	end
+	local hotbar = quick_slot_sections()
+	if hotbar == nil then return false, "rejected", "quick_slot_api_unavailable" end
+	local candidates = collect_consumables(context.actor, include_hotbar,
+		include_inventory, hotbar)
+	if candidates == nil then
+		return false, "deferred", "consumable_inventory_enumeration_unavailable"
+	end
+	if #candidates == 0 then return false, "rejected", "consumable_pool_empty" end
+	local item = candidates[math.random(#candidates)]
+	local id_ok, item_id = pcall(function() return item:id() end)
+	local section_ok, section = pcall(function() return item:section() end)
+	if not id_ok or item_id == nil or not section_ok then
+		return false, "rejected", "consumable_selection_invalid"
+	end
+	context.options = {
+		item = item, item_id = item_id, section = section,
+		before_uses = remaining_uses(item)
+	}
+	return true
+end
+
+local function use_consumable_execute(context)
+	local options = context.options
+	local current_id_ok, current_id = pcall(function() return options.item:id() end)
+	local current_section_ok, current_section = pcall(function()
+		return options.item:section()
+	end)
+	if not current_id_ok or current_id ~= options.item_id or not current_section_ok or
+		current_section ~= options.section or not consumable_section(current_section) or
+		anomaly_donation_bridge_common.protected_object(options.item) then
+		return "rejected", "consumable_selection_changed"
+	end
+	-- CInventory__eat is a script-side interception hook supplied by some
+	-- animation/mod packs, but it is not present in every stock Anomaly build.
+	-- Honour it when available and otherwise use the native actor:eat API.
+	if type(CInventory__eat) == "function" then
+		local hook_ok, allowed = pcall(CInventory__eat, options.item)
+		if not hook_ok then return "rejected", "consumable_preuse_check_failed" end
+		if allowed ~= true then
+			-- A hook may consume the item later after deliberately vetoing the
+			-- immediate engine call, so the terminal state is genuinely unknown.
+			return "uncertain", "consumable_use_intercepted_state_unknown"
+		end
+	end
+	local use_ok = pcall(function() context.actor:eat(options.item) end)
+	if not use_ok then return "uncertain", "consumable_use_failed_state_unknown" end
+	local found, after_uses = false, nil
+	local verify_ok = pcall(function()
+		context.actor:iterate_inventory(function(_, item)
+			if item ~= nil and item:id() == options.item_id then
+				found = true
+				after_uses = remaining_uses(item)
+			end
+		end, context.actor)
+	end)
+	if not verify_ok then return "uncertain", "consumable_result_unavailable" end
+	if not found or (options.before_uses ~= nil and after_uses ~= nil and
+		after_uses < options.before_uses) then
+		return "executed", "consumable_used_" .. options.section
+	end
+	return "uncertain", "consumable_result_not_confirmed"
+end
+
+local function spawn_items_supported(context)
+	local supported = catalog_api_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "position", "level_vertex_id", "game_vertex_id", "id", "make_item_active" }) and
+		type(alife_create_item) == "function" and alife_api_supported({ "release" })
+	return supported, supported and nil or "item_spawn_api_unsupported"
+end
+
+local function damage_gear_supported(context)
+	local supported = object_has_methods(actor_for_probe(context), { "item_in_slot" }) and
+		type(get_object_story_id) == "function"
+	return supported, supported and nil or "gear_condition_api_unsupported"
+end
+
+local function remove_gear_supported(context)
+	local supported = object_has_methods(actor_for_probe(context),
+		{ "item_in_slot", "move_to_ruck" }) and
+		type(get_object_story_id) == "function"
+	return supported, supported and nil or "equipment_remove_api_unsupported"
+end
+
+local function drop_random_supported(context)
+	local actor = actor_for_probe(context)
+	local supported = catalog_api_supported() and
+		object_has_methods(actor, { "iterate_ruck" }) and
+		object_has_any_method(actor, { "drop_item_and_teleport", "drop_item" }) and
+		alife_api_supported({ "object" }) and
+		type(get_object_story_id) == "function"
+	return supported, supported and nil or "random_inventory_api_unsupported"
+end
+
+local function use_consumable_supported(context)
+	local actor = actor_for_probe(context)
+	local console_ok, console = pcall(function() return get_console() end)
+	local supported = type(system_ini) == "function" and
+		type(get_console) == "function" and
+		console_ok and object_has_methods(console, { "get_string" }) and
+		object_has_methods(actor, { "eat", "iterate_inventory" }) and
+		type(get_object_story_id) == "function"
+	return supported, supported and nil or "consumable_use_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = register("damage_equipment", damage_gear_can, damage_gear_execute,
+		damage_gear_supported)
+	if not ok and type(printf) == "function" then
+		printf("[ADB] damage_equipment registration failed: %s", tostring(reason))
+	end
+end

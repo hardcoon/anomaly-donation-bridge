@@ -1,0 +1,170 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"kill_nearby_npcs",
+  "displayName":"Убить ближайших NPC",
+  "description":"Убивает всех живых NPC в заданном радиусе от игрока. Важные NPC и мутанты защищены, пока не разрешены отдельно.",
+  "category":"world",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"radius_meters","displayName":"Радиус от игрока, м","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"25"},
+    {"key":"kill_important_npcs","displayName":"Убивать важных NPC","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"kill_mutants","displayName":"Убивать мутантов","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"only_enemies","displayName":"Убивать только врагов","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters":{"radius_meters":"25","kill_important_npcs":"false","kill_mutants":"false","only_enemies":"false"}
+}
+ADB_PRESET_END]]
+
+local function parse_checkbox(value, key)
+    local text = tostring(value == nil and "false" or value):lower()
+    if text == "true" then return true end
+    if text == "false" then return false end
+    return nil, key .. "_invalid"
+end
+
+local function important_npc(npc)
+    -- A failed story-id probe is treated as protected, never as an ordinary NPC.
+    if type(get_object_story_id) ~= "function" then return true end
+    local id_ok, id = pcall(function() return npc:id() end)
+    if not id_ok or type(id) ~= "number" then return true end
+    local story_ok, story = pcall(function() return get_object_story_id(id) end)
+    if not story_ok or anomaly_donation_bridge_common.meaningful_story_id(story) then
+        return true
+    end
+    local section_ok, section = pcall(function() return npc:section() end)
+    if not section_ok or not anomaly_donation_bridge_common.valid_section_id(section) then
+        return true
+    end
+    local ini_ok, ini = pcall(function() return system_ini() end)
+    if not ini_ok or ini == nil then return true end
+    if anomaly_donation_bridge_common.meaningful_story_id(
+        anomaly_donation_bridge_common.ini_string(ini, section, "story_id")) then
+        return true
+    end
+    if axr_companions ~= nil and type(axr_companions.non_task_companions) == "table" and
+        axr_companions.non_task_companions[id] ~= nil then return true end
+    if axr_companions ~= nil and type(axr_companions.companion_squads) == "table" and
+        type(get_object_squad) == "function" then
+        local squad_ok, squad = pcall(function() return get_object_squad(npc) end)
+        if not squad_ok then return true end
+        if squad ~= nil and axr_companions.companion_squads[squad.id] ~= nil then
+            return true
+        end
+    end
+    return false
+end
+
+local function target_kind(npc)
+    if type(IsStalker) ~= "function" or type(IsMonster) ~= "function" then return nil end
+    local ok, is_stalker, is_monster = pcall(function()
+        return IsStalker(npc), IsMonster(npc)
+    end)
+    if not ok then return nil end
+    if is_stalker then return "npc" end
+    if is_monster then return "mutant" end
+    return nil
+end
+
+local function eligible(npc, actor, origin, options)
+    if npc == nil then return false end
+    local ids_ok, npc_id, actor_id = pcall(function()
+        return npc:id(), actor:id()
+    end)
+    if not ids_ok or type(npc_id) ~= "number" or
+        type(actor_id) ~= "number" or npc_id == actor_id then return false end
+    local kind = target_kind(npc)
+    if kind == nil or (kind == "mutant" and not options.kill_mutants) then return false end
+    local ok, alive, distance = pcall(function()
+        return npc:alive(), origin:distance_to_sqr(npc:position())
+    end)
+    if not ok or alive ~= true or type(distance) ~= "number" or
+        distance ~= distance or distance > options.radius * options.radius then return false end
+    if not options.kill_important_npcs and important_npc(npc) then return false end
+    if options.only_enemies then
+        if game_object == nil or game_object.enemy == nil then return false end
+        local relation_ok, relation = pcall(function() return npc:relation(actor) end)
+        if not relation_ok or relation ~= game_object.enemy then return false end
+    end
+    return true
+end
+
+local function collect_targets(actor, origin, options)
+    local targets = {}
+    if db == nil or type(db.storage) ~= "table" then return targets end
+    for _, stored in pairs(db.storage) do
+        local npc = type(stored) == "table" and stored.object or nil
+        if eligible(npc, actor, origin, options) then targets[#targets + 1] = npc end
+    end
+    return targets
+end
+
+local function can_execute(context, params)
+    local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+        radius_meters = true, kill_important_npcs = true, kill_mutants = true,
+        only_enemies = true
+    })
+    if not valid then return false, "rejected", reason end
+    local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+        params.radius_meters, 25, 1, 999, "kill_radius_invalid")
+    if radius == nil then return false, "rejected", radius_error end
+    local important, important_error = parse_checkbox(
+        params.kill_important_npcs, "kill_important_npcs")
+    if important == nil then return false, "rejected", important_error end
+    local mutants, mutants_error = parse_checkbox(params.kill_mutants, "kill_mutants")
+    if mutants == nil then return false, "rejected", mutants_error end
+    local enemies, enemies_error = parse_checkbox(params.only_enemies, "only_enemies")
+    if enemies == nil then return false, "rejected", enemies_error end
+    local actor = context.actor
+    if actor == nil then return false, "rejected", "actor_unavailable" end
+    local origin_ok, origin = pcall(function() return actor:position() end)
+    if not origin_ok or origin == nil then return false, "rejected", "actor_position_unavailable" end
+    context.options = {
+        radius = radius, kill_important_npcs = important,
+        kill_mutants = mutants, only_enemies = enemies
+    }
+    context.targets = collect_targets(actor, origin, context.options)
+    if #context.targets == 0 then return false, "rejected", "no_eligible_npcs_in_radius" end
+    return true
+end
+
+local function execute(context)
+    local actor = context.actor
+    local origin_ok, origin = pcall(function() return actor:position() end)
+    if not origin_ok or origin == nil then return "rejected", "actor_position_unavailable" end
+    local killed, failed = 0, 0
+    for _, npc in ipairs(context.targets or {}) do
+        if eligible(npc, actor, origin, context.options) then
+            -- The actor must not be credited with a scripted kill: doing so
+            -- provokes faction retaliation and changes the player's standing.
+            local kill_ok = pcall(function() npc:kill(npc) end)
+            local death_ok, alive = pcall(function() return npc:alive() end)
+            if kill_ok and death_ok and alive == false then
+                killed = killed + 1
+            else
+                failed = failed + 1
+            end
+        end
+    end
+    local details = "nearby_npcs_killed_" .. killed .. "_failed_" .. failed ..
+        "_radius_" .. context.options.radius .. "m"
+    if failed > 0 then return "uncertain", details end
+    if killed == 0 then return "rejected", "no_eligible_npcs_in_radius" end
+    return "executed", details
+end
+
+local function supported()
+    local ok = db ~= nil and type(db.storage) == "table" and
+        type(IsStalker) == "function" and type(IsMonster) == "function"
+    return ok, ok and nil or "online_npc_registry_unavailable"
+end
+
+function on_game_start()
+    local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+        "kill_nearby_npcs", {
+            can_execute = can_execute, execute = execute, is_supported = supported
+        })
+    if not ok and type(printf) == "function" then
+        printf("[ADB] kill_nearby_npcs registration failed: %s", tostring(reason))
+    end
+end

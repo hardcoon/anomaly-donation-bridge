@@ -1,0 +1,1228 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.donor_thief",
+  "displayName": "Данат-воришка",
+  "description": "Создаёт за спиной героя NPC его группировки. Герой сразу получает эффект удара с выбиванием оружия; вещи из рюкзака передаются воришке. Он убегает спринтом на указанную дистанцию, затем трусцой. Приблизьтесь к нему на 2 метра, чтобы он погиб и оставил украденное на теле.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"item_count","displayName":"Количество похищаемых предметов","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"99"},
+    {"key":"sprint_meters","displayName":"Дистанция спринта, м","kind":"Integer","minimum":1,"maximum":10000,"defaultValue":"200"}
+  ],
+  "parameters": {"item_count":"99","sprint_meters":"200"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.donor_thief"
+local STATE_KEY = "__anomaly_donation_bridge_donor_thief_v1"
+local SAVE_PREFIX = "adb_donor_thief_"
+local SAVE_SLOT_COUNT = 32
+local UPDATE_INTERVAL_MS = 100
+local PANIC_DIAGNOSTIC_MS = 3000
+local SPRINT_ACTION_ID = 19991031
+local ROBBERY_INPUT_LOCK_SECONDS = 5
+local ROBBERY_ENGINE_INPUT_LOCK_SECONDS = 3600
+local CATCH_DISTANCE = 2.0
+local ESCAPE_DISTANCE = 5.0
+local DEFAULT_SPRINT_METERS = 200
+local MAX_SPRINT_METERS = 10000
+local LEGACY_SPRINT_METERS = 100
+local ESCAPE_GRACE_MS = ROBBERY_INPUT_LOCK_SECONDS * 1000 + 1000
+local SPAWN_MIN_DISTANCE = 1.25
+local SPAWN_MAX_DISTANCE = 1.8
+local INVALID_LEVEL_VERTEX_ID = 4294967295
+local STOLEN_OWNER_KEY = "adb_donor_thief_owner_v1"
+
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { thieves = {}, next_update = 0, callbacks_registered = false }
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.thieves) ~= "table" then state.thieves = {} end
+if type(state.next_update) ~= "number" then state.next_update = 0 end
+if type(state.callbacks_registered) ~= "boolean" then state.callbacks_registered = false end
+if type(state.sprint_actions) ~= "table" then state.sprint_actions = {} end
+
+local function now_ms(value)
+	if type(value) == "number" then return value end
+	if type(time_global) == "function" then
+		local ok, current = pcall(time_global)
+		if ok and type(current) == "number" then return current end
+	end
+	return 0
+end
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function server_object(id)
+	local life = life_object()
+	if life == nil then return nil end
+	local ok, object = pcall(function() return life:object(id, true) end)
+	return ok and object or nil
+end
+
+local function client_object(id)
+	if level == nil or type(level.object_by_id) ~= "function" then return nil end
+	local ok, object = pcall(level.object_by_id, id)
+	return ok and object or nil
+end
+
+local function save_key(slot)
+	return SAVE_PREFIX .. string.format("%02d", slot)
+end
+
+local function load_record(slot)
+	local actor = db and db.actor or nil
+	if actor == nil or type(load_var) ~= "function" then return nil end
+	local ok, record = pcall(load_var, actor, save_key(slot))
+	return ok and type(record) == "table" and record or nil
+end
+
+local function save_record(slot, record)
+	local actor = db and db.actor or nil
+	if actor == nil or type(save_var) ~= "function" then return false end
+	return pcall(save_var, actor, save_key(slot), record)
+end
+
+local server_identity_matches
+local is_stalker
+
+local function cp1251(value)
+	if anomaly_donation_bridge_common ~= nil and
+		type(anomaly_donation_bridge_common.game_text_cp1251) == "function" then
+		local encoded = anomaly_donation_bridge_common.game_text_cp1251(value)
+		if type(encoded) == "string" and encoded ~= "" then return encoded end
+	end
+	return tostring(value or "")
+end
+
+local function task_record(id)
+	local actor = db and db.actor or nil
+	if actor == nil or type(load_var) ~= "function" then return nil end
+	local ok, record = pcall(load_var, actor, tostring(id or ""))
+	return ok and type(record) == "table" and record or nil
+end
+
+local function task_slot(id, record)
+	local slot = record and tonumber(record.slot) or nil
+	if slot == nil then
+		slot = tonumber(tostring(id or ""):match("^" .. SAVE_PREFIX .. "(%d+)$"))
+	end
+	return slot and slot >= 1 and slot <= SAVE_SLOT_COUNT and slot or nil
+end
+
+local function donor_thief_text(id, field)
+	local record = task_record(id)
+	if field == "title" then return cp1251("Вернуть украденное") end
+	local donor_name = record and tostring(record.donor_name or "") or ""
+	if donor_name == "" then donor_name = cp1251("Воришка") end
+	return cp1251("Подлый ") .. donor_name ..
+		cp1251(" меня обокрал! Нужно догнать и вернуть.")
+end
+
+local function donor_thief_target(id)
+	local record = task_record(id)
+	return record and tonumber(record.target_id) or nil
+end
+
+local function donor_thief_status(_, id)
+	local record = task_record(id)
+	if record == nil or record.invalid == true then return "fail" end
+	if record.dead == true or record.phase == "dead" then return "complete" end
+	local target_id = tonumber(record.target_id)
+	local server = target_id and server_object(target_id) or nil
+	if server == nil or not server_identity_matches(server, record) or
+		not is_stalker(server, true) then
+		return "fail"
+	end
+	local alive_ok, alive = pcall(function() return server:alive() end)
+	if alive_ok and alive == false then
+		record.phase, record.dead = "dead", true
+		local slot = task_slot(id, record)
+		if slot ~= nil then save_record(slot, record) end
+		return "complete"
+	end
+	return nil
+end
+
+local function donor_thief_task_closed(_, _, params)
+	local id = params and tostring(params[1] or "") or ""
+	local record = task_record(id)
+	if record == nil then return end
+	record.quest_closed = true
+	local slot = task_slot(id, record)
+	if slot ~= nil then save_record(slot, record) end
+end
+
+local function register_task_api()
+	if type(task_functor) ~= "table" or type(task_status_functor) ~= "table" or
+		type(xr_effects) ~= "table" then return false end
+	task_functor.adb_donor_thief_text = donor_thief_text
+	task_functor.adb_donor_thief_target = donor_thief_target
+	task_status_functor.adb_donor_thief_status = donor_thief_status
+	xr_effects.adb_donor_thief_task_closed = donor_thief_task_closed
+	return true
+end
+
+local function find_free_slot()
+	local actor = db and db.actor or nil
+	local manager = nil
+	if task_manager ~= nil and type(task_manager.get_task_manager) == "function" then
+		local manager_ok, value = pcall(task_manager.get_task_manager)
+		if manager_ok and value ~= nil and type(value.task_info) == "table" then
+			manager = value
+		end
+	end
+	for slot = 1, SAVE_SLOT_COUNT do
+		local record = load_record(slot)
+		local id = save_key(slot)
+		local actor_task = nil
+		if actor ~= nil and type(actor.get_task) == "function" then
+			local task_ok, value = pcall(function() return actor:get_task(id, true) end)
+			if task_ok then actor_task = value end
+		end
+		local task_free = manager == nil or manager.task_info[id] == nil
+		if task_free and actor_task == nil and
+			(record == nil or record.phase == "dead" or record.invalid == true) then
+			return slot
+		end
+	end
+	return nil
+end
+
+local function object_id(object)
+	if object == nil then return nil end
+	local ok, id = pcall(function() return object:id() end)
+	id = ok and tonumber(id) or nil
+	return id and id >= 0 and math.floor(id) == id and id or nil
+end
+
+server_identity_matches = function(server, record)
+	if server == nil or type(record) ~= "table" then return false end
+	local section_ok, section = pcall(function() return server:section_name() end)
+	if not section_ok or tostring(section or "") ~= tostring(record.section or "") then
+		return false
+	end
+	if tostring(record.object_name or "") ~= "" then
+		local name_ok, name = pcall(function() return server:name() end)
+		if not name_ok or tostring(name or "") ~= tostring(record.object_name) then
+			return false
+		end
+	end
+	return true
+end
+
+is_stalker = function(object, server_side)
+	if object == nil or type(IsStalker) ~= "function" then return false end
+	if not server_side then
+		local ok, result = pcall(IsStalker, object)
+		return ok and result == true
+	end
+	local class_ok, class_id = pcall(function() return object:clsid() end)
+	if not class_ok then return false end
+	local ok, result = pcall(IsStalker, nil, class_id)
+	return ok and result == true
+end
+
+local function position(object)
+	if object == nil then return nil end
+	local ok, value = pcall(function() return object:position() end)
+	return ok and value or nil
+end
+
+local function distance(left, right)
+	local left_position, right_position = position(left), position(right)
+	if left_position == nil or right_position == nil then return math.huge end
+	local ok, dx, dy, dz = pcall(function()
+		return left_position.x - right_position.x,
+			left_position.y - right_position.y,
+			left_position.z - right_position.z
+	end)
+	if not ok then return math.huge end
+	return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function valid_vertex(vertex_id)
+	vertex_id = tonumber(vertex_id)
+	if vertex_id == nil or vertex_id < 0 or vertex_id >= INVALID_LEVEL_VERTEX_ID or
+		vertex_id ~= math.floor(vertex_id) then return false end
+	return anomaly_donation_bridge_common.valid_vertex(vertex_id)
+end
+
+local function player_faction(actor)
+	local ok, community = pcall(function() return actor:character_community() end)
+	if not ok or type(community) ~= "string" or community == "" then return nil end
+	return (community:gsub("^actor_", ""))
+end
+
+local function actor_direction(actor)
+	local ok, direction = pcall(function() return actor:direction() end)
+	if not ok or direction == nil then return nil end
+	local components_ok, x, z = pcall(function() return direction.x, direction.z end)
+	if not components_ok or type(x) ~= "number" or type(z) ~= "number" then return nil end
+	local magnitude = math.sqrt(x * x + z * z)
+	if magnitude <= 0.0001 then return nil end
+	return x / magnitude, z / magnitude
+end
+
+local function point_from_vertex(vertex_id)
+	if not valid_vertex(vertex_id) then return nil end
+	local ok, snapped = pcall(level.vertex_position, vertex_id)
+	if not ok or snapped == nil then return nil end
+	return {
+		vertex_id = vertex_id,
+		position = vector():set(snapped.x, snapped.y + 0.10, snapped.z)
+	}
+end
+
+local function behind_spawn_point(actor)
+	local start_ok, start_vertex = pcall(function() return actor:level_vertex_id() end)
+	if not start_ok or not valid_vertex(start_vertex) then return nil end
+	local actor_position = position(actor)
+	local forward_x, forward_z = actor_direction(actor)
+	if actor_position == nil or forward_x == nil then return nil end
+	local backward_angle = math.atan2(-forward_z, -forward_x)
+	local angle_offsets = { 0, 20, -20, 40, -40, 65, -65 }
+	-- Close behind the actor, but not inside the actor's collision capsule.
+	local distances = { 1.5, SPAWN_MIN_DISTANCE, SPAWN_MAX_DISTANCE }
+	for _, meters in ipairs(distances) do
+		for _, offset in ipairs(angle_offsets) do
+			local angle = backward_angle + math.rad(offset)
+			local direction = vector():set(math.cos(angle), 0, math.sin(angle))
+			local lookup_ok, vertex_id = pcall(function()
+				return level.vertex_in_direction(start_vertex, direction, meters)
+			end)
+			local point = lookup_ok and point_from_vertex(vertex_id) or nil
+			if point ~= nil then
+				local dx = point.position.x - actor_position.x
+				local dz = point.position.z - actor_position.z
+				local actual_distance = math.sqrt(dx * dx + dz * dz)
+				local forward_dot = dx * forward_x + dz * forward_z
+				if actual_distance >= SPAWN_MIN_DISTANCE and
+					actual_distance <= SPAWN_MAX_DISTANCE and forward_dot < 0 then
+					point.distance = actual_distance
+					point.fallback = false
+					return point
+				end
+			end
+		end
+	end
+	local points = anomaly_donation_bridge_common.safe_points(
+		actor, 1, SPAWN_MIN_DISTANCE, SPAWN_MAX_DISTANCE, 720, math.huge, true)
+	if points ~= nil and points[1] ~= nil then
+		points[1].fallback = true
+		return points[1]
+	end
+	return nil
+end
+
+local function force_online(id)
+	local life = life_object()
+	if life == nil then return end
+	pcall(function() life:set_switch_online(id, true) end)
+	pcall(function() life:set_switch_offline(id, false) end)
+end
+
+local function release_forced_online(id)
+	local life = life_object()
+	if life == nil then return end
+	pcall(function() life:set_switch_online(id, false) end)
+	pcall(function() life:set_switch_offline(id, false) end)
+end
+
+local function clear_companion_flag(npc)
+	-- Stock xr_motivator penalises ANY friendly companion death, even suicide.
+	-- A spawn section is a skin/source, not permission to recruit this thief.
+	local ok, cleared = pcall(function()
+		if npc:has_info("npcx_is_companion") then
+			npc:disable_info_portion("npcx_is_companion")
+		end
+		return not npc:has_info("npcx_is_companion")
+	end)
+	return ok and cleared
+end
+
+local function prepare_npc(npc, actor, record)
+	if not clear_companion_flag(npc) then return false end
+	pcall(function() npc:set_character_community(record.community, 0, 0) end)
+	pcall(function()
+		if game_relations ~= nil and type(game_relations.set_npcs_relation) == "function" then
+			game_relations.set_npcs_relation(npc, actor, "friend")
+		end
+	end)
+	pcall(function() npc:force_set_goodwill(5000, actor) end)
+	pcall(function() npc:invulnerable(true) end)
+	pcall(function() npc:can_select_weapon(false) end)
+	-- hide_weapon() is an Actor API even when called through an NPC userdata:
+	-- X-Ray's implementation uses Actor(), not this object. Never call it here.
+	pcall(function() npc:take_items_enabled(false) end)
+	pcall(function() npc:enable_talk(false) end)
+	pcall(function() npc:trade_enabled(false) end)
+	return true
+end
+
+local function false_condlist(npc, field)
+	if xr_logic == nil or type(xr_logic.parse_condlist) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(xr_logic.parse_condlist,
+		npc, "logic", field, "false")
+	return ok and result or nil
+end
+
+local function disable_side_behaviour(npc)
+	-- Leave the main planner and its goals/actions intact. Disable optional
+	-- scavenging through the stock condlists, not by deleting planner actions.
+	local storage = db ~= nil and db.storage ~= nil and
+		db.storage[npc:id()] or nil
+	if storage == nil then return false end
+
+	local corpse = storage.corpse_detection
+	if type(corpse) == "table" then
+		local selected = tonumber(corpse.selected_corpse_id)
+		if selected ~= nil and db.storage[selected] ~= nil then
+			db.storage[selected].corpse_already_selected = nil
+		end
+		corpse.selected_corpse_id = nil
+		corpse.nearest_id = nil
+		corpse.vertex_id = nil
+		corpse.vertex_position = nil
+		corpse.enabled = "false"
+		corpse.corpse_detection_enabled =
+			false_condlist(npc, "corpse_detection_enabled") or
+			corpse.corpse_detection_enabled
+		corpse.mutant_corpse_analysis =
+			false_condlist(npc, "mutant_corpse_analysis") or
+			corpse.mutant_corpse_analysis
+	end
+
+	local gather = storage.gather_items
+	if type(gather) == "table" then
+		gather.selected_id = nil
+		gather.vid = nil
+		gather.vid_pos = nil
+		gather.gather_items_enabled =
+			false_condlist(npc, "gather_items_enabled") or
+			gather.gather_items_enabled
+		gather.gather_artefact_items_enabled =
+			false_condlist(npc, "gather_artefact_items_enabled") or
+			gather.gather_artefact_items_enabled
+	end
+	pcall(function() npc:take_items_enabled(false) end)
+	return true
+end
+
+local function clear_legacy_punch(npc)
+	-- Only for saves made by the old approach/punch implementation. New
+	-- robberies never use abuse, animations or a state_mgr punch state.
+	if xr_abuse ~= nil and type(xr_abuse.clear_abuse) == "function" then
+		pcall(xr_abuse.clear_abuse, npc)
+	end
+	pcall(function() npc:clear_animations() end)
+	if state_mgr ~= nil and type(state_mgr.set_state) == "function" then
+		pcall(state_mgr.set_state, npc, "idle", nil, nil, nil,
+			{ fast_set = true, animation = true })
+	end
+end
+
+local function release_exact_input_lock(expected_seconds)
+	-- Stock xr_effects.actor_punch disables all player input for 30 seconds.
+	-- Release only the exact lock owned by this effect; do not touch locks owned
+	-- by dialogs, cutscenes or unrelated effects.
+	local actor_storage = db ~= nil and db.storage ~= nil and
+		db.storage[AC_ID] or nil
+	if actor_storage == nil or
+		tonumber(actor_storage.disable_input_idle) ~= expected_seconds then
+		return false
+	end
+	actor_storage.disable_input_time = nil
+	actor_storage.disable_input_idle = nil
+	if level ~= nil and type(level.enable_input) == "function" then
+		pcall(level.enable_input)
+	end
+	return true
+end
+
+local function release_punch_input_lock()
+	return release_exact_input_lock(30)
+end
+
+local function immobilize_actor(record, current)
+	if type(set_inactivate_input_time) ~= "function" then return false end
+	-- set_inactivate_input_time is based on accelerated in-game time, not real
+	-- time. Install a long engine fallback and release it ourselves by
+	-- time_global so five seconds remain five real seconds at every time factor.
+	local ok = pcall(set_inactivate_input_time, ROBBERY_ENGINE_INPUT_LOCK_SECONDS)
+	if not ok then return false end
+	record.actor_lock_active = true
+	record.actor_lock_expires = current + ROBBERY_INPUT_LOCK_SECONDS * 1000
+	return true
+end
+
+local function release_robbery_input_lock(record)
+	if record == nil or record.actor_lock_active ~= true then return end
+	if not release_exact_input_lock(ROBBERY_ENGINE_INPUT_LOCK_SECONDS) then
+		release_exact_input_lock(ROBBERY_INPUT_LOCK_SECONDS)
+	end
+	record.actor_lock_active, record.actor_lock_expires = false, nil
+end
+
+local function notify_robbery(actor)
+	local message = "Вас обокрали"
+	if anomaly_donation_bridge_common ~= nil and
+		type(anomaly_donation_bridge_common.game_text_cp1251) == "function" then
+		local encoded = anomaly_donation_bridge_common.game_text_cp1251(message)
+		if type(encoded) == "string" and encoded ~= "" then message = encoded end
+	end
+	if news_manager ~= nil and type(news_manager.send_tip) == "function" then
+		local ok = pcall(news_manager.send_tip, actor, message, 0, nil, 5000, nil)
+		if ok then return true end
+	end
+	if actor ~= nil and type(actor.give_game_news) == "function" then
+		return pcall(function()
+			actor:give_game_news(message, "", "ui_iconsTotal_grouping", 0, 5000, 0)
+		end)
+	end
+	return false
+end
+
+local function recovery_task_exists(actor, id, manager)
+	if manager ~= nil and type(manager.task_info) == "table" and
+		manager.task_info[id] ~= nil then return true end
+	if actor ~= nil and type(actor.get_task) == "function" then
+		local ok, task = pcall(function() return actor:get_task(id, true) end)
+		if ok and task ~= nil then return true end
+	end
+	return false
+end
+
+local function ensure_recovery_task(actor, managed, record)
+	if record.quest_closed == true then return false end
+	if task_manager == nil or type(task_manager.get_task_manager) ~= "function" then
+		return false
+	end
+	local manager_ok, manager = pcall(task_manager.get_task_manager)
+	if not manager_ok or manager == nil or type(manager.task_info) ~= "table" then
+		return false
+	end
+	local id = save_key(managed.slot)
+	if recovery_task_exists(actor, id, manager) then
+		record.quest_created = true
+		return true
+	end
+	-- Task functors read the same persistent record while give_task builds the
+	-- title, description and PDA target marker.
+	record.slot = managed.slot
+	save_record(managed.slot, record)
+	local give_ok = pcall(function() manager:give_task(id, tonumber(record.target_id)) end)
+	local created = give_ok and recovery_task_exists(actor, id, manager)
+	record.quest_created = created
+	return created
+end
+
+local function log_panic(id, message)
+	if type(printf) == "function" then
+		printf("[ADB thief] %s: %s", tostring(id), tostring(message))
+	end
+end
+
+local function combat_planner(npc)
+	if type(cast_planner) ~= "function" or stalker_ids == nil then return nil end
+	local ok, planner = pcall(function()
+		local manager = npc:motivation_action_manager()
+		if manager == nil or not manager:initialized() then return nil end
+		local combat = manager:action(stalker_ids.action_combat_planner)
+		return combat ~= nil and cast_planner(combat) or nil
+	end)
+	return ok and planner or nil
+end
+
+local function track_escape_distance(npc, managed, record)
+	if record.escape_jogging == true then return end
+	-- Old saved thieves have no setting: retain their original 100m threshold.
+	-- New thieves store the validated template value once, at spawn time.
+	local sprint_meters = tonumber(record.sprint_meters)
+	if sprint_meters == nil or sprint_meters < 1 or sprint_meters > MAX_SPRINT_METERS or
+		sprint_meters % 1 ~= 0 then sprint_meters = LEGACY_SPRINT_METERS end
+	local point = position(npc)
+	if point == nil then return end
+	local previous = managed.escape_position
+	-- Keep the previous position only in this runtime, never serialize vectors
+	-- or count the jump between the pre-F9 and newly loaded NPC positions.
+	managed.escape_position = { x = point.x, y = point.y, z = point.z }
+	if previous == nil then return end
+	local dx, dy, dz = point.x - previous.x, point.y - previous.y, point.z - previous.z
+	local meters = math.sqrt(dx * dx + dy * dy + dz * dz)
+	if meters <= 0 then return end
+	record.escape_meters = math.min(sprint_meters,
+		math.max(0, tonumber(record.escape_meters) or 0) + meters)
+	if record.escape_meters >= sprint_meters then
+		record.escape_jogging = true
+		log_panic(npc:id(), tostring(sprint_meters) ..
+			"m escape path reached; switching permanently to jog")
+	end
+	save_record(managed.slot, record)
+end
+
+-- Keep the engine's retreat operator alive and owned by its original planner.
+-- Never remove it and keep a dangling Lua reference (remove_action deletes it).
+-- This extra operator delegates the native route/cover search and only changes
+-- locomotion AFTER execute(), before the engine's movement update. An actor/NPC
+-- update callback runs too early: native retreat overwrites panic with danger.
+class "adb_donor_thief_sprint_action" (action_base)
+
+function adb_donor_thief_sprint_action:__init(npc, retreat)
+	-- Luabind constructors use super(), as stock axr_stalker_panic does.
+	-- action_base.__init is NOT exported; the planner supplies the NPC in setup.
+	super(nil, "adb_donor_thief_native_sprint")
+	self.retreat = retreat
+end
+
+function adb_donor_thief_sprint_action:initialize()
+	action_base.initialize(self)
+	self.retreat:initialize()
+end
+
+function adb_donor_thief_sprint_action:execute()
+	action_base.execute(self)
+	self.retreat:execute()
+	-- Stock state_lib.sprint is run + panic + standing (not a move.sprint enum).
+	-- No destination, animation or speed constants are supplied by this script.
+	if self.object:best_enemy() ~= nil and
+		self.object:target_movement_type() == move.run then
+		local managed = state.thieves[self.object:id()]
+		local record = managed ~= nil and load_record(managed.slot) or nil
+		self.object:set_body_state(move.standing)
+		self.object:set_mental_state(record ~= nil and record.escape_jogging == true
+			and anim.free or anim.panic)
+	end
+end
+
+function adb_donor_thief_sprint_action:finalize()
+	self.retreat:finalize()
+	action_base.finalize(self)
+end
+
+local function bind_native_sprint(npc, planner)
+	-- X-Ray get_operator uses lower_bound without checking ID equality: a
+	-- missing ID can return the NEXT action from another addon. Non-nil does
+	-- NOT prove our delegate exists. Compare to the exact instance we installed.
+	local installed = state.sprint_actions[npc:id()]
+	if installed ~= nil and planner:action(SPRINT_ACTION_ID) == installed then return end
+	local retreat = planner:action(stalker_ids.action_retreat_from_enemy)
+	local action = adb_donor_thief_sprint_action(npc, retreat)
+	action:add_precondition(world_property(stalker_ids.property_panic, true))
+	action:add_precondition(world_property(stalker_ids.property_item_to_kill, false))
+	-- This is the original native retreat's effect. Do not change combat's goal.
+	action:add_effect(world_property(stalker_ids.property_pure_enemy, false))
+	action:set_weight(1) -- native retreat has weight 100
+	-- Native retreat has NO preconditions. During our forced panic select only
+	-- the delegate, not the ordinary danger/run retreat;
+	-- retain the live native action for initialize/execute/finalize delegation.
+	-- Adding the delegate afterwards invalidates the cached combat plan.
+	retreat:add_precondition(world_property(stalker_ids.property_panic, false))
+	planner:add_action(SPRINT_ACTION_ID, action)
+	state.sprint_actions[npc:id()] = action
+end
+
+local function begin_native_panic(npc, actor, managed)
+	if managed.native_panic_bound then return true end
+	local planner = combat_planner(npc)
+	if planner == nil or property_evaluator_const == nil then return false end
+
+	-- Use the EXISTING CStalkerActionRetreatFromEnemy via a sprint delegate.
+	-- Keep its native target state and never call planner:update ourselves.
+	-- Only this NPC's combat subplanner gets panic/weaponless decisions.
+	-- In particular, do not replace the main enemy evaluator: combat initialize
+	-- requires a real enemy selected by the engine or it can dereference nil.
+	local policies = {
+		{ stalker_ids.property_panic, true },
+		{ stalker_ids.property_item_to_kill, false },
+		{ stalker_ids.property_found_item_to_kill, false },
+		{ stalker_ids.property_use_suddenness, false }
+	}
+	local checked, available = pcall(function()
+		if planner:action(stalker_ids.action_retreat_from_enemy) == nil then return false end
+		if planner:evaluator(stalker_ids.property_pure_enemy) == nil then return false end
+		for _, policy in ipairs(policies) do
+			if policy[1] == nil or planner:evaluator(policy[1]) == nil then return false end
+		end
+		return true
+	end)
+	if not checked or not available then return false end
+
+	local bound, error_message = pcall(function()
+		bind_native_sprint(npc, planner)
+		for _, policy in ipairs(policies) do
+			local evaluator = property_evaluator_const(policy[2])
+			planner:remove_evaluator(policy[1])
+			planner:add_evaluator(policy[1], evaluator)
+		end
+		-- Some spawn sections request script combat (e.g. zombies). Hand this one
+		-- thief to engine combat instead; never change global faction relations.
+		local storage = db.storage[npc:id()]
+		storage.script_combat_type = nil
+		if type(storage.combat) == "table" then
+			storage.combat.enabled = false
+			storage.combat.script_combat_type = nil
+		end
+		npc:can_select_weapon(false)
+		npc:set_desired_position()
+		npc:set_desired_direction()
+		-- Negative PERSONAL goodwill supplies a real threat to the engine memory.
+		-- No hit, faction switch or community goodwill change is involved.
+		npc:set_relation(game_object.enemy, actor)
+		npc:force_set_goodwill(-10000, actor)
+		npc:make_object_visible_somewhen(actor)
+	end)
+	if not bound then
+		if not managed.panic_error_logged then
+			log_panic(npc:id(), "native panic setup failed: " .. tostring(error_message))
+			managed.panic_error_logged = true
+		end
+		return false
+	end
+	managed.native_panic_bound = true
+	managed.panic_diagnostic_at = 0
+	log_panic(npc:id(), "native sprint armed; engine owns escape route")
+	return true
+end
+
+local function maintain_native_panic(npc, actor, managed, current)
+	if not begin_native_panic(npc, actor, managed) then
+		if not managed.panic_wait_logged then
+			log_panic(npc:id(), "waiting for native combat planner")
+			managed.panic_wait_logged = true
+		end
+		return
+	end
+	if current < tonumber(managed.panic_diagnostic_at or 0) then return end
+	managed.panic_diagnostic_at = current + PANIC_DIAGNOSTIC_MS
+	-- Observe, don't reroute. Only the planner-owned sprint operator changes
+	-- locomotion, immediately after the stock operator chooses its route.
+	local ok, enemy_id, main_action, combat_action = pcall(function()
+		local manager = npc:motivation_action_manager()
+		local planner = combat_planner(npc)
+		return object_id(npc:best_enemy()),
+			manager:initialized() and manager:current_action_id() or nil,
+			planner ~= nil and planner:initialized() and planner:current_action_id() or nil
+	end)
+	if ok then
+		if enemy_id ~= object_id(actor) then
+			pcall(function() npc:make_object_visible_somewhen(actor) end)
+		end
+		local signature = tostring(enemy_id) .. "/" .. tostring(main_action) .. "/" ..
+			tostring(combat_action)
+		if signature ~= managed.panic_signature then
+			managed.panic_signature = signature
+			log_panic(npc:id(), "enemy/main/combat=" .. signature ..
+				"; sprint=" .. tostring(SPRINT_ACTION_ID) ..
+				"; retreat=" .. tostring(stalker_ids.action_retreat_from_enemy))
+		end
+	end
+end
+
+local function inventory_items(actor, excluded_id)
+	local items = {}
+	local ok = pcall(function()
+		-- Only the rucksack: no equipped weapons/outfit/helmet/backpack/detector
+		-- or belt artefacts, regardless of section names or custom slot layouts.
+		actor:iterate_ruck(function(_, item)
+			if item == nil then return end
+			local id = object_id(item)
+			if id == nil or id == excluded_id then return end
+			local protected = false
+			if type(anomaly_donation_bridge_common.protected_object) == "function" then
+				local protected_ok, result = pcall(
+					anomaly_donation_bridge_common.protected_object, item)
+				protected = not protected_ok or result == true
+			end
+			if not protected then items[#items + 1] = item end
+		end, nil)
+	end)
+	if not ok then return {} end
+	for index = #items, 2, -1 do
+		local other = math.random(index)
+		items[index], items[other] = items[other], items[index]
+	end
+	return items
+end
+
+local function protect_stolen_stock()
+	if not death_manager or type(death_manager.keep_item) ~= "function" or
+		type(se_load_var) ~= "function" or type(se_save_var) ~= "function" then return false end
+	if death_manager.keep_item == state.stock_guard then return true end
+	local previous = death_manager.keep_item
+	state.stock_guard = function(npc, item)
+		-- Stock death_manager otherwise destroys ammunition and randomizes gear
+		-- condition. A persistent receipt protects only this stolen instance,
+		-- including corpse reloads after the thief's active task was retired.
+		local ok, stolen = pcall(function()
+			if not npc or not item then return false end
+			local owner = se_load_var(item:id(), item:name(), STOLEN_OWNER_KEY)
+			return type(owner) == "table" and owner.id == npc:id() and
+				owner.name == npc:name() and owner.item == item:name() and owner.section == item:section()
+		end)
+		if ok and stolen then return end
+		return previous(npc, item)
+	end
+	death_manager.keep_item = state.stock_guard
+	return true
+end
+
+local function active_weapon_id(actor)
+	local slot_ok, slot = pcall(function() return actor:active_slot() end)
+	if not slot_ok or (slot ~= 2 and slot ~= 3) then return nil end
+	local item_ok, item = pcall(function() return actor:active_item() end)
+	if not item_ok or item == nil then return nil end
+	local section_ok, section = pcall(function() return item:section() end)
+	if not section_ok or type(section) ~= "string" or
+		not section:find("wpn_", 1, true) then return nil end
+	return object_id(item)
+end
+
+local function drop_captured_weapon(actor, captured_id)
+	if captured_id == nil then return end
+	local items = {}
+	pcall(function()
+		actor:iterate_inventory(function(_, item)
+			if object_id(item) == captured_id then items[1] = item end
+		end, nil)
+	end)
+	if items[1] ~= nil then pcall(function() actor:drop_item(items[1]) end) end
+end
+
+local function steal_items(actor, npc, record)
+	drop_captured_weapon(actor, tonumber(record.active_weapon_id))
+	local items = inventory_items(actor, tonumber(record.active_weapon_id))
+	local requested = math.max(1, math.min(999,
+		math.floor(tonumber(record.requested_count) or 1)))
+	local stolen = 0
+	for _, item in ipairs(items) do
+		if stolen >= requested then break end
+		local ok = pcall(function()
+			-- Inventory items do not have db.storage/pstor: save_var(item, ...) silently
+			-- does nothing on stock Anomaly. Use persistent server-object storage.
+			se_save_var(item:id(), item:name(), STOLEN_OWNER_KEY,
+				{id=npc:id(),name=npc:name(),item=item:name(),section=item:section()})
+			local receipt = se_load_var(item:id(), item:name(), STOLEN_OWNER_KEY)
+			assert(type(receipt)=="table" and receipt.id==npc:id() and receipt.item==item:name(),
+				"donor_thief_stock_receipt_not_saved")
+			actor:transfer_item(item, npc)
+		end)
+		if ok then stolen = stolen + 1 end
+	end
+	return stolen
+end
+
+
+local function mark_invalid(id, managed, record)
+	release_robbery_input_lock(record)
+	record.invalid = true
+	save_record(managed.slot, record)
+	state.thieves[id] = nil
+	state.sprint_actions[id] = nil
+	release_forced_online(id)
+end
+
+local function self_destruct(id, managed, record, npc)
+	-- Suicide alone is not sufficient: stock companion-death penalties ignore
+	-- the killer. Check/clear the companion flag again immediately before death.
+	if not clear_companion_flag(npc) then
+		if not managed.capture_flag_error_logged then
+			log_panic(id, "capture delayed: could not clear companion flag safely")
+			managed.capture_flag_error_logged = true
+		end
+		return false
+	end
+	release_robbery_input_lock(record)
+	pcall(function() npc:deadbody_can_take(true) end)
+	pcall(function() npc:invulnerable(false) end)
+	record.phase = "dead"
+	record.dead = true
+	save_record(managed.slot, record)
+	state.thieves[id] = nil
+	local killed = pcall(function() npc:kill(npc) end)
+	if not killed then
+		pcall(function() npc:invulnerable(true) end)
+		record.phase = "flee"
+		record.dead = false
+		save_record(managed.slot, record)
+		state.thieves[id] = managed
+		return false
+	end
+	state.sprint_actions[id] = nil
+	release_forced_online(id)
+	return true
+end
+
+local function update_thief(id, managed, record, actor, current)
+	local server = server_object(id)
+	if server == nil then
+		mark_invalid(id, managed, record)
+		return
+	end
+	if not server_identity_matches(server, record) or not is_stalker(server, true) then
+		mark_invalid(id, managed, record)
+		return
+	end
+	local alive_ok, alive = pcall(function() return server:alive() end)
+	if alive_ok and alive == false then
+		release_robbery_input_lock(record)
+		record.phase, record.dead = "dead", true
+		save_record(managed.slot, record)
+		state.thieves[id] = nil
+		state.sprint_actions[id] = nil
+		release_forced_online(id)
+		return
+	end
+	force_online(id)
+	local npc = client_object(id)
+	if npc == nil or not is_stalker(npc, false) then return end
+	if record.prepared ~= true then
+		if not prepare_npc(npc, actor, record) then return end
+		disable_side_behaviour(npc)
+		if record.clear_legacy_punch == true then
+			clear_legacy_punch(npc)
+			record.clear_legacy_punch = nil
+		end
+		record.prepared = true
+		save_record(managed.slot, record)
+	end
+
+	if record.phase == "robbery" then
+		-- No NPC approach, abuse action or melee animation. Use the same actor
+		-- camera/drop effect as stock actor_punch, without its distance check or
+		-- 30-second game-time input lock. The thief receives loot before fleeing.
+		if not immobilize_actor(record, current) then return end
+		record.active_weapon_id = active_weapon_id(actor)
+		pcall(level.add_cam_effector, "camera_effects\\fusker.anm", 999, false, "")
+		record.hit_mode = "instant"
+		record.stolen_count = steal_items(actor, npc, record)
+		if record.robbery_notified ~= true then
+			notify_robbery(actor)
+			record.robbery_notified = true
+		end
+		record.phase = "flee"
+		record.flee_started = current
+		record.catchable = false
+		record.escape_vertex = nil
+		record.escape_meters = 0
+		record.escape_jogging = false
+		managed.native_panic_bound = false
+		save_record(managed.slot, record)
+		ensure_recovery_task(actor, managed, record)
+		save_record(managed.slot, record)
+	end
+
+	if record.phase == "flee" then
+		if record.quest_created ~= true and record.quest_closed ~= true then
+			if ensure_recovery_task(actor, managed, record) then
+				save_record(managed.slot, record)
+			end
+		end
+		if record.actor_lock_active == true and
+			current >= tonumber(record.actor_lock_expires or math.huge) then
+			release_exact_input_lock(ROBBERY_ENGINE_INPUT_LOCK_SECONDS)
+			record.actor_lock_active = false
+			record.actor_lock_expires = nil
+			save_record(managed.slot, record)
+		end
+		if tonumber(record.flee_started) == nil or tonumber(record.flee_started) <= 0 then
+			record.flee_started = current
+		end
+		track_escape_distance(npc, managed, record)
+		maintain_native_panic(npc, actor, managed, current)
+		local actor_distance = distance(npc, actor)
+		if record.catchable ~= true and
+			(actor_distance >= ESCAPE_DISTANCE or
+			current - tonumber(record.flee_started or current) >= ESCAPE_GRACE_MS) then
+			record.catchable = true
+			save_record(managed.slot, record)
+		end
+		if record.catchable == true and actor_distance <= CATCH_DISTANCE then
+			self_destruct(id, managed, record, npc)
+			return
+		end
+	end
+end
+
+local function rebuild_runtime()
+	state.thieves = {}
+	local had_punch_or_flee = false
+	local had_robbery_lock = false
+	for slot = 1, SAVE_SLOT_COUNT do
+		local record = load_record(slot)
+		-- A thief can die/be removed during the stun. Repair the input lock even
+		-- for completed or invalid records, not only living managed NPCs.
+		if record ~= nil and record.actor_lock_active == true then
+			had_robbery_lock = true
+			record.actor_lock_active, record.actor_lock_expires = false, nil
+			save_record(slot, record)
+		end
+		local id = record and tonumber(record.target_id) or nil
+		if id ~= nil and record.phase ~= "dead" and record.dead ~= true and
+			record.invalid ~= true then
+			record.slot = slot
+			local server = server_object(id)
+			if server ~= nil and server_identity_matches(server, record) and
+				is_stalker(server, true) then
+				if record.phase == "punch" or
+					(record.phase == "flee" and record.hit_mode ~= "instant") then
+					had_punch_or_flee = true
+				end
+				record.prepared = false
+				-- Migrate unfinished old approach/punch saves into the immediate
+				-- robbery. A completed theft stays flee and is never repeated.
+				if record.phase ~= "flee" then
+					if record.phase == "punch" then record.clear_legacy_punch = true end
+					record.phase = "robbery"
+					record.steal_at = nil
+					record.active_weapon_id = nil
+					record.punch_confirmed = nil
+					record.punch_attempts = nil
+					record.punch_retry_at = nil
+					record.punch_restart_at = nil
+					record.approach_commanded = false
+					record.punch_commanded = false
+				else
+					record.flee_started = nil
+					record.escape_vertex = nil
+					record.panic_commanded = false
+				end
+				save_record(slot, record)
+				state.thieves[id] = { slot = slot }
+				force_online(id)
+			elseif server ~= nil then
+				record.invalid = true
+				save_record(slot, record)
+			end
+		end
+	end
+	for id in pairs(state.sprint_actions) do
+		if state.thieves[id] == nil then state.sprint_actions[id] = nil end
+	end
+	-- Also repairs saves made while the old implementation's 30-second stock
+	-- punch lock was active.
+	if had_punch_or_flee then release_punch_input_lock() end
+	-- A short robbery stun never needs to survive F9. Release only our exact
+	-- five-second lock; other game systems keep ownership of their input locks.
+	if had_robbery_lock then
+		-- Release both the current real-time lock and saves made by the previous
+		-- local build, which used the visible duration as the engine duration.
+		if not release_exact_input_lock(ROBBERY_ENGINE_INPUT_LOCK_SECONDS) then
+			release_exact_input_lock(ROBBERY_INPUT_LOCK_SECONDS)
+		end
+	end
+	state.next_update = 0
+end
+
+local function update(now)
+	local current = now_ms(now)
+	if current > 0 and state.next_update > current then return end
+	state.next_update = current + UPDATE_INTERVAL_MS
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	for id, managed in pairs(state.thieves) do
+		local record = load_record(managed.slot)
+		if record == nil or tonumber(record.target_id) ~= tonumber(id) or
+			record.phase == "dead" or record.dead == true then
+			state.thieves[id] = nil
+			state.sprint_actions[id] = nil
+		else
+			update_thief(id, managed, record, actor, current)
+		end
+	end
+end
+
+local function npc_on_death(npc)
+	local id = object_id(npc)
+	local managed = id and state.thieves[id] or nil
+	if managed == nil then return end
+	local record = load_record(managed.slot)
+	if record == nil then return end
+	release_robbery_input_lock(record)
+	record.phase, record.dead = "dead", true
+	save_record(managed.slot, record)
+	state.thieves[id] = nil
+	state.sprint_actions[id] = nil
+	release_forced_online(id)
+end
+
+local function enemy_eval(object, enemy, flags)
+	local id = object_id(object)
+	local managed = id and state.thieves[id] or nil
+	if managed == nil or type(flags) ~= "table" then return end
+	local record = load_record(managed.slot)
+	flags.override = true
+	-- Ignore everyone before the loot transfer. Afterwards only the ACTUAL
+	-- actor is a threat: suppressing him too prevents native panic from running.
+	flags.result = record ~= nil and record.phase == "flee" and
+		object_id(enemy) ~= nil and object_id(enemy) == object_id(db.actor)
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		item_count = true, sprint_meters = true, donor_name = true, catalog_revision = true
+	})
+	if not valid then return false, "rejected", reason end
+	local actor = context.actor
+	if actor == nil then return false, "deferred", "actor_unavailable" end
+	if not protect_stolen_stock() then return false, "rejected", "donor_thief_stock_protection_unavailable" end
+	if level == nil or type(level.add_cam_effector) ~= "function" or
+		type(set_inactivate_input_time) ~= "function" then
+		return false, "rejected", "donor_thief_hit_api_unavailable"
+	end
+	if type(cast_planner) ~= "function" or property_evaluator_const == nil or
+		action_base == nil or adb_donor_thief_sprint_action == nil or
+		world_property == nil or anim == nil or anim.panic == nil or anim.free == nil or
+		move == nil or move.run == nil or move.standing == nil or
+		stalker_ids == nil or game_object == nil or game_object.enemy == nil or
+		stalker_ids.action_combat_planner == nil or
+		stalker_ids.action_retreat_from_enemy == nil or
+		stalker_ids.property_panic == nil or
+		stalker_ids.property_pure_enemy == nil or
+		stalker_ids.property_item_to_kill == nil or
+		stalker_ids.property_found_item_to_kill == nil or
+		stalker_ids.property_use_suddenness == nil then
+		return false, "rejected", "donor_thief_native_panic_api_unavailable"
+	end
+	-- Luabind class constructors are callable userdata. A function-only type
+	-- check rejects the real engine even though the constructor works correctly.
+	local property_ok, property_exists = pcall(function()
+		if world_property(stalker_ids.property_panic, true) == nil then return false end
+		-- Probe construction before spawning/hitting/stealing. A broken base
+		-- constructor must not leave an already robbed actor and a wandering NPC.
+		return adb_donor_thief_sprint_action(nil, nil) ~= nil
+	end)
+	if not property_ok or not property_exists then
+		return false, "rejected", "donor_thief_native_panic_api_unavailable"
+	end
+	if type(actor.iterate_ruck) ~= "function" then
+		return false, "rejected", "donor_thief_ruck_api_unavailable"
+	end
+	local count, count_error = anomaly_donation_bridge_common.parse_integer(
+		params.item_count, 99, 1, 999, "donor_thief_item_count_invalid")
+	if count == nil then return false, "rejected", count_error end
+	local sprint_meters, sprint_error = anomaly_donation_bridge_common.parse_integer(
+		params.sprint_meters, DEFAULT_SPRINT_METERS, 1, MAX_SPRINT_METERS,
+		"donor_thief_sprint_meters_invalid")
+	if sprint_meters == nil then return false, "rejected", sprint_error end
+	local donor_name = anomaly_donation_bridge_common.trim(params.donor_name or
+		(context.command and context.command.donor_name))
+	if donor_name == "" then donor_name = "Воришка" end
+	if #donor_name > 256 or donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return false, "rejected", "donor_thief_name_invalid"
+	end
+	local entry, catalog_error = anomaly_donation_bridge_catalog.random_available("npc")
+	if entry == nil then return false, "rejected", catalog_error end
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(entry.section_id, "npc") then
+		return false, "rejected", "donor_thief_section_unsafe"
+	end
+	local community = player_faction(actor)
+	if community == nil then
+		return false, "deferred", "donor_thief_player_faction_unavailable"
+	end
+	local slot = find_free_slot()
+	if slot == nil then return false, "deferred", "donor_thief_slots_full" end
+	local point = behind_spawn_point(actor)
+	if point == nil then return false, "deferred", "donor_thief_spawn_point_unavailable" end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return actor:game_vertex_id()
+	end)
+	if not game_vertex_ok or type(game_vertex_id) ~= "number" then
+		return false, "deferred", "actor_game_vertex_invalid"
+	end
+	context.options = {
+		count = count, sprint_meters = sprint_meters, donor_name = donor_name, community = community,
+		section = entry.section_id, slot = slot, point = point,
+		game_vertex_id = game_vertex_id
+	}
+	return true
+end
+
+local function execute(context)
+	local options = context.options
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(options.section, "npc") then
+		return "rejected", "donor_thief_section_became_unsafe"
+	end
+	if type(alife_create) ~= "function" then
+		return "deferred", "alife_create_unavailable"
+	end
+	local create_ok, server = pcall(alife_create, options.section,
+		options.point.position, options.point.vertex_id, options.game_vertex_id)
+	if not create_ok or server == nil then
+		return "uncertain", "donor_thief_spawn_failed"
+	end
+	local id = tonumber(server.id)
+	if id == nil or id <= 0 then
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return "rejected", "donor_thief_id_invalid"
+	end
+	local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(
+		options.donor_name)
+	if encoded_name == nil or encoded_name == "" then
+		encoded_name = anomaly_donation_bridge_common.game_text_cp1251("Воришка")
+	end
+	local object_name = nil
+	local setup_ok = encoded_name ~= nil and encoded_name ~= "" and pcall(function()
+		server:set_character_name(encoded_name)
+		server:force_set_goodwill(5000, context.actor)
+		server:force_set_goodwill(5000, 0)
+		object_name = server:name()
+	end)
+	if not setup_ok then
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return "rejected", "donor_thief_setup_failed"
+	end
+	local record = {
+		target_id = id, section = options.section, object_name = object_name,
+		donor_name = encoded_name, community = options.community,
+		requested_count = options.count, sprint_meters = options.sprint_meters,
+		phase = "robbery", dead = false,
+		spawn_fallback = options.point.fallback == true, slot = options.slot
+	}
+	if not save_record(options.slot, record) then
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return "rejected", "donor_thief_state_save_failed"
+	end
+	state.thieves[id] = { slot = options.slot }
+	force_online(id)
+	state.next_update = 0
+	return "executed", "donor_thief_spawned_" .. tostring(id) .. "_" ..
+		options.section .. "_items_" .. tostring(options.count) ..
+		(options.point.fallback and "_nearby_fallback" or "_behind_actor")
+end
+
+local function on_game_load()
+    protect_stolen_stock()
+	register_task_api()
+	rebuild_runtime()
+end
+
+function on_game_start()
+    protect_stolen_stock()
+	register_task_api()
+	rebuild_runtime()
+	local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+		can_execute = can_execute,
+		execute = execute,
+		update = update,
+		on_game_load = on_game_load
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] donor thief registration failed: %s", tostring(reason))
+	end
+	if not state.callbacks_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("npc_on_death_callback", npc_on_death)
+		RegisterScriptCallback("on_enemy_eval", enemy_eval)
+		state.callbacks_registered = true
+	end
+end

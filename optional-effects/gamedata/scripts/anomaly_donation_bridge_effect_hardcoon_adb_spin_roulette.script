@@ -1,0 +1,55 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,"handlerId":"hardcoon.adb.spin_roulette","displayName":"Крутить рулетку",
+  "description":"Открывает игровую рулетку предметов на указанное число круток. Игрок нажимает «Крутить» и подтверждает результат каждой попытки. Можно разрешить оба риска или закрепить один — тогда кнопки выбора риска скрыты. Ставкой становится случайный неквестовый предмет из инвентаря; при проигрыше он теряется, при выигрыше заменяется предметом той же категории. Если подходящих предметов не осталось, серия прекращается.",
+  "category":"inventory","cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"count","displayName":"Число круток","kind":"Integer","minimum":1,"maximum":50,"defaultValue":"1"},
+    {"key":"risk_mode","displayName":"Доступный риск","kind":"Choice","options":["both","low","high"],"optionLabels":{"both":"Low и High","low":"Low","high":"High"},"defaultValue":"both"},
+    {"key":"pause_game","displayName":"Ставить игру на паузу в момент ставки","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters":{"count":"1","risk_mode":"both","pause_game":"false"},"itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local HANDLER="hardcoon.adb.spin_roulette"
+local registered=false
+local function api() return anomaly_donation_bridge_roulette end
+local function supported()
+    local r=api()
+    return type(r)=="table" and r.BRIDGE_API_VERSION==1 and type(r.request_batch)=="function" and
+        type(r.request_active)=="function"
+end
+local function can_execute(context,params)
+    local valid,why=anomaly_donation_bridge_common.params_only(params,{count=true,risk_mode=true,pause_game=true})
+    if not valid then return false,"rejected",why end
+    local count=tonumber(params.count)
+    if not count or count~=count or count<1 or count>50 or count~=math.floor(count) then
+        return false,"rejected","invalid_count"
+    end
+    local mode=params.risk_mode or "both"
+    if mode~="both" and mode~="low" and mode~="high" then return false,"rejected","invalid_risk" end
+    local pause=params.pause_game
+    if pause==nil then pause="false" end
+    if pause~="false" and pause~="true" then return false,"rejected","invalid_pause" end
+    if pause=="true" and (type(api().pause_supported)~="function" or not api().pause_supported()) then
+        return false,"rejected","roulette_pause_unsupported"
+    end
+    if not db or not db.actor or not db.actor:alive() then return false,"deferred","actor_unavailable" end
+    if api().request_active() then return false,"deferred","roulette_busy" end
+    context.roulette_count=count;context.roulette_mode=mode;context.roulette_pause=pause=="true"
+    return true
+end
+local function execute(context)
+    local opened,why=api().request_batch(context.roulette_count,context.roulette_mode,context.roulette_pause)
+    if opened then return "executed","roulette_opened" end
+    if why=="no_candidates" then return "rejected","roulette_no_candidates" end
+    return "deferred",why or "roulette_unavailable"
+end
+function on_game_start()
+    if registered then return end;registered=true
+    anomaly_donation_bridge_registry.register(HANDLER,{
+        is_supported=supported,can_execute=can_execute,execute=execute,
+        is_blocking=function() return supported() and api().request_active() or false end
+    })
+end

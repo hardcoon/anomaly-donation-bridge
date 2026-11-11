@@ -1,0 +1,397 @@
+local actions = {}
+local action_order = {}
+local MAX_EXTENSION_ACTIONS = 64
+local extension_count = 0
+local BUILTIN_IDS = {
+	add_radiation = true, drop_active_weapon = true, block_inventory = true,
+	spawn_mutants = true,
+	spawn_npcs = true, spawn_npc_squads = true, spawn_mutant_squads = true,
+	spawn_random_hostile_squad = true,
+	spawn_random_mutant_pack = true, spawn_random_npcs = true,
+	spawn_random_mutants = true, change_health = true, change_needs = true,
+    delete_recent_saves = true, teleport_random_level = true,
+    kill_nearby_npcs = true, kill_companions = true, give_random_stash = true,
+	spawn_items = true, change_money = true, spawn_anomaly = true,
+	get_drunk = true, trigger_emission = true, sleep_hours = true,
+	remove_equipment = true, damage_equipment = true, god_mode = true,
+	drop_random_items = true,
+	teleport_random = true, random_active = true, random_all_presets = true,
+	use_random_consumable = true, change_player_faction = true,
+	["hardcoon.adb.special_companion"] = true, spawn_named_companion = true, spawn_mutant_companion = true,
+	spawn_donor_boss = true,
+	["hardcoon.adb.annoying_fan"] = true,
+    ["hardcoon.adb.wandering_trader"] = true,
+	actor_boost = true, actor_parameters = true,
+	tell_joke = true, hide_hud = true, change_player_name = true
+}
+
+local function valid_action_id(action_id)
+	return type(action_id) == "string" and action_id ~= "" and #action_id <= 128 and
+		action_id:match("^[a-z0-9_.-]+$") ~= nil
+end
+
+local function valid_extension_action_id(action_id)
+	if not valid_action_id(action_id) then return false end
+	local segment_count = 0
+	for segment in (action_id .. "."):gmatch("(.-)%.") do
+		if #segment < 1 or #segment > 32 or
+			segment:match("^[a-z][a-z0-9_-]*$") == nil then return false end
+		segment_count = segment_count + 1
+	end
+	return segment_count >= 3
+end
+
+local function clean_reason(reason)
+	reason = anomaly_donation_bridge_common.game_text_utf8(reason)
+	if reason == nil then return "invalid_reason_encoding" end
+	reason = reason:gsub("[%z\1-\31\127]", " ")
+	reason = anomaly_donation_bridge_common.truncate_utf8(reason, 240)
+	return reason ~= "" and reason or "unspecified"
+end
+
+local function valid_status(status)
+	return status == "executed" or status == "deferred" or status == "rejected" or
+		status == "uncertain"
+end
+
+local function log_failure(action_id, stage, detail)
+	if type(printf) ~= "function" then return end
+	pcall(printf, "[ADB] action %s %s failed: %s", tostring(action_id or "unknown"),
+		tostring(stage or "unknown"), tostring(detail or "unknown"))
+end
+
+local function register_descriptor(action_id, descriptor)
+	if not valid_action_id(action_id) then return false, "action_id_invalid" end
+	if type(descriptor) ~= "table" or type(descriptor.execute) ~= "function" then
+		return false, "action_descriptor_invalid"
+	end
+	if descriptor.can_execute ~= nil and type(descriptor.can_execute) ~= "function" then
+		return false, "action_check_invalid"
+	end
+	if descriptor.update ~= nil and type(descriptor.update) ~= "function" then
+		return false, "action_update_invalid"
+	end
+	if descriptor.on_game_load ~= nil and type(descriptor.on_game_load) ~= "function" then
+		return false, "action_load_handler_invalid"
+	end
+	if descriptor.on_effect_save~=nil and type(descriptor.on_effect_save)~="function" then return false,"action_effect_save_handler_invalid" end
+	if descriptor.on_level_changing ~= nil and
+		type(descriptor.on_level_changing) ~= "function" then
+		return false, "action_level_change_handler_invalid"
+	end
+	if descriptor.is_supported ~= nil and type(descriptor.is_supported) ~= "function" then
+		return false, "action_support_probe_invalid"
+	end
+	if descriptor.is_blocking~=nil and type(descriptor.is_blocking)~="function" then return false,"action_blocking_probe_invalid" end
+	if descriptor.allow_while_blocking~=nil then
+		if type(descriptor.allow_while_blocking)~="table" then return false,"action_concurrency_allowlist_invalid" end
+		local count=0
+		for id,allowed in pairs(descriptor.allow_while_blocking) do
+			count=count+1
+			if count>64 or not valid_action_id(id) or allowed~=true then return false,"action_concurrency_allowlist_invalid" end
+		end
+	end
+	if descriptor.support_probe_is_hint ~= nil and
+		type(descriptor.support_probe_is_hint) ~= "boolean" then
+		return false, "action_support_probe_mode_invalid"
+	end
+	if actions[action_id] ~= nil then return false, "action_already_registered" end
+	descriptor.id = action_id
+	actions[action_id] = descriptor
+	action_order[#action_order + 1] = action_id
+	return true
+end
+
+-- Public Extension API v1. Local extensions must use a vendor namespace and
+-- can never claim or replace a built-in action id, regardless of load order.
+function register(action_id, descriptor)
+	if BUILTIN_IDS[tostring(action_id or "")] then return false, "action_id_reserved" end
+	if type(action_id) ~= "string" or not valid_extension_action_id(action_id) then
+		return false, "extension_action_id_not_namespaced"
+	end
+	if extension_count >= MAX_EXTENSION_ACTIONS then
+		return false, "extension_action_limit_reached"
+	end
+	descriptor._adb_builtin = false
+	local registered, reason = register_descriptor(action_id, descriptor)
+	if registered then extension_count = extension_count + 1 end
+	return registered, reason
+end
+
+function register_builtin(action_id, descriptor)
+	if not BUILTIN_IDS[tostring(action_id or "")] then return false, "builtin_action_id_unknown" end
+	descriptor._adb_builtin = true
+	return register_descriptor(action_id, descriptor)
+end
+
+function extension_api_version()
+	return 1
+end
+
+function get(action_id)
+	return actions[tostring(action_id or "")]
+end
+
+function ids()
+	local result = {}
+	for _, action_id in ipairs(action_order) do result[#result + 1] = action_id end
+	return result
+end
+
+local function probe_support(descriptor, context)
+	if descriptor.is_supported == nil then return true end
+	local ok, supported, reason = pcall(descriptor.is_supported, context)
+	if not ok then
+		log_failure(descriptor.id, "support probe", supported)
+		return false, "action_support_probe_failed"
+	end
+	if supported == true then return true end
+	return false, clean_reason(reason or "action_unsupported")
+end
+
+function supported_ids()
+	local result = {}
+	for _, action_id in ipairs(action_order) do
+		local supported = probe_support(actions[action_id], nil)
+		if supported then result[#result + 1] = action_id end
+	end
+	return result
+end
+
+function update(now)
+	for _, action_id in ipairs(action_order) do
+		local callback = actions[action_id].update
+		if callback ~= nil then
+			local ok, reason = pcall(callback, now)
+			if not ok then log_failure(action_id, "update", reason) end
+		end
+	end
+end
+
+-- An extension may hold a short exclusive actor interaction. Its own update
+-- still runs while new commands remain queued; no global handler replacement.
+function busy_reason(action_id)
+	for _,id in ipairs(action_order) do
+		local probe=actions[id].is_blocking
+		if probe then
+			local ok,busy=pcall(probe)
+			if not ok then log_failure(id,"blocking probe",busy);return "effect_state_unavailable" end
+			if busy==true then
+				local allowed=actions[id].allow_while_blocking
+				-- READY is coarse: keep transport alive when some commands may
+				-- run. Dispatch enforces the exact allowlist for every command.
+				if type(allowed)~="table" or next(allowed)==nil or action_id~=nil and allowed[action_id]~=true then
+					return "effect_in_progress"
+				end
+			end
+		end
+	end
+end
+
+function on_game_load()
+	for _, action_id in ipairs(action_order) do
+		local callback = actions[action_id].on_game_load
+		if callback ~= nil then
+			local ok, reason = pcall(callback)
+			if not ok then log_failure(action_id, "game load", reason) end
+		end
+	end
+end
+
+function on_level_changing()
+	for _, action_id in ipairs(action_order) do
+		local callback = actions[action_id].on_level_changing
+		if callback ~= nil then
+			local ok, reason = pcall(callback)
+			if not ok then log_failure(action_id, "level change", reason) end
+		end
+	end
+end
+
+-- Application-initiated saves only. The before phase runs before the actor's
+-- ClientSave; save_state itself is too late to remove custom camera state.
+function effect_save(stage,name,success)
+	local all_ok=true
+	for _,id in ipairs(action_order) do
+		local callback=actions[id].on_effect_save
+		if callback then
+			local ok,result=pcall(callback,stage,name,success)
+			if not ok or result==false then log_failure(id,"effect save",result);all_ok=false end
+		end
+	end
+	return all_ok
+end
+
+-- ini_file(path) uses the engine's DLTX cache even when constructed again.
+-- This application-owned file changes at runtime; read it directly and keep
+-- its small generated LTX subset in Lua, outside native INI/cache ownership.
+local function read_safe_zone()
+	local path_ok, path = pcall(function()
+		return getFS():update_path("$game_config$", "plugins\\anomaly_donation_bridge_safe_zone.ltx")
+	end)
+	if not path_ok or type(path) ~= "string" or type(io) ~= "table" or type(io.open) ~= "function" then
+		return nil, "safe_zone_config_unavailable"
+	end
+	local opened, handle = pcall(io.open, path, "rb")
+	if not opened or handle == nil then return nil, "safe_zone_config_unavailable" end
+	local limit = 40 * 1024 * 1024 -- above the maximum generated rule set
+	local read_ok, text = pcall(function() return handle:read(limit + 1) end)
+	local closed = pcall(function() handle:close() end)
+	if not read_ok or not closed then return nil, "safe_zone_config_unavailable" end
+	if type(text) ~= "string" or #text > limit or text:find("%z") then
+		return nil, "safe_zone_config_invalid"
+	end
+	text = text:gsub("^\239\187\191", "")
+	local data, section = {}, nil
+	for line in text:gmatch("[^\r\n]+") do
+		line = anomaly_donation_bridge_common.trim(line)
+		if line ~= "" and line:sub(1, 1) ~= ";" then
+			local name = line:match("^%[([a-z0-9_.%-]+)%]$")
+			if name then
+				if data[name] then return nil, "safe_zone_config_invalid" end
+				section = {}; data[name] = section
+			else
+				local key, value = line:match("^([a-z0-9_.%-]+)%s*=%s*([a-z0-9_.%-]+)$")
+				if not section or not key or section[key] ~= nil then
+					return nil, "safe_zone_config_invalid"
+				end
+				section[key] = value
+			end
+		end
+	end
+	return data
+end
+
+-- Read rules and the current level for EVERY execution attempt, including F9,
+-- jump_to_level and retries of the same deferred command.
+function safe_zone_check(action_id, context)
+	local required = context and context.command and context.command.safe_zone_required == true
+	local data, reason = read_safe_zone()
+	if not data then
+		if not required and reason == "safe_zone_config_unavailable" then return nil end
+		return "deferred", reason
+	end
+	local settings = data.safe_zone or {}
+	local enabled = settings.enabled
+	if settings.schema ~= "1" or
+		(enabled ~= "true" and enabled ~= "false") then
+		return "deferred", "safe_zone_config_invalid"
+	end
+	if required and (data.safe_zone_revision or {}).value ~= context.command.safe_zone_revision then
+		return "deferred", "safe_zone_config_stale"
+	end
+	if enabled == "false" then return nil end
+	local behavior = settings.blocked_action
+	if behavior ~= "skip" and behavior ~= "wait" then return "deferred", "safe_zone_config_invalid" end
+	local level_ok, current = pcall(function() return level.name() end)
+	if not level_ok or type(current) ~= "string" or #current < 1 or #current > 100 or
+		current:match("^[A-Za-z0-9_.%-]+$") == nil then
+		return "deferred", "safe_zone_level_unavailable"
+	end
+	current = current:lower()
+	local section_name = "level_" .. current
+	local section = data[section_name]
+	if not section then return nil end
+	local mode = section.mode
+	if mode ~= "all" and mode ~= "selected" then return "deferred", "safe_zone_config_invalid" end
+	local blocked = mode == "all"
+	if not blocked then
+		local function effect_flag(handler)
+			local effects = data[section_name .. "_effects"]
+			if not effects then return nil end
+			local flag = effects[handler]
+			if flag == nil or flag == "false" then return false end
+			if flag == "true" then return true end
+			return nil
+		end
+		blocked = effect_flag(action_id)
+		if blocked == nil then return "deferred", "safe_zone_config_invalid" end
+		local source = context and context.command and context.command.safe_zone_source_handler_id
+		if source and source ~= action_id then
+			local source_flag = effect_flag(source)
+			if source_flag == nil then return "deferred", "safe_zone_config_invalid" end
+			blocked = blocked or source_flag
+		end
+	end
+	if blocked then
+		if behavior == "wait" then return "deferred", "safe_zone_waiting:" .. current end
+		return "rejected", "safe_zone_blocked:" .. current
+	end
+	return nil
+end
+
+function dispatch(action_id, context, params, before_execute)
+	local descriptor = get(action_id)
+	if descriptor == nil then return "rejected", "action_not_registered" end
+	if type(context) ~= "table" or type(params) ~= "table" then
+		return "rejected", "action_context_invalid"
+	end
+	local btr=anomaly_donation_bridge_btr_ai
+	if btr and btr.passenger_object() then
+		local allowed,reason=btr.passenger_command(action_id,context,params)
+		if not allowed then return "deferred",reason end
+	end
+	-- A strictly scoped, explicit manual recovery command changes only the
+	-- actor parameter defaults. It must work in a Safe Zone as well.
+	local recovery=action_id=="actor_boost" and descriptor._adb_builtin==true and
+		params.reset_to_defaults=="true"
+	if recovery then
+		for key in pairs(params) do if key~="reset_to_defaults" then recovery=false;break end end
+	end
+	if not recovery then
+		local safe_status, safe_reason = safe_zone_check(action_id, context)
+		if safe_status ~= nil then return safe_status, safe_reason end
+		local busy=busy_reason(action_id)
+		if busy then return "deferred",busy end
+	end
+	-- Reload the application-owned exclusion file for every command. This makes
+	-- a newly excluded section effective immediately, without restarting the game.
+	if not recovery and anomaly_donation_bridge_catalog ~= nil and
+		type(anomaly_donation_bridge_catalog.refresh_command_exclusions) == "function" then
+		local exclusions_ok = pcall(
+			anomaly_donation_bridge_catalog.refresh_command_exclusions)
+		if not exclusions_ok then return "rejected", "catalog_exclusions_unavailable" end
+	end
+	-- Spawn/inventory built-ins validate the real call in can_execute/execute.
+	-- Eagerly reading a luabind method from an engine object is not portable: on
+	-- several compatible X-Ray builds a callable method cannot be inspected as a
+	-- plain Lua function.  Their is_supported result is therefore only a feature
+	-- hint.  Other built-ins and every third-party extension retain the strict
+	-- probe contract.
+	if not (descriptor._adb_builtin and descriptor.support_probe_is_hint == true) then
+		local supported, support_reason = probe_support(descriptor, context)
+		if not supported then return "rejected", support_reason end
+	end
+	if descriptor.can_execute ~= nil then
+		local check_ok, allowed, status, reason = pcall(descriptor.can_execute, context, params)
+		if not check_ok then
+			log_failure(action_id, "precondition", allowed)
+			return "rejected", "action_check_failed"
+		end
+		if allowed ~= true then
+			if not valid_status(status) or status == "executed" then status = "rejected" end
+			return status, clean_reason(reason)
+		end
+	end
+	if before_execute ~= nil and not recovery then
+		if type(before_execute) ~= "function" then
+			return "rejected", "before_execute_invalid"
+		end
+		local callback_ok, allowed, callback_reason = pcall(before_execute,
+			action_id, context, params)
+		if not callback_ok then
+			log_failure(action_id, "before execute", allowed)
+			return "uncertain", "before_execute_failed"
+		end
+		if allowed == false then
+			return "uncertain", clean_reason(callback_reason)
+		end
+	end
+	local execute_ok, status, reason = pcall(descriptor.execute, context, params)
+	if not execute_ok then
+		log_failure(action_id, "execution", status)
+		return "uncertain", "action_execution_failed"
+	end
+	if not valid_status(status) then return "uncertain", "action_result_invalid" end
+	return status, clean_reason(reason)
+end

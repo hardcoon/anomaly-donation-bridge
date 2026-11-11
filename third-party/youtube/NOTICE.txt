@@ -1,0 +1,14 @@
+YouTube chat streaming protocol
+
+The stream_list.proto subset used by this client is adapted from Google's
+YouTube Live Streaming API documentation:
+https://developers.google.com/youtube/data/live/streaming-live-chat
+
+Code samples on that page are licensed under Apache License 2.0.
+Modifications by Hardcoon, 2026: reduced to read-only chat fields and added a
+C# namespace. The wire field numbers and service name are preserved.
+See LICENSE_APACHE_2.txt. This component's terms are not replaced by the
+application license. YouTube and Google are trademarks of Google LLC.
+
+The .NET client uses Grpc.Net.Client (Apache-2.0) and Google.Protobuf (BSD-3-Clause).
+Their notices are included alongside this file. Grpc.Tools is build-only.

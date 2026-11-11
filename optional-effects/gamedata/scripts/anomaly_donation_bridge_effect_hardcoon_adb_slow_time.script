@@ -1,0 +1,203 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,"handlerId":"hardcoon.adb.slow_time","displayName":"Замедление времени",
+  "description":"Временно замедляет весь игровой мир, включая героя, анимации и звуки. Замедление 65% — скорость игры 35% от обычной. Длительность указана в реальных секундах без паузы; F5/F9 сохраняют остаток. При выходе возвращается прежняя скорость. Без расхода выносливости и экранных фильтров.",
+  "category":"player_state","cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"duration_seconds","displayName":"Длительность, сек.","kind":"Integer","minimum":1,"maximum":3600,"defaultValue":"30"},
+    {"key":"slowdown_percent","displayName":"Замедление, %","kind":"Integer","minimum":1,"maximum":90,"defaultValue":"65"}
+  ],
+  "parameters":{"duration_seconds":"30","slowdown_percent":"65"},"itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+-- Research: ModDB Bullet Time 3.2 uses the stock time_factor console command.
+-- Independent Bridge implementation; no third-party code/assets/MCM copied.
+-- level.set_time_factor controls the calendar, NOT simulation slow motion.
+local HANDLER="hardcoon.adb.slow_time"
+local SAVE="adb_slow_time_v1"
+local LEASE="ADB_SLOW_TIME_PROCESS_LEASE_V1"
+local active,registered,load_pending=nil,false,false
+local ffi_ok,ffi=pcall(require,"ffi")
+local kernel=nil
+if ffi_ok then
+    pcall(ffi.cdef,[[
+        unsigned long __stdcall GetEnvironmentVariableA(const char* name, char* buffer, unsigned long size);
+        int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+    ]])
+    local ok,value=pcall(ffi.load,"kernel32")
+    if ok then kernel=value end
+end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e12 end
+local function factor(n) return finite(n) and n>=0.001 and n<=1000 end
+local function same(a,b) return finite(a) and finite(b) and math.abs(a-b)<=0.000001 end
+local function storage() return alife_storage_manager and alife_storage_manager.get_state() end
+local function clock()
+    local ok,n=pcall(function() return device():time_global() end)
+    return ok and finite(n) and n or nil
+end
+local function read_factor()
+    -- CCC_TimeFactor is NOT CCC_Float: get_float returns zero and logs an error.
+    local ok,n=pcall(function() return tonumber(get_console():get_string("time_factor")) end)
+    return ok and finite(n) and n>=0 and n<=1000 and n or nil
+end
+local function write_factor(n)
+    if not factor(n) then return false end
+    local ok=pcall(function() get_console():execute("time_factor "..string.format("%.6f",n):gsub(",",".")) end)
+    return ok and same(read_factor(),n)
+end
+local function env_read()
+    if not kernel then return nil end
+    local ok,value=pcall(function()
+        local buffer=ffi.new("char[?]",128)
+        local count=tonumber(kernel.GetEnvironmentVariableA(LEASE,buffer,128))
+        if count and count>0 and count<128 then return ffi.string(buffer,count) end
+    end)
+    return ok and value or nil
+end
+local function env_write(value)
+    if not kernel then return false end
+    local ok,result=pcall(function() return kernel.SetEnvironmentVariableA(LEASE,value) end)
+    return ok and result~=0
+end
+local function release_lease()
+    -- Device time_factor survives Lua reset/F9; plain Lua globals do not.
+    -- This tiny marker belongs only to the current GAME PROCESS, not USER.ltx
+    -- or system/user environment. It can never leak into a fresh game process.
+    local text=env_read()
+    if not text then return true end
+    local before,applied=text:match("^([%d%.eE+-]+)|([%d%.eE+-]+)$")
+    before,applied=tonumber(before),tonumber(applied)
+    if not factor(before) or not factor(applied) then return env_write(nil) end
+    local current=read_factor()
+    if current==nil then return false end
+    -- Another mod/user has taken over: do not overwrite its new speed.
+    if same(current,applied) and not write_factor(before) then return false end
+    return env_write(nil)
+end
+local function persist(data)
+    data=data or storage()
+    if not data then return end
+    if active and active.remaining_ms>0 then
+        data[SAVE]={version=1,remaining_ms=active.remaining_ms,previous=active.previous,
+            applied=active.applied,slowdown_percent=active.slowdown_percent}
+    else data[SAVE]=nil end
+end
+local function read_saved()
+    local data=storage();local r=data and data[SAVE]
+    if type(r)~="table" or r.version~=1 or not finite(r.remaining_ms) or r.remaining_ms<=0 or r.remaining_ms>3600000 or
+        not factor(r.previous) or not factor(r.applied) or not finite(r.slowdown_percent) or
+        r.slowdown_percent%1~=0 or r.slowdown_percent<1 or r.slowdown_percent>90 or
+        not same(r.applied,r.previous*(1-r.slowdown_percent/100)) then return nil end
+    return {remaining_ms=r.remaining_ms,previous=r.previous,applied=r.applied,slowdown_percent=r.slowdown_percent}
+end
+local function stop()
+    if not release_lease() then return false end
+    active=nil;persist();return true
+end
+local function account()
+    if not active then return true end
+    local now=clock()
+    if not now then return false end
+    if active.running then
+        local current=read_factor()
+        if not same(current,active.applied) then
+            -- Relinquish instead of fighting another bullet-time/console mod.
+            stop();return false
+        end
+        if not device():is_paused() and active.last then
+            -- TimerGlobal is simulation-scaled and stops on pause. Divide by
+            -- OUR applied scale, not calendar factor, FPS or wall-clock gaps.
+            active.remaining_ms=math.max(0,active.remaining_ms-math.max(0,now-active.last)/active.applied)
+        end
+    end
+    active.last=now;persist()
+    return true
+end
+local function suspend()
+    if not account() or not active then return end
+    if release_lease() then active.running=false;active.last=nil end
+    persist()
+end
+local function resume()
+    if not active or active.running then return true end
+    local current=read_factor()
+    if not same(current,active.previous) then active=nil;persist();return false end
+    if not env_write(string.format("%.9g|%.9g",active.previous,active.applied)) then return false end
+    if not write_factor(active.applied) then release_lease();return false end
+    active.running=true;active.last=clock();return true
+end
+local function update()
+    if load_pending then
+        if not release_lease() then return end
+        active=read_saved();load_pending=false
+        if active then
+            -- A fresh process may have a different normal speed. Preserve the
+            -- saved percentage/remaining duration, not another session's base.
+            local baseline=read_factor()
+            if factor(baseline) and factor(baseline*(1-active.slowdown_percent/100)) then
+                active.previous=baseline;active.applied=baseline*(1-active.slowdown_percent/100)
+            else active=nil end
+        end
+        persist()
+    end
+    if not active then return end
+    if not db or not db.actor or not db.actor:alive() or device():is_paused() then suspend();return end
+    if not resume() or not account() or not active then return end
+    if active.remaining_ms<=0 then stop() end
+end
+local function supported()
+    return kernel~=nil and USE_MARSHAL==true and type(RegisterScriptCallback)=="function" and
+        type(get_console)=="function" and type(device)=="function" and clock()~=nil and storage()~=nil
+end
+local function can_execute(context,params)
+    local common=anomaly_donation_bridge_common
+    local valid,why=common.params_only(params,{duration_seconds=true,slowdown_percent=true})
+    if not valid then return false,"rejected",why end
+    local duration,reason=common.parse_integer(params.duration_seconds,30,1,3600,"slow_time_duration_invalid")
+    if not duration then return false,"rejected",reason end
+    local percent,error_code=common.parse_integer(params.slowdown_percent,65,1,90,"slow_time_percent_invalid")
+    if not percent then return false,"rejected",error_code end
+    if not supported() then return false,"deferred","slow_time_api_unavailable" end
+    if load_pending or active then return false,"deferred","slow_time_already_active" end
+    if not db or not db.actor or not db.actor:alive() or device():is_paused() then return false,"deferred","actor_unavailable" end
+    local before=read_factor()
+    if not factor(before) then return false,"deferred","slow_time_command_unavailable" end
+    if not factor(before*(1-percent/100)) then return false,"deferred","slow_time_scale_unavailable" end
+    context.options={duration=duration,percent=percent};return true
+end
+local function execute(context)
+    local o=context.options
+    if not o then return "rejected","slow_time_options_missing" end
+    local checked={};local ok,status,why=can_execute(checked,{duration_seconds=tostring(o.duration),slowdown_percent=tostring(o.percent)})
+    if not ok then return status,why end
+    if not release_lease() then return "deferred","slow_time_restore_pending" end
+    local before=read_factor()
+    active={remaining_ms=o.duration*1000,previous=before,applied=before*(1-o.percent/100),slowdown_percent=o.percent}
+    if not resume() then
+        local restored=release_lease();active=nil;persist()
+        return restored and "rejected" or "uncertain","slow_time_apply_failed"
+    end
+    persist();return "executed","slow_time_started"
+end
+local function on_load()
+    -- Never persist the old timeline over newly LOADED state.
+    release_lease();active=nil;load_pending=true
+end
+function on_game_start()
+    if registered then return end;registered=true
+    release_lease()
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=supported,
+        can_execute=can_execute,execute=execute,update=update,on_game_load=on_load,on_level_changing=suspend})
+    RegisterScriptCallback("actor_on_update",update)
+    RegisterScriptCallback("save_state",function(data) account();if not load_pending then persist(data) end end)
+    RegisterScriptCallback("on_before_save_input",function() account() end)
+    RegisterScriptCallback("on_before_load_input",suspend)
+    RegisterScriptCallback("main_menu_on_init",suspend)
+    -- main_menu_on_quit means RETURN TO GAME, not quit to Windows.
+    RegisterScriptCallback("main_menu_on_quit",function() if active then active.last=clock() end end)
+    RegisterScriptCallback("actor_on_before_death",suspend)
+    RegisterScriptCallback("on_console_execute",function(command)
+        if command=="quit" or command=="disconnect" or command=="load" or command=="start" then suspend() end
+    end)
+end

@@ -1,0 +1,1319 @@
+-- Independent BTR runtime. Native vehicle, navigation and input; no transport polling.
+local HANDLER="hardcoon.adb.btr_companion"
+local SECTION="adb_btr_companion"
+local SAVE_KEY="adb_btr_companion_v1"
+local DEFAULT_DRIVE_KEY="RCTRL"
+local HULL_STRENGTH=10
+local FIRE_RANGE=100
+local states,placements={},{}
+local bullets,prune_at={},0
+local registered=false
+local last_tick,route_cursor,last_spawn_frame
+local boarding
+local stopped_for_load=false
+local next_tick=0
+local notice_at={}
+local COMPANION_SPOT="ui_pda2_companion_location"
+local markers,marker_schema={},nil
+local function controls() return anomaly_donation_bridge_vehicle_controls end
+local function nav() return anomaly_donation_bridge_vehicle_navigation end
+local function actor() return db and db.actor end
+local function copy(p) return vector():set(p.x,p.y,p.z) end
+local function vec(x,y,z) return vector():set(x,y,z) end
+
+local notices={
+    moving="Механик-водитель: Выдвигаюсь на указанную позицию, командир.",
+    arrived="Механик-водитель: Прибыл на указанную позицию.",
+    following="Механик-водитель: Следую за вами, командир.",
+    detour="Механик-водитель: Ищу объезд...",
+    no_point="Механик-водитель: Дайте метку, Командир. До 150 м от вас.",
+    not_ready="Механик-водитель: Командир, пока не готов принять команду движения.",
+    blocked="Механик-водитель: Как бы там проехать... Ещё думаю, командир.",
+    error="БТР: Системная ошибка. Подробности в %s.",
+    spawned="Механик-водитель: Командир, %s из штаба просил вас сопроводить.",
+    extended="Механик-водитель: Штаб послал новый приказ, продолжать следование ещё %d секунд. Приказ принял. Продолжаю сопровождение цели.",
+    exploding="Механик-водитель: Командир, горим! Ща рванёт! Отходите подальше!"
+}
+local function game_log_name()
+    -- no_native_input can replace user_name() with Player after the log is
+    -- opened. Read the real log name instead of constructing xray_Player.log.
+    local ok,name=pcall(function()
+        if type(get_console)=="function" then get_console():execute("flush") end
+        local fs=getFS()
+        local files=fs:file_list_open_ex("$logs$",FS.FS_ListFiles+FS.FS_RootOnly,"xray_*.log")
+        if not files or files:Size()==0 then return end
+        files:Sort(FS.FS_sort_by_modif_down)
+        return files:GetAt(0):NameShort()
+    end)
+    if ok and type(name)=="string" and not name:find("[\\/%z\1-\31]") and name:lower():match("^xray_.+%.log$") then
+        return anomaly_donation_bridge_common.game_text_utf8(name) or "xray_*.log"
+    end
+    return "xray_*.log"
+end
+local function send_notice(message,duration)
+    if news_manager and type(news_manager.send_tip)=="function" and actor() then
+        local text=anomaly_donation_bridge_common.game_text_cp1251_lossy(message)
+        -- A modded news window must not fail the spawn/extension or repeat it.
+        return pcall(news_manager.send_tip,actor(),text,nil,nil,duration or 5000)
+    end
+end
+local function notice(key,cooldown)
+    local now=time_global()
+    if now<(notice_at[key] or 0) then return end
+    notice_at[key]=now+(cooldown or 1200)
+    local message=notices[key] or key
+    if key=="error" then message=message:format(game_log_name()) end
+    send_notice(message)
+end
+local function destruction_warning(record)
+    if record.warning_remaining~=nil then return end
+    record.warning_remaining=3000
+    send_notice(notices.exploding,6000)
+end
+
+local function status(record,state,value,now)
+    if state.status==value then return end
+    state.status=value
+    record.ai_status=value
+    if printf and now>=(state.log_at or 0) then
+        printf("[ADB BTR] "..record.name..": "..value)
+        state.log_at=now+5000
+    end
+end
+
+local function data(create)
+    local store=alife_storage_manager and alife_storage_manager.get_state()
+    if type(store)~="table" then return end
+    if create and type(store[SAVE_KEY])~="table" then store[SAVE_KEY]={} end
+    return store[SAVE_KEY]
+end
+
+local function identity(obj,record,offline)
+    if not obj or not record then return false end
+    return (offline and obj:section_name() or obj:section())==SECTION and obj:name()==record.name
+end
+
+local function has_marker(id)
+    local ok,value=pcall(level.map_has_object_spot,id,COMPANION_SPOT)
+    return ok and value~=nil and value~=false and value~=0
+end
+
+local function remove_marker(id)
+    local entry=markers[id]
+    if not entry then return end
+    local server=alife():object(id,true)
+    -- Never remove somebody else's spot after the engine recycles an id.
+    if (not server or identity(server,entry,true)) and has_marker(id) then
+        pcall(level.map_remove_object_spot,id,COMPANION_SPOT)
+    end
+    markers[id]=nil
+end
+
+local function clear_markers()
+    local ids={};for id in pairs(markers) do ids[#ids+1]=id end
+    for _,id in ipairs(ids) do remove_marker(id) end
+end
+
+local function update_marker(id,record,now)
+    if type(level.map_add_object_spot)~="function" or type(level.map_change_spot_hint)~="function" then return end
+    if marker_schema==nil then
+        -- An unknown XML spot can assert in C++, outside pcall. Check the
+        -- installed game's schema before using its native companion icon.
+        local ok,valid=pcall(function()
+            local xml=CScriptXmlInit();xml:ParseFile("map_spots.xml")
+            return xml:NodeExist(COMPANION_SPOT,0)
+        end)
+        marker_schema=ok and valid==true
+    end
+    if not marker_schema then return end
+    local entry=markers[id]
+    if entry and entry.name~=record.name then markers[id]=nil;entry=nil end
+    local seconds=math.max(0,math.ceil((record.remaining or 0)/1000))
+    if entry and entry.seconds==seconds and now<(entry.check_at or 0) then return end
+    local hint=anomaly_donation_bridge_common.game_text_cp1251_lossy("БТР остаток топлива: "..seconds)
+    if not entry then
+        if has_marker(id) then return end -- preserve a marker owned by another mod
+        local ok=pcall(level.map_add_object_spot,id,COMPANION_SPOT,hint)
+        if not ok or not has_marker(id) then return end
+        entry={name=record.name};markers[id]=entry
+    elseif not has_marker(id) then
+        local ok=pcall(level.map_add_object_spot,id,COMPANION_SPOT,hint)
+        if not ok or not has_marker(id) then markers[id]=nil;return end
+    elseif entry.seconds~=seconds then
+        if not pcall(level.map_change_spot_hint,id,COMPANION_SPOT,hint) then return end
+    end
+    entry.seconds,entry.check_at=seconds,now+1000
+end
+
+local function owned(obj)
+    if not obj then return end
+    local record=(data(false) or {})[tostring(obj:id())]
+    if identity(obj,record,false) then return record end
+end
+
+local function passenger()
+    local a=actor()
+    if not a or type(a.get_attached_vehicle)~="function" then return end
+    local obj=a:get_attached_vehicle()
+    local record=owned(obj)
+    if record and record.level==level.name() then return obj,record end
+end
+
+function passenger_object() return passenger() end
+
+local safe_spawns={spawn_npcs=true,spawn_random_npcs=true,spawn_mutants=true,spawn_random_mutants=true,spawn_donor_boss=true}
+function spawn_anchor(a)
+    local obj,record=passenger()
+    if not obj or not a then return end
+    local p=obj:position()
+    local id=nav().vertex(vec(p.x,p.y+record.shape.bottom,p.z),3.5)
+    if not id then return end
+    local game_id=a:game_vertex_id()
+    return {position=function() return copy(p) end,level_vertex_id=function() return id end,
+        game_vertex_id=function() return game_id end}
+end
+
+function passenger_command(action_id,context,params)
+    if safe_spawns[action_id] then
+        context.spawn_anchor=spawn_anchor(context.actor)
+        return context.spawn_anchor~=nil,"btr_spawn_anchor_waiting"
+    end
+    if action_id=="hardcoon.adb.show_squads" then return true end
+    if action_id==HANDLER and params.extend_current~="false" then
+        local _,r=passenger()
+        if r and r.stage=="active" then return true end
+    end
+    return false,"actor_in_btr"
+end
+
+local function active_vehicle(a)
+    local obj,record=passenger()
+    if record and record.stage=="active" then return record end
+    local best,nearest
+    local p=a:position()
+    for key,r in pairs(data(false) or {}) do
+        if r.stage=="active" and r.level==level.name() then
+            local o=level.object_by_id(tonumber(key))
+            if identity(o,r,false) then
+                local d=o:position():distance_to(p)
+                if not best or d<nearest then best,nearest=r,d end
+            end
+        end
+    end
+    return best
+end
+
+local function running()
+    local a=actor()
+    return not stopped_for_load and a and a:alive() and level.present() and
+        (type(app_ready)~="function" or app_ready()) and not device():is_paused() and device().precache_frame==0
+end
+
+local function input_ready()
+    return running() and (type(Check_UI)~="function" or not Check_UI())
+        and (not actor_menu or not actor_menu.is_hud_free or actor_menu.is_hud_free())
+        and (not level.main_input_receiver or not level.main_input_receiver())
+end
+
+local function drive_dik(name)
+    if DIK_keys and type(name)=="string" then
+        return DIK_keys[name=="RCTRL" and "DIK_RCONTROL" or "DIK_"..name]
+    end
+end
+
+function supported(legacy)
+    local c=controls()
+    local a=actor()
+    local driver=c and (legacy==nil and (c.available() or c.available(true)) or c.available(legacy))
+    return driver and a and type(a.get_attached_vehicle)=="function" and
+        type(a.attach_vehicle)=="function" and type(a.detach_vehicle)=="function" and
+        type(level.iterate_nearest)=="function" and type(level.press_action)=="function" and
+        type(level.release_action)=="function" and type(bind_to_dik)=="function" and
+        utils_stpk and type(utils_stpk.parse_cse_visual_properties_packet)=="function" and
+        system_ini():section_exist(SECTION)
+end
+
+function can_execute(ctx,params)
+    local common=anomaly_donation_bridge_common
+    local valid,reason=common.params_only(params,{duration_seconds=true,follow_distance=true,extend_current=true,
+        vehicle_sections=true,catalog_revision=true,drive_key=true,legacy_api=true})
+    if not valid then return false,"rejected",reason end
+    if not running() then return false,"deferred","actor_unavailable" end
+    if params.legacy_api~=nil and params.legacy_api~="true" and params.legacy_api~="false" then
+        return false,"rejected","btr_legacy_api_invalid"
+    end
+    local legacy=params.legacy_api=="true"
+    if not supported(legacy) then
+        return false,"rejected",legacy and "btr_legacy_api_unavailable" or
+            supported(true) and "btr_legacy_api_required" or "btr_native_api_unavailable"
+    end
+    local duration,why=common.parse_integer(params.duration_seconds,60,10,99999999,"btr_duration_invalid")
+    if not duration then return false,"rejected",why end
+    local distance,why=common.parse_integer(params.follow_distance,20,5,100,"btr_distance_invalid")
+    if not distance then return false,"rejected",why end
+    local drive_key=params.drive_key or DEFAULT_DRIVE_KEY
+    local dik=drive_dik(drive_key)
+    if not dik or drive_key=="ESCAPE" or drive_key=="F5" or drive_key=="F9" or drive_key:match("^MOUSE") then
+        return false,"rejected","btr_drive_key_invalid"
+    end
+    if params.extend_current and params.extend_current~="true" and params.extend_current~="false" then
+        return false,"rejected","btr_extend_invalid"
+    end
+    local current=params.extend_current~="false" and active_vehicle(ctx.actor)
+    if current then ctx.btr={extend=current,duration=duration,drive_key=params.drive_key,legacy_api=legacy};return true end
+    if passenger() then return false,"deferred","actor_in_btr" end
+    local id=ctx.command and ctx.command.command_id
+    local waiting=id and placements[id]
+    if not waiting then
+        local entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"vehicle_sections","armed_vehicle")
+        if not entries then return false,why=="catalog_revision_mismatch" and "deferred" or "rejected",why end
+        if #entries==0 then return false,"rejected","selection_empty" end
+        local source=entries[math.random(1,#entries)].section_id
+        local model=anomaly_donation_bridge_vehicle_catalog.profile(system_ini(),source,true)
+        if not model then return false,"rejected","btr_model_unavailable" end
+        waiting={source=source,model=model,shape=nav().footprint(model.box),level=level.name()}
+        if id then placements[id]=waiting end
+    end
+    if waiting.level~=level.name() then waiting.site=nil;waiting.level=level.name() end
+    waiting.seen=ctx.now
+    if distance<=waiting.shape.x+0.8 then return false,"deferred","btr_spawn_point_waiting" end
+    local site=waiting.site
+    if not site or not nav().recheck_spawn(site,ctx.actor,waiting.shape,distance) then
+        waiting.site=nil
+        if last_spawn_frame~=ctx.now then
+            last_spawn_frame=ctx.now
+            for _=1,12 do
+                waiting.sample=(waiting.sample or 0)+1
+                waiting.site=nav().spawn_candidate(ctx.actor,waiting.shape,distance,waiting.sample)
+                if waiting.site then break end
+            end
+        end
+        site=waiting.site
+        if not site then return false,"deferred","btr_spawn_point_waiting" end
+    end
+    ctx.btr={placement=waiting,duration=duration,distance=distance,id=id,drive_key=drive_key,legacy_api=legacy}
+    return true
+end
+
+local function set_model(server,model)
+    local u=utils_stpk
+    local packet=net_packet()
+    packet:w_begin(0)
+    server:STATE_Write(packet)
+    packet:r_seek(2)
+    local native={}
+    u.parse_cse_alife_object_properties_packet(native,packet)
+    u.parse_cse_visual_properties_packet(native,packet)
+    u.parse_cse_ph_skeleton_properties_packet(native,packet)
+    if packet:r_elapsed()~=4 then return false end
+    local hp=packet:r_float()
+    native.visual_name=model.visual
+    packet:w_begin(0)
+    u.fill_cse_alife_object_properties_packet(native,packet)
+    u.fill_cse_visual_properties_packet(native,packet)
+    u.fill_cse_ph_skeleton_properties_packet(native,packet)
+    packet:w_float(hp)
+    local size=packet:w_tell()
+    packet:r_seek(2)
+    server:STATE_Read(packet,size)
+    return true
+end
+
+function execute(ctx)
+    local p=ctx.btr
+    if p.extend then
+        p.extend.remaining=p.extend.remaining+p.duration*1000
+        p.extend.warning_remaining=nil
+        if p.drive_key then p.extend.drive_key=p.drive_key end
+        p.extend.legacy_api=p.legacy_api
+        send_notice(notices.extended:format(p.duration),10000)
+        return "executed","btr_extended_"..p.duration.."s"
+    end
+    local job=p.placement
+    if not anomaly_donation_bridge_catalog.is_available(job.source,"armed_vehicle") then
+        if p.id then placements[p.id]=nil end
+        return "rejected","btr_model_unavailable"
+    end
+    if not nav().recheck_spawn(job.site,ctx.actor,job.shape,p.distance) then
+        job.site=nil
+        return "deferred","btr_spawn_point_waiting"
+    end
+    local records=data(true)
+    if not records then return "deferred","btr_save_unavailable" end
+    local sim=alife()
+    local server=sim:create(SECTION,job.site.position,job.site.id,ctx.actor:game_vertex_id())
+    if not server then return "rejected","btr_create_failed" end
+    local id=server.id
+    local ok,prepared=pcall(function()
+        sim:set_switch_online(id,false)
+        if not set_model(server,job.model) then return false end
+        server.angle=vec(0,-job.site.heading,0)
+        local donor=tostring(ctx.command and ctx.command.donor_name or ""):gsub("[%z\1-\31\127]",""):match("^%s*(.-)%s*$")
+        -- Donor text is data; do not let a name inject PDA colour directives.
+        donor=donor:gsub("%%c%[[^%]]*%]","")
+        donor=anomaly_donation_bridge_common.truncate_utf8(donor~="" and donor or "Донатер",384)
+        records[tostring(id)]={name=server:name(),source=job.source,visual=job.model.visual,donor_name=donor,
+            shape=job.shape,fire_bone=job.model.fire_bone,level=level.name(),
+            remaining=p.duration*1000,distance=p.distance,drive_key=p.drive_key,legacy_api=p.legacy_api,
+            stage="arriving",mode="follow"}
+        sim:set_switch_offline(id,false)
+        sim:set_switch_online(id,true)
+        return true
+    end)
+    if not ok or not prepared then
+        records[tostring(id)]=nil
+        anomaly_donation_bridge_common.rollback_server_objects({server})
+        return "rejected","btr_prepare_failed"
+    end
+    if p.id then placements[p.id]=nil end
+    return "executed","btr_created_"..p.duration.."s"
+end
+
+local function hostile(o,a)
+    if not o or not o:is_entity_alive() or not o:alive() or o:id()==a:id() or
+        o:has_info("npcx_is_companion") then return false end
+    if o:relation(a)~=game_object.enemy then return false end
+    local ignore=xr_combat_ignore and xr_combat_ignore.ignore_enemy_by_overrides
+    if type(ignore)=="function" then
+        local ok,result=pcall(ignore,a,o)
+        if not ok or result==true then return false end
+    end
+    return true
+end
+
+local function fight(obj,record,state,a,now)
+    local function clear_line(p,d,len,target_id)
+        local hit=rq_result()
+        if not level.ray_pick(p,d,len+0.5,rq_target.rqtBoth,hit,obj) then return false end
+        return hit.object and hit.object:id()==target_id
+    end
+    if not state.target_at or now>=state.target_at then
+        state.target,state.target_at=nil,now+350
+        local muzzle=obj:bone_transform(record.fire_bone).c
+        level.iterate_nearest(obj:position(),FIRE_RANGE,function(o)
+            if hostile(o,a) then
+                local p=o:center()
+                local len=muzzle:distance_to(p)
+                if len>2 and clear_line(muzzle,vec((p.x-muzzle.x)/len,(p.y-muzzle.y)/len,(p.z-muzzle.z)/len),len,o:id()) then
+                    state.target=o:id();return true
+                end
+            end
+            return false
+        end)
+    end
+    local target=state.target and level.object_by_id(state.target)
+    if not hostile(target,a) then controls().aim(state.control,record.fire_bone,nil);return end
+    local target_id=target:id()
+    controls().aim(state.control,record.fire_bone,target:center(),function(p,d,len)
+        return clear_line(p,d,len,target_id)
+    end)
+end
+
+local function protect_from_btr(hit,flags)
+    local id=hit and tonumber(hit.weapon_id)
+    local bullet=hit and bullets[tonumber(hit.bullet_id) or -1]
+    if type(flags)=="table" and id and id>=0 and id<65535 and
+        (bullet and bullet.weapon==id or owned(level.object_by_id(id))) then
+        flags.ret_value=false
+    end
+end
+
+local function player_hit(attack,_,flags)
+    if attack and type(flags)=="table" and passenger() and hit then
+        local source=attack.draftsman
+        local kind=attack.type
+        if source and source:is_monster() and kind~=nil and
+            (kind==hit.strike or kind==hit.wound or kind==hit.wound_2 or kind==hit.fire_wound) then
+            flags.ret_value=false
+        end
+    end
+    protect_from_btr(attack,flags)
+end
+
+local function bullet_created(bullet)
+    local id=tonumber(bullet.weapon_id)
+    local serial=tonumber(bullet.bullet_id)
+    if serial and id and id>=0 and id<65535 and owned(level.object_by_id(id)) then
+        bullets[serial]={weapon=id,expires=time_global()+15000}
+    end
+end
+
+local function creature_hit(obj,hit,_,flags)
+    if actor() and not hostile(obj,actor()) then protect_from_btr(hit,flags) end
+end
+
+local blocked_keys,retiring_keys={},{}
+local function key(_,bind,disabled,flags)
+    if disabled or type(flags)~="table" then return end
+    local _,record=passenger()
+    if record and (blocked_keys[bind] or record.stage=="retiring" and retiring_keys[bind]) then
+        flags.ret_value=false
+    end
+end
+
+local function mouse(_,_,disabled)
+    if disabled then return end
+    local obj=passenger()
+    if obj then
+        -- The native mouse handler also aims an active turret. Suspend it
+        -- for this event and let the same input reach the native camera.
+        -- The next combat update independently restores the vetted aim.
+        obj:get_car():Action(CCar.eWpnActivate,0)
+    end
+end
+
+local function reset_route(state)
+    state.path,state.search,state.goal,state.sample_at,state.order=nil,nil,nil,nil,nil
+    state.next_path,state.route_hint=nil,nil
+    state.motion_at,state.reverse_until=nil,nil
+    state.wait_at,state.blocked_at,state.recovery_until,state.turn_failures=nil,nil,nil,nil
+    state.detour,state.order_hold,state.block_reason=nil,nil,nil
+    state.recovery_attempts,state.progress_at=0,nil
+    state.progress_path,state.progress_reverse,state.progress_remaining=nil,nil,nil
+    state.waypoint,state.last_position,state.recovery_steer,state.drive_at=nil,nil,nil,nil
+    state.arrival_radius=nil
+end
+
+local function clear_order(record,state)
+    record.destination,record.order_wait,record.approach_armed=nil,nil,nil
+    reset_route(state)
+end
+
+local function begin_manual(record,state)
+    if state.manual then return end
+    clear_order(record,state)
+    controls().release_driver(state.control)
+    controls().native_camera()
+    state.manual=true
+    record.mode="manual"
+end
+
+local function close_enough(a,obj,shape)
+    local p,q,h=a:position(),obj:position(),obj:direction()
+    local x,z=p.x-q.x,p.z-q.z
+    local side=math.max(0,math.abs(x*h.z-z*h.x)-shape.x)
+    local end_gap=math.max(0,math.abs(x*h.x+z*h.z)-shape.z)
+    return math.abs(p.y-(q.y+shape.bottom))<2.5 and side*side+end_gap*end_gap<=2^2
+end
+
+local function press(dik,bind,disabled,flags)
+    key(dik,bind,disabled,flags)
+    if disabled or type(flags)~="table" or not flags.ret_value or not input_ready() then return end
+    local a=actor()
+    local held,record=passenger()
+    if held and bind==key_bindings.kTORCH then
+        local state=states[tostring(held:id())]
+        if state and state.headlights then
+            flags.ret_value=false
+            if record.stage=="active" then
+                record.headlights=not record.headlights
+                controls().update_headlights(held,state.headlights,record.headlights)
+            end
+            return
+        end
+    end
+    if a:get_attached_vehicle() then return end
+    if bind==key_bindings.kUSE and level.get_target_obj then
+        local obj=level.get_target_obj()
+        local record=owned(obj)
+        if record and record.stage=="active" and record.level==level.name()
+            and close_enough(a,obj,record.shape) then
+            boarding={id=obj:id(),name=record.name,expires=time_global()+3000}
+            flags.ret_value=false
+            return
+        end
+    end
+    local nearest,range
+    for id,record in pairs(data(false) or {}) do
+        if record.stage=="active" and record.level==level.name() and dik
+            and drive_dik(record.drive_key or DEFAULT_DRIVE_KEY)==dik then
+            local state=states[id]
+            local obj=state and state.control and state.control.object
+            if identity(obj,record,false) then
+                local distance=obj:position():distance_to(a:position())
+                if not range or distance<range then nearest,range=state,distance end
+            end
+        end
+    end
+    if not nearest then
+        for _,record in pairs(data(false) or {}) do
+            if record.level==level.name() and drive_dik(record.drive_key or DEFAULT_DRIVE_KEY)==dik then
+                notice("not_ready");flags.ret_value=false;return
+            end
+        end
+        return
+    end
+    flags.ret_value=false
+    local point=nav().crosshair_ground(a)
+    if not point then notice("no_point");return end
+    reset_route(nearest)
+    nearest.order=copy(point)
+    local record=owned(nearest.control.object)
+    record.destination={x=point.x,y=point.y,z=point.z}
+    record.order_wait,record.approach_armed=nil,nil
+    notice("moving")
+end
+
+local function arrival_radius(record)
+    -- RCTRL requests an area. Prefer ten metres; the planner may accept
+    -- up to twenty when the close approach is blocked. This does not limit
+    -- detour length or reduce the physical chassis clearance.
+    return 10
+end
+
+local function following_radius(record)
+    return math.max(record.distance,record.shape.radius+1,10)
+end
+
+local function plan_route(state,record,floor,target,stop,heading,now)
+    local search=nav().start_route(floor,target,stop,heading,math.max(stop,20))
+    if search then
+        search.anchored=state.control and math.abs(controls().speed(state.control.car,state.control.object))<=0.12
+        local hint=state.route_hint
+        if hint and now-hint.at<180000 and target:distance_to(hint.goal)<1 and hint.stop==search.stop then
+            search.corridor_hint=hint.value
+            search.spine=hint.spine
+        end
+    end
+    return search
+end
+
+local function route_goal(obj,record,state,a,now)
+    if state.sample_at and now<state.sample_at then return end
+    state.sample_at=now+3000
+    local floor=nav().ground_position(obj:position(),record.shape,obj)
+    local target=state.order or a:position()
+    local h=obj:direction()
+    local heading=math.atan2(h.x,h.z)
+    local stop=state.order and arrival_radius(record) or following_radius(record)
+    local dx,dz=target.x-floor.x,target.z-floor.z
+    if not state.order and dx*dx+dz*dz<=(state.arrival_radius or stop)^2 then
+        state.path,state.search,state.goal,state.next_path=nil,nil,nil,nil
+        status(record,state,"covering",now)
+        return
+    end
+    -- A moving follow target must not starve an incremental search. Finish
+    -- the current corridor and follow it; sample the live target again at
+    -- its end. Only a genuine relocation/reversal invalidates that work.
+    if state.goal and (state.path or state.search) then
+        local moved=target:distance_to(state.goal)
+        local oldx,oldz=state.goal.x-floor.x,state.goal.z-floor.z
+        local reversed=dx*oldx+dz*oldz<0 and moved>30
+        if state.search and moved<80 and not reversed then
+            -- Finish the chosen detour/continuation. A moving actor must
+            -- not restart the same search every three seconds. Refresh the
+            -- live follow target after this complete route is committed.
+            return
+        end
+        if moved<8 and not reversed then return end
+        if state.path and not state.order and not reversed and moved<80 then
+            if state.path.escape_shape then return end -- finish the short checked escape before a full route
+            -- Keep the currently driven curve. Replan from its endpoint,
+            -- concurrently, rather than stopping at the old target first.
+            state.next_path=nil
+            state.goal=copy(target)
+            local tail=state.path[#state.path]
+            state.search=plan_route(state,record,tail.position,target,stop,tail.yaw or heading,now)
+            if state.search then
+                state.search.continuation=state.path
+                if state.search.frontier then state.search.frontier[1].reverse=tail.reverse==true end
+            end
+            return
+        end
+    end
+    state.goal=copy(target)
+    state.arrival_radius=nil
+    state.path,state.next_path=nil,nil
+    local direct=not state.detour and nav().direct_route(floor,target,stop,record.shape,obj,heading)
+    if direct then
+        state.path,state.waypoint,state.search=direct,1,nil
+        status(record,state,"following",now)
+    else
+        state.search=plan_route(state,record,floor,target,stop,heading,now)
+        status(record,state,state.search and "planning_detour" or "waiting_for_route",now)
+    end
+end
+
+local function drop_path(state)
+    state.path,state.search,state.goal,state.next_path=nil,nil,nil,nil
+    state.sample_at=0
+end
+
+local function steer(obj,record,state,now)
+    local driver=state.control
+    local p=obj:position()
+    local floor=nav().ground_position(p,record.shape,obj)
+    local h=obj:direction()
+    local heading=math.atan2(h.x,h.z)
+    local path=state.path
+    local speed,angle=0,0
+    if state.recovery_until then
+        if now<state.recovery_until then
+            angle=state.recovery_steer or 0
+            speed=nav().swept_drive(floor,heading,angle,-1.5,record.shape,obj) and -1 or 0
+            controls().drive(driver,now,speed,angle)
+            status(record,state,"unsticking",now)
+            return
+        end
+        state.recovery_until=nil
+        -- Rejoin the same chosen route after reversing. Rewind its cursor
+        -- only within the current gear; never jump back across a completed
+        -- manoeuvre or throw away the global corridor.
+        if path then
+            local index=state.waypoint or 1
+            local reverse=path[index] and path[index].reverse==true
+            local first=index
+            while first>1 and index-first<24 and (path[first-1].reverse==true)==reverse do first=first-1 end
+            state.waypoint=first
+        end
+        state.motion_at=nil
+        state.blocked_at=nil
+    end
+    local goal,reverse,track
+    if state.order then
+        if floor:distance_to(state.order)<=(state.arrival_radius or arrival_radius(record)) then
+            state.path,state.search,state.goal,state.detour=nil,nil,nil,nil
+            state.block_reason=nil
+            state.order_hold=true
+            record.order_wait=true
+            record.approach_armed=actor():position():distance_to(p)>10
+            controls().drive(driver,now,0,0)
+            status(record,state,"waiting_at_point",now)
+            notice("arrived")
+            return
+        end
+    end
+    if path then
+        track=nav().track_route(path,state.waypoint,floor,heading,controls().speed(driver.car,driver.object),record.shape.rear_offset)
+        state.waypoint=track.index
+        if not track.done and state.waypoint>192 then
+            -- Discard the driven prefix without replacing the table: a
+            -- concurrent continuation still owns this same route identity.
+            local consumed=state.waypoint-32
+            local count=#path
+            path.start=path[consumed]
+            for i=1,count-consumed do path[i]=path[i+consumed] end
+            for i=count-consumed+1,count do path[i]=nil end
+            state.waypoint=state.waypoint-consumed
+            track.index=state.waypoint
+        end
+        if track.done then
+            if state.next_path then
+                state.path,state.waypoint,state.next_path=state.next_path,1,nil
+            elseif state.search and state.search.continuation==path then
+                -- Keep the pending continuation; do not reset its work when
+                -- the vehicle reaches the end a little sooner than expected.
+                state.path=nil
+            else drop_path(state) end
+        elseif track.stop then
+            controls().drive(driver,now,0,0)
+            state.motion_at=nil
+            status(record,state,"changing_direction",now)
+            return
+        else
+            goal,reverse=track.goal or path[track.index].position,track.reverse
+        end
+    end
+    if goal then
+        local offset=record.shape.rear_offset or 0
+        local dx,dz=goal.x-floor.x+math.sin(heading)*offset,goal.z-floor.z+math.cos(heading)*offset
+        local delta=math.atan2(h.z*dx-h.x*dz,h.x*dx+h.z*dz)
+        local length=math.sqrt(dx*dx+dz*dz)
+        if reverse==nil then reverse=math.abs(delta)>math.pi*0.62 end
+        if reverse then delta=delta+(delta>0 and -math.pi or math.pi) end
+        -- Pure pursuit steering, bounded by the chassis turning radius.
+        angle=math.max(-1,math.min(1,2*(record.shape.steer_radius or nav().turn_radius(record.shape))*math.sin(delta)/math.max(0.6,length)))
+        angle=angle*(reverse and -1 or 1)
+        -- The pursuit point is a steering reference, not the destination.
+        -- Capping speed by its short lookahead made even an empty road crawl.
+        -- Use a continuous lateral-acceleration limit instead of dropping to
+        -- 2.2 m/s for any steering correction. Sharp turns remain slower;
+        -- a gentle bend can keep rolling. Live stopping clearance still wins.
+        local curvature=math.abs(angle)/(record.shape.steer_radius or nav().turn_radius(record.shape))
+        local cruise=math.min(reverse and 3.2 or 5,math.sqrt(1.2/math.max(0.01,curvature)))
+        speed=cruise/math.max(1,math.abs(delta)/0.6)
+        if track and track.end_gap then
+            speed=math.min(speed,math.max(0.5,math.sqrt(math.max(0,(track.end_distance or track.end_gap)-0.25)*3)))
+        end
+        if path and path.escape_shape then speed=math.min(speed,0.7) end
+        if track and track.cusp then
+            -- Reach the stop point with enough torque on a hill. The tracker
+            -- then brakes before selecting the other gear; don't spend many
+            -- seconds crawling towards an almost-reached cusp.
+            speed=math.min(speed,math.max(0.85,math.sqrt(math.max(0,(track.end_distance or track.end_gap)-0.4)*2)))
+        end
+        if state.order then
+            local remaining=floor:distance_to(state.order)-(state.arrival_radius or arrival_radius(record))
+            speed=math.min(speed,math.max(0.65,remaining*0.8))
+        end
+        if reverse then speed=-math.min(3.2,speed) end
+        -- Brake for the swept chassis over stopping distance, not just the
+        -- next sample. A nearby look-ahead point must not blind the bumper.
+        local velocity=math.abs(controls().speed(driver.car,driver.object))
+        local limit
+        if track and track.end_gap then limit=math.max(0.15,track.end_distance or track.end_gap) end
+        if path and path.escape_shape then limit=math.min(limit or math.huge,math.max(0.4,track.end_gap)) end
+        local safe,_,reason
+        if track and track.blocked then reason=track.blocked
+        else
+            local requested=speed
+            speed,reason=nav().control_speed(floor,heading,angle,speed,velocity,path and (path.escape_shape or path.navigation_shape) or record.shape,obj,limit)
+            safe=speed~=0
+            if not safe and track then
+                -- Near a short gear-change point, pursuit can cut a checked
+                -- arc because its reference is almost under the rear axle.
+                -- Try the route's own curvature at walking speed before
+                -- throwing the whole route away. This is still a full live
+                -- chassis sweep, not permission to push through an obstacle.
+                local planned=math.max(-1,math.min(1,(track.curvature or 0)*
+                    (record.shape.steer_radius or nav().turn_radius(record.shape))))
+                if math.abs(planned-angle)>0.02 then
+                    local crawl=math.min(math.abs(requested),0.7)*(requested<0 and -1 or 1)
+                    local corrected,why=nav().control_speed(floor,heading,planned,crawl,velocity,
+                        path and (path.escape_shape or path.navigation_shape) or record.shape,obj,limit)
+                    if corrected~=0 then speed,angle,safe,reason=corrected,planned,true,nil
+                    else reason=why or reason end
+                end
+                if not safe and type(nav().correct_steering)=="function" and not track.blocked then
+                    local corrected,steer=nav().correct_steering(floor,heading,angle,track,requested,velocity,
+                        path and (path.escape_shape or path.navigation_shape) or record.shape,obj,limit)
+                    if corrected then speed,angle,safe,reason=corrected,steer,true,nil end
+                end
+            end
+        end
+        if not safe then
+            speed=0
+            state.block_reason=reason or "unknown"
+            if printf and now>=(state.block_log_at or 0) then
+                printf("[ADB BTR] "..record.name.." blocked: "..state.block_reason)
+                state.block_log_at=now+5000
+            end
+        else state.block_reason=nil end
+    end
+    if speed~=0 then
+        state.blocked_at=nil
+        if track and (state.progress_path~=path or state.progress_reverse~=reverse
+            or (track.end_distance and state.progress_remaining and state.progress_remaining-track.end_distance>2)) then
+            -- Measure advancement along the chosen line. Driving two metres
+            -- backwards to unstick is not progress towards finishing it and
+            -- must not reset the bounded recovery counter forever.
+            state.progress_path,state.progress_reverse=path,reverse
+            state.progress_remaining,state.progress_at=track.end_distance,now
+            state.recovery_attempts=0
+        end
+        if not state.motion_at then state.motion_at,state.last_position=now+3000,copy(p) end
+        if now>=state.motion_at then
+            if p:distance_to(state.last_position)<0.6 then
+                -- A contact can stop the actual hull despite a clear ray.
+                -- Try one measured retreat; never teleport or repeatedly ram.
+                state.recovery_steer=(state.recovery_attempts or 0)<2 and type(nav().retreat)=="function"
+                    and nav().retreat(floor,heading,angle,record.shape,obj)
+                state.detour=true
+                if state.recovery_steer then
+                    state.recovery_until=now+2200
+                    state.recovery_attempts=(state.recovery_attempts or 0)+1
+                else
+                    drop_path(state)
+                    state.sample_at=now+3000
+                end
+                state.motion_at=nil
+                speed=0
+            else state.motion_at,state.last_position=now+3000,copy(p) end
+        end
+        status(record,state,state.order and "moving_to_point" or "following",now)
+    else
+        state.motion_at=nil
+        if goal then
+            state.blocked_at=state.blocked_at or now
+            status(record,state,"obstacle_wait",now)
+            if now-state.blocked_at>1800 and state.block_reason~="living_obstacle" then
+                local route_ok,route_reason=true,nil
+                if path and type(nav().route_clear_ahead)=="function" then
+                    route_ok,route_reason=nav().route_clear_ahead(path,state.waypoint or 1,
+                        path.escape_shape or path.navigation_shape or record.shape,obj)
+                end
+                if route_reason=="living_obstacle" then
+                    state.blocked_at=now
+                    controls().drive(driver,now,0,0)
+                    return
+                end
+                if route_ok and (state.recovery_attempts or 0)<2 and type(nav().retreat)=="function" then
+                    local retreat=nav().retreat(floor,heading,angle,record.shape,obj)
+                    if retreat then
+                        state.recovery_steer,state.recovery_until=retreat,now+2200
+                        state.recovery_attempts=(state.recovery_attempts or 0)+1
+                        controls().drive(driver,now,0,0)
+                        return
+                    end
+                    -- A valid route is retained while the driver tries to
+                    -- realign. Only sustained inability to progress earns a
+                    -- new global search, rather than each brake/steer tick.
+                    if now-state.blocked_at<6000 then controls().drive(driver,now,0,0);return end
+                end
+                if not state.search or state.search.continuation then
+                    -- A predicted brake envelope is not a collision. Do not
+                    -- blacklist a whole area merely because the driver needs
+                    -- to realign; that could seal the only usable passage.
+                    drop_path(state)
+                    state.route_hint=nil
+                    -- Next planning tick performs a real detour instead of
+                    -- choosing the same blocked local fan forever.
+                    local target=state.order or actor():position()
+                    state.detour=true
+                    state.goal=copy(target)
+                    state.search=plan_route(state,record,floor,target,state.order and arrival_radius(record) or following_radius(record),heading,now)
+                    state.sample_at=now+3000
+                    status(record,state,"planning_detour",now)
+                    if state.order then notice("detour",10000) end
+                end
+            end
+        end
+    end
+    controls().drive(driver,now,speed,angle)
+end
+
+local function initialize(obj,record)
+    local expected=record.shape
+    local live=nav().footprint(obj:bounding_box(false))
+    if live.x>(expected.visual_x or expected.x)+0.35 or live.z>(expected.visual_z or expected.z)+0.35
+        or live.height>(expected.visual_height or expected.height)+0.35 then return end
+    record.shape.margin=0.5
+    local catalog=anomaly_donation_bridge_vehicle_catalog
+    local physical=catalog.driving_profile and catalog.driving_profile(record.visual)
+    if physical and physical.x<=live.x and physical.z<=live.z
+        and physical.top-physical.bottom<=live.height then
+        record.shape.visual_x,record.shape.visual_z,record.shape.visual_height=live.x,live.z,live.height
+        record.shape.x,record.shape.z=physical.x+0.5,physical.z+0.5
+        record.shape.height=physical.top-physical.bottom+0.5
+        record.shape.radius=math.sqrt(record.shape.x^2+record.shape.z^2)
+        record.shape.body_floor=math.max(0.30,math.min(1.5,physical.clearance-physical.bottom-0.05))
+    end
+    local geometry=controls().geometry and controls().geometry(obj,record.visual)
+    if geometry then
+        for key,value in pairs(geometry) do record.shape[key]=value end
+    end
+    local control,reason=controls().take_control(obj,record.legacy_api==true)
+    if not control then return nil,reason end
+    if printf then printf("[ADB BTR] "..record.name..": control_api="..(record.legacy_api and "legacy" or "native")) end
+    if record.health and record.stage=="active" then control.car:SetfHealth(record.health) end
+    controls().close_shutters(obj)
+    local state={control=control}
+    state.headlights=controls().create_headlights(obj,record.visual)
+    controls().update_headlights(obj,state.headlights,record.headlights)
+    local point=record.destination
+    if type(point)=="table" and type(point.x)=="number" and type(point.y)=="number" and type(point.z)=="number"
+        and math.abs(point.x)<1e6 and math.abs(point.y)<1e6 and math.abs(point.z)<1e6 then
+        state.order=vec(point.x,point.y,point.z)
+        state.order_hold=record.order_wait==true
+    else record.destination,record.order_wait,record.approach_armed=nil,nil,nil end
+    return state
+end
+
+local function retire(id,record,obj,state,now)
+    if state and state.headlights then controls().release_headlights(state.headlights) end
+    if obj and identity(obj,record,false) then
+        local car=obj:get_car()
+        car:Action(CCar.eWpnActivate,0)
+        if state and state.control then controls().drive(state.control,now,0,0)
+        else
+            local control=controls().take_control(obj,record.legacy_api==true)
+            if control then controls().drive(control,now,0,0)
+            else car:HandBreak() end
+        end
+        if math.abs(controls().speed(car,obj))>0.4 then return false end
+        local held=passenger()
+        if held and held:id()==id then
+            if now>=(record.exit_at or 0) then
+                record.exit_at=now+700
+                actor():detach_vehicle(false)
+            end
+            return false
+        end
+        if (record.warning_remaining or 0)>0 then return false end
+        if not record.visual_played then
+            record.visual_played=true
+            -- Native CarExplode also sends damaging blast and fragments.
+            if particles_object then
+                local fx=particles_object([[explosions\expl_mushroom_01]])
+                fx:play_at_pos(obj:position())
+            end
+        end
+    end
+    local server=alife():object(id,true)
+    if identity(server,record,true) then alife():release(server,true) end
+    return not identity(alife():object(id,true),record,true)
+end
+
+function before_hit(obj,attack)
+    local record=owned(obj)
+    if not record then return true end
+    if record.stage=="retiring" then return false end
+    local car=obj:get_car()
+    -- Retire a defeated vehicle in the same safe order as an expired one.
+    -- Allow normal damage and wheel/door degradation up to that point.
+    local source=attack and attack.draftsman
+    local creature_impact=source and source:is_monster() and hit and attack.type~=nil and
+        (attack.type==hit.strike or attack.type==hit.wound or attack.type==hit.wound_2)
+    if attack and type(attack.power)=="number" and attack.power>0 then
+        local health=car:GetfHealth()
+        local damage=attack.power/HULL_STRENGTH
+        if health<=damage then
+            record.stage="retiring"
+            return false
+        end
+        -- The native callback receives a copy of the hit. Credit back
+        -- the armor allowance before the engine deducts the full damage.
+        -- This keeps native impact, damage effects and the 0–1 save format.
+        if creature_impact then
+            -- CCar calls this after wheel/door damage and immunity scaling,
+            -- but before the native impulse. CScriptHit is a copy: editing
+            -- impulse does nothing. Keep the same armored health loss and
+            -- reject the original physical blow on our vehicle only.
+            car:SetfHealth(health-damage)
+            record.health=health-damage
+            return false
+        end
+        car:SetfHealth(health+attack.power-damage)
+    end
+    return not creature_impact
+end
+
+local function update(now)
+    if not running() then last_tick=nil;return end
+    local elapsed=last_tick and math.max(0,now-last_tick) or 0
+    if elapsed>1000 then elapsed=0 end -- no countdown across a suspended actor/load
+    last_tick=now
+    local a=actor()
+    if now>=prune_at then
+        prune_at=now+1000
+        for id,bullet in pairs(bullets) do
+            if now>=bullet.expires then bullets[id]=nil end
+        end
+    end
+    local held=passenger()
+    if boarding and (held or now>=boarding.expires or not input_ready()) then boarding=nil end
+    for id,job in pairs(placements) do
+        if now-(job.seen or now)>30000 then placements[id]=nil end
+    end
+    local records=data(false)
+    if not records then return end
+    for key,record in pairs(records) do
+        local id=tonumber(key)
+        local on_level=record.level==level.name()
+        local obj=on_level and level.object_by_id(id)
+        local state=states[key]
+        if on_level and identity(obj,record,false) then
+            if state and state.control and not state.manual and
+                (state.control.legacy_api==true)~=(record.legacy_api==true) then
+                controls().release_driver(state.control)
+                controls().release_headlights(state.headlights)
+                states[key],state=nil,nil
+            end
+            if record.warning_remaining~=nil then
+                record.warning_remaining=math.max(0,record.warning_remaining-elapsed)
+            end
+            if not state and record.stage~="retiring" then
+                local reason
+                state,reason=initialize(obj,record);states[key]=state
+                if not state then
+                    record.ai_status=reason or "initializing"
+                    if printf and now>=(record.retry_at or 0) then
+                        printf("[ADB BTR] "..record.name..": "..record.ai_status)
+                        record.retry_at=now+5000
+                    end
+                end
+            end
+            local just_arrived=record.stage=="arriving"
+            if just_arrived and state then
+                record.stage="active"
+                local donor="%c[255,238,153,26]"..tostring(record.donor_name or "Донатер").."%c[default]"
+                send_notice(notices.spawned:format(donor),10000)
+            end
+            if record.stage=="active" and state and state.control then
+                record.health=state.control.car:GetfHealth()
+                record.remaining=math.max(0,record.remaining-(just_arrived and 0 or elapsed))
+                if record.remaining<=3000 then destruction_warning(record) end
+                if record.remaining<=0 or record.health<=0 then record.stage="retiring" end
+            end
+            if record.stage=="retiring" then
+                destruction_warning(record)
+                if retire(id,record,obj,state,now) then
+                    remove_marker(id)
+                    records[key],states[key]=nil,nil
+                end
+            elseif state then
+                update_marker(id,record,now)
+                controls().update_headlights(obj,state.headlights,record.headlights)
+                if held and held:id()==id then
+                    begin_manual(record,state)
+                    status(record,state,"player_driving",now)
+                elseif boarding and boarding.id==id and boarding.name==record.name
+                    and not a:get_attached_vehicle() and state.control and close_enough(a,obj,record.shape) then
+                    controls().drive(state.control,now,0,0)
+                    if math.abs(controls().speed(state.control.car,state.control.object))<0.5 then
+                        boarding=nil
+                        a:attach_vehicle(obj,true)
+                        local attached=a:get_attached_vehicle()
+                        if attached and attached:id()==id then begin_manual(record,state) end
+                    end
+                else
+                    if state.manual then
+                        -- The old order was erased on boarding. Preserve only
+                        -- a NEW RCTRL command received after native dismount
+                        -- but before this control tick observes it.
+                        local pending=state.order
+                        state.control=controls().take_control(obj,record.legacy_api==true)
+                        state.manual=false
+                        reset_route(state)
+                        state.order=pending
+                    end
+                    if state.control then
+                        if state.order_hold then
+                            local range=a:position():distance_to(obj:position())
+                            if range>10 then record.approach_armed=true
+                            elseif record.approach_armed then
+                                clear_order(record,state)
+                                notice("following")
+                            end
+                        end
+                        if state.order_hold then
+                            record.mode="hold"
+                            controls().drive(state.control,now,0,0)
+                            status(record,state,"waiting_at_point",now)
+                        else
+                            record.mode=state.order and "order" or "follow"
+                            route_goal(obj,record,state,a,now)
+                            if now>=(state.drive_at or 0) then
+                                state.drive_at=now+120
+                                steer(obj,record,state,now)
+                            end
+                        end
+                    else
+                        record.stage="retiring"
+                    end
+                end
+                if state.control then fight(obj,record,state,a,now) end
+            end
+        elseif on_level and not identity(alife():object(id,true),record,true) then
+            remove_marker(id)
+            if state then controls().release_headlights(state.headlights) end
+            records[key],states[key]=nil,nil
+        end
+    end
+end
+
+local function needs_continuation(state)
+    local path=state.path
+    if not path or not path.continue then return false end
+    -- Keep roughly 50 m checked ahead, then spend no more route CPU until
+    -- that lead is consumed. This also avoids planning a distant suffix
+    -- for a position the moving player has already left.
+    local length=0
+    local index=state.waypoint or 1
+    local previous=path[index-1] or path.start
+    for i=index,#path do
+        if previous then length=length+path[i].position:distance_to(previous.position) end
+        if length>=50 then return false end
+        previous=path[i]
+    end
+    return true
+end
+
+local function progress_routes(now)
+    local records=data(false) or {}
+    local search_keys={}
+    local held=passenger()
+    if held then
+        local key=tostring(held:id())
+        local state,record=states[key],records[key]
+        -- Boarding may happen between two 60 ms control ticks. Cancel its
+        -- coroutine before this frame's planner slice can do stale work.
+        if state and state.control and record then begin_manual(record,state) end
+    end
+    for key,state in pairs(states) do
+        local record=records[key]
+        if record and record.stage=="active" and record.level==level.name() and state.control
+            and not state.manual and not state.search and not state.next_path and needs_continuation(state) then
+            local tail=state.path[#state.path]
+            local target=state.order or actor():position()
+            state.goal=copy(target)
+            state.search=plan_route(state,record,tail.position,target,
+                state.order and arrival_radius(record) or following_radius(record),tail.yaw,now)
+            if state.search then
+                state.search.continuation=state.path
+                if state.search.frontier then state.search.frontier[1].reverse=tail.reverse==true end
+            end
+        end
+        if record and record.stage=="active" and record.level==level.name()
+            and state.search and not state.manual and state.control then search_keys[#search_keys+1]=key end
+    end
+    -- One shared ~5 ms route slice per actor frame. Driving/target refresh
+    -- keep their own cadence; a pending search need not sleep for 60 ms.
+    if #search_keys>0 then
+        route_cursor=(route_cursor or 0)%#search_keys+1
+        local key=search_keys[route_cursor]
+        local state=states[key]
+        if not state or not state.search then return end
+        local record,obj=records[key],state.control.object
+        local search=state.search
+        if not search.worker and not search.anchored and not search.continuation then
+            -- A loaded/moving car needs to brake before the search snapshots
+            -- its pose. Otherwise a slope moves it off the route's start.
+            if math.abs(controls().speed(state.control.car,state.control.object))>0.12 then return end
+            local h=obj:direction()
+            search=plan_route(state,record,nav().ground_position(obj:position(),record.shape,obj),
+                search.goal,search.preferred_stop or search.stop,math.atan2(h.x,h.z),now)
+            if not search then return end
+            search.anchored=true
+            state.search=search
+        end
+        local result,path=nav().route_step(search,record.shape,obj,8)
+        if result~="searching" then
+            state.search=nil
+            if search.corridor_hint then
+                state.route_hint={value=search.corridor_hint,spine=search.spine,goal=copy(search.goal),stop=search.stop,at=now}
+            end
+            if path and #path>0 then
+                if path.arrival_radius then state.arrival_radius=path.arrival_radius end
+                if search.continuation and state.path==search.continuation then
+                    -- Join already checked sections before reaching the seam:
+                    -- the tracker can look across it without a needless stop.
+                    local current=state.path
+                    for _,pose in ipairs(path) do current[#current+1]=pose end
+                    if path.navigation_shape and (not current.navigation_shape or
+                        path.navigation_shape.margin<current.navigation_shape.margin) then
+                        current.navigation_shape=path.navigation_shape
+                    end
+                    current.continue=path.continue
+                    path=current
+                else state.path,state.waypoint=path,1 end
+                status(records[key],state,"detour_ready",now)
+                if not state.next_path and needs_continuation(state) then
+                    local target=state.order or actor():position()
+                    local tail=path[#path]
+                    state.goal=copy(target)
+                    state.search=plan_route(state,record,tail.position,target,
+                        state.order and arrival_radius(record) or following_radius(record),tail.yaw,now)
+                    if state.search then
+                        state.search.continuation=path
+                        if state.search.frontier then state.search.frontier[1].reverse=tail.reverse==true end
+                    end
+                end
+            else
+                state.route_hint=nil -- refresh the coarse corridor after a real obstruction
+                state.detour=true
+                state.sample_at=now+3000
+                if printf then
+                    printf("[ADB BTR] "..record.name.." route unavailable: elapsed_ms="..tostring(now-(search.started or now))..
+                        " nodes="..tostring(search.expanded).." origin="..tostring(search.origin_reason)..
+                        " rejected="..tostring(search.last_reject))
+                end
+                status(records[key],state,"waiting_for_route",now)
+                if state.order then notice("blocked",15000) end
+            end
+        end
+    end
+end
+
+local function reset_session(loading)
+    clear_markers()
+    for _,state in pairs(states) do controls().release_headlights(state.headlights) end
+    states,placements,bullets={},{},{}
+    prune_at=0
+    last_tick,route_cursor,last_spawn_frame=nil,nil,nil
+    stopped_for_load=loading
+    boarding=nil
+    next_tick=0
+    notice_at={}
+end
+
+-- Actor callbacks run without the desktop app, pipe, effect queue or registry.
+function tick()
+    if not running() then last_tick=nil;next_tick=0;return end
+    local now=time_global()
+    local ok,reason=pcall(function()
+        if now>=next_tick then
+            next_tick=now+60
+            update(now)
+        end
+        progress_routes(now)
+    end)
+    if not ok then
+        if printf then printf("[ADB BTR] runtime error: "..tostring(reason)) end
+        for id,state in pairs(states) do
+            local record=(data(false) or {})[id]
+            if record and record.level==level.name() and identity(state.control and state.control.object,record,false) then
+                pcall(controls().drive,state.control,now,0,0)
+            end
+        end
+        notice("error",10000)
+        next_tick=now+2000
+        last_tick=nil
+    end
+end
+
+function diagnostics()
+    local result={}
+    for id,record in pairs(data(false) or {}) do
+        local state=states[id] or {}
+        local control=state.control or {}
+        result[#result+1]={id=tonumber(id),name=record.name,stage=record.stage,
+            remaining=record.remaining,status=state.status or record.ai_status,legacy_api=record.legacy_api==true,
+            mode=record.mode,speed=control.target_speed,steer=control.steer,
+            arrival_radius=state.arrival_radius or (state.order and arrival_radius(record) or following_radius(record)),
+            headlights=record.headlights==true,
+            order=state.order and copy(state.order),holding=state.order_hold,path=state.path and #state.path,
+            search=state.search and state.search.expanded,
+            search_age=state.search and time_global()-(state.search.started or time_global()),
+            search_origin=state.search and state.search.origin_reason,
+            search_rejected=state.search and state.search.last_reject,
+            manual=state.manual,blocked=state.block_reason}
+    end
+    return result
+end
+
+class "adb_btr_companion_binder" (object_binder)
+function adb_btr_companion_binder:__init(object) super(object) end
+function adb_btr_companion_binder:net_save_relevant() return true end
+function adb_btr_companion_binder:net_destroy()
+    local key=tostring(self.object:id())
+    remove_marker(self.object:id())
+    local state=states[key]
+    if state then controls().release_headlights(state.headlights) end
+    states[key]=nil
+    object_binder.net_destroy(self)
+end
+function adb_btr_companion_binder:save(packet)
+    local record=owned(self.object)
+    if record then record.health=self.object:get_car():GetfHealth() end
+    object_binder.save(self,packet)
+end
+function bind(object) object:bind_object(adb_btr_companion_binder(object)) end
+
+function on_game_start()
+    if registered then return end
+    registered=true
+
+    RegisterScriptCallback("actor_on_update",tick)
+    RegisterScriptCallback("on_game_load",function() reset_session(false) end)
+    RegisterScriptCallback("on_level_changing",function() reset_session(true) end)
+    if not controls() or not (controls().available() or controls().available(true)) then return end
+    local callbacks=key_bindings or {}
+    for _,name in ipairs({"kWPN_FIRE","kWPN_ZOOM","kWPN_FUNC"}) do
+        local code=callbacks[name]
+        if code then blocked_keys[code]=true end
+    end
+    for _,name in ipairs({"kFWD","kBACK","kL_STRAFE","kR_STRAFE","kACCEL","kCROUCH","kJUMP","kDETECTOR"}) do
+        local code=callbacks[name]
+        if code then retiring_keys[code]=true end
+    end
+    RegisterScriptCallback("on_before_key_press",press)
+    RegisterScriptCallback("on_before_key_hold",key)
+    RegisterScriptCallback("on_before_key_release",key)
+    RegisterScriptCallback("on_before_mouse_move",mouse)
+    RegisterScriptCallback("actor_on_before_hit",player_hit)
+    RegisterScriptCallback("npc_on_before_hit",creature_hit)
+    RegisterScriptCallback("monster_on_before_hit",creature_hit)
+    RegisterScriptCallback("bullet_on_init",bullet_created)
+    RegisterScriptCallback("actor_on_net_destroy",function() reset_session(true) end)
+end

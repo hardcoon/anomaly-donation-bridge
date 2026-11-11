@@ -1,0 +1,167 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.equipment_ammo",
+  "displayName": "Выдать патроны к снаряжению",
+  "description": "Выдаёт полные пачки патронов к оружию в отмеченных слотах. Берёт текущий тип патронов, а если его нельзя определить — первый подходящий с учётом апгрейдов. Режим «Только оружие в руках» заменяет выбор слотов и ждёт, пока игрок возьмёт подходящее оружие. Количество пачек применяется к каждому оружию.",
+  "category": "inventory", "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"primary","displayName":"Основной оружейный слот (3)","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"secondary","displayName":"Дополнительный оружейный слот (2)","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"hands_only","displayName":"Только оружие в руках","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"ammo_packs","displayName":"Пачек патронов на каждое оружие","kind":"Integer","minimum":1,"maximum":50,"defaultValue":"1"}
+  ],
+  "parameters":{"primary":"true","secondary":"true","hands_only":"false","ammo_packs":"1"},
+  "itemSpawns":[], "spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+-- Stock weapon slots only. Active-item mode works with any mod-added slot.
+local SLOT_IDS={primary=3,secondary=2}
+local HANDLER="hardcoon.adb.equipment_ammo"
+local function call(o,m,...)
+    if not o then return nil end
+    local args={...};local ok,v=pcall(function() return o[m](o,unpack(args)) end)
+    if ok then return v end
+end
+local function actor(context) return context and context.actor or db and db.actor end
+local function available(section)
+    local c=anomaly_donation_bridge_catalog
+    return c and c.is_available(section,"item")==true
+end
+local function ammo_info(section)
+    if type(section)~="string" or not anomaly_donation_bridge_common.valid_section_id(section) or not available(section) then return nil end
+    local ini=system_ini()
+    if not ini:section_exist(section) or not ini:line_exist(section,"class") or not ini:line_exist(section,"box_size") then return nil end
+    local class_name=ini:r_string(section,"class")
+    if class_name~="AMMO" and not class_name:match("^AMMO_") then return nil end
+    local size=tonumber(ini:r_string(section,"box_size"))
+    if not size or size~=math.floor(size) or size<1 or size>65535 then return nil end
+    return {section=section,box_size=size}
+end
+local function weapon_ammo(item)
+    local weapon=call(item,"cast_Weapon")
+    if not weapon then return nil end
+    local indexed={}
+    local ok=pcall(function()
+        weapon:AmmoTypeForEach(function(index,section)
+            if type(index)=="number" and index>=0 and index<256 and index==math.floor(index) then
+                indexed[index]=section
+            end
+            return false -- native enumeration stops when the callback returns true
+        end)
+    end)
+    if not ok then return nil end
+    local selected=call(weapon,"GetAmmoType")
+    if type(selected)~="number" then selected=call(item,"get_ammo_type") end
+    local chosen=selected and ammo_info(indexed[selected])
+    if chosen then return chosen end
+    -- Empty/unknown current type: the first SAFE live compatible cartridge,
+    -- including re-chambering upgrades. Never fall back to base ammo_class.
+    for index=0,255 do
+        if indexed[index] then
+            chosen=ammo_info(indexed[index]);if chosen then return chosen end
+        end
+    end
+end
+local function options(params)
+    local c=anomaly_donation_bridge_common
+    local ok,why=c.params_only(params,{primary=true,secondary=true,hands_only=true,ammo_packs=true})
+    if not ok then return nil,why end
+    local p={}
+    for _,key in ipairs({"primary","secondary","hands_only"}) do
+        if params[key]~=nil and params[key]~="true" and params[key]~="false" then return nil,"equipment_ammo_"..key.."_invalid" end
+        p[key]=params[key]==nil and key~="hands_only" or params[key]=="true"
+    end
+    p.ammo_packs,why=c.parse_integer(params.ammo_packs,1,1,50,"equipment_ammo_pack_count_invalid")
+    if not p.ammo_packs then return nil,why end
+    if not p.hands_only and not (p.primary or p.secondary) then return nil,"equipment_ammo_no_slots_selected" end
+    return p
+end
+local function plan(context,p)
+    local a=actor(context)
+    if call(a,"alive")~=true then return nil,"actor_unavailable" end
+    local candidates={}
+    if p.hands_only then
+        local item=call(a,"active_item")
+        if item then candidates[1]=item end
+    else
+        for _,key in ipairs({"primary","secondary"}) do
+            if p[key] then
+                local slot=SLOT_IDS[key]
+                if not slot then return nil,"equipment_ammo_slot_mapping_unavailable" end
+                local item=call(a,"item_in_slot",slot)
+                if item then candidates[#candidates+1]=item end
+            end
+        end
+    end
+    local rows,seen={},{}
+    for _,item in ipairs(candidates) do
+        local id=call(item,"id")
+        if type(id)=="number" and not seen[id] then
+            seen[id]=true
+            local ammo=weapon_ammo(item)
+            if ammo then rows[#rows+1]=ammo end
+        end
+    end
+    if #rows==0 then return nil,p.hands_only and "equipment_ammo_waiting_for_weapon_in_hands" or "equipment_ammo_waiting_for_equipped_weapon" end
+    return rows
+end
+local function supported()
+    return type(system_ini)=="function" and type(alife)=="function" and
+        anomaly_donation_bridge_catalog and type(anomaly_donation_bridge_catalog.is_available)=="function"
+end
+local function can_execute(context,params)
+    local p,why=options(params)
+    if not p then return false,"rejected",why end
+    local life=alife and alife()
+    if not life or not supported() then return false,"deferred","alife_unavailable" end
+    local rows,reason=plan(context,p)
+    if not rows then return false,"deferred",reason end
+    context.equipment_ammo_options=p
+    return true
+end
+local function notice(a,rows,packs)
+    if not news_manager or type(news_manager.send_tip)~="function" then return end
+    local names={};local ini=system_ini()
+    for _,row in ipairs(rows) do
+        local name=row.section
+        if ini:line_exist(row.section,"inv_name") and game and type(game.translate_string)=="function" then
+            name=game.translate_string(ini:r_string(row.section,"inv_name"))
+        end
+        names[#names+1]=name.." x"..packs
+    end
+    local text=anomaly_donation_bridge_common.game_text_cp1251_lossy("Получены патроны: ")..table.concat(names,", ")
+    pcall(news_manager.send_tip,a,text,nil,nil,6000)
+end
+local function execute(context)
+    local p=context.equipment_ammo_options
+    if not p then return "rejected","equipment_ammo_not_prepared" end
+    -- The before-effect save, UI or another mod may change the active gun.
+    -- Re-read equipment BEFORE the first spawn instead of using a stale plan.
+    local rows,why=plan(context,p)
+    if not rows then return "deferred",why end
+    local a=actor(context);local life=alife();local created={}
+    for _,row in ipairs(rows) do
+        if not ammo_info(row.section) then return "deferred","equipment_ammo_catalog_changed" end
+    end
+    local position,lv,gv,id=a:position(),a:level_vertex_id(),a:game_vertex_id(),a:id()
+    for _,row in ipairs(rows) do
+        for _=1,p.ammo_packs do
+            local ok,s=pcall(function() return life:create_ammo(row.section,position,lv,gv,id,row.box_size) end)
+            if not ok or not s then
+                local rolled_back=anomaly_donation_bridge_common.rollback_server_objects(created)
+                -- A native exception may have created an object before throwing.
+                -- Do not allow an automatic repeat to multiply an unknown result.
+                if not ok then return "uncertain","equipment_ammo_spawn_failed_state_unknown" end
+                return rolled_back and "rejected" or "uncertain",rolled_back and "equipment_ammo_spawn_failed_rolled_back" or "equipment_ammo_rollback_incomplete"
+            end
+            created[#created+1]=s
+        end
+    end
+    pcall(notice,a,rows,p.ammo_packs)
+    return "executed","equipment_ammo_boxes_"..#created
+end
+function on_game_start()
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=supported,can_execute=can_execute,execute=execute})
+end

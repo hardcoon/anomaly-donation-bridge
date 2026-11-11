@@ -1,0 +1,20 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.new_life_azazel",
+  "displayName":"Новая жизнь (Азазель)",
+  "description":"На выбранное время заменяет смерть переселением в живого NPC. По умолчанию сначала выбирает ближайшего подходящего человеческого напарника, затем обычного сталкера. Меняет имя, сохраняет задания, деньги и остальных напарников. Без сохранения инвентаря передаёт вещи выбранного NPC; квестовые и служебные вещи остаются у игрока. Если подходящих тел не осталось, герой умирает обычным способом. Таймер внизу экрана и настройки сохраняются вместе с игрой. Пауза, загрузка и закрытая игра время не расходуют. Повторное срабатывание продлевает действие.",
+  "category":"player_state",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"duration_seconds","displayName":"Время действия, сек.","kind":"Integer","minimum":1,"maximum":999999,"defaultValue":"180"},
+    {"key":"any_location","displayName":"Выбирать NPC на любой локации","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"keep_faction","displayName":"Сохранять группировку игрока","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"prefer_companions","displayName":"Переселяться в первую очередь в напарников","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"keep_inventory","displayName":"Сохранять инвентарь игрока","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters":{"duration_seconds":"180","any_location":"false","keep_faction":"true","prefer_companions":"true","keep_inventory":"false"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+function on_game_start() anomaly_donation_bridge_reincarnation.register_azazel() end

@@ -1,0 +1,138 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"kill_companions",
+  "displayName":"Убить напарников",
+  "description":"Убивает выбранное число случайных обычных NPC-напарников. Значение 99 убивает всех; экспериментальные мутанты-напарники не затрагиваются.",
+  "category":"npc_mutants",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"count","displayName":"Количество напарников","kind":"Integer","minimum":1,"maximum":99,"defaultValue":"1"}
+  ],
+  "parameters":{"count":"1"}
+}
+ADB_PRESET_END]]
+
+local function online_object(id)
+	if db ~= nil and type(db.storage) == "table" then
+		local stored = db.storage[id]
+		if type(stored) == "table" and stored.object ~= nil then return stored.object end
+	end
+	if level ~= nil and type(level.object_by_id) == "function" then
+		local ok, object = pcall(level.object_by_id, id)
+		if ok then return object end
+	end
+	return nil
+end
+
+local function server_object(id)
+	if type(alife) ~= "function" then return nil end
+	local life_ok, life = pcall(alife)
+	if not life_ok or life == nil then return nil end
+	local object_ok, object = pcall(function() return life:object(id, true) end)
+	return object_ok and object or nil
+end
+
+local function living_stalker(id)
+	local npc = online_object(id)
+	if npc ~= nil and type(IsStalker) == "function" then
+		local ok, stalker, alive = pcall(function()
+			return IsStalker(npc), npc:alive()
+		end)
+		if ok and stalker == true and alive == true then return npc, false end
+	end
+	local server = server_object(id)
+	if server ~= nil and type(IsStalker) == "function" then
+		local ok, stalker, alive = pcall(function()
+			return IsStalker(nil, server:clsid()), server:alive()
+		end)
+		if ok and stalker == true and alive == true then return server, true end
+	end
+	return nil
+end
+
+local function companion_targets()
+	local ok, ids = pcall(axr_companions.list_actor_squad_by_id)
+	if not ok or type(ids) ~= "table" then return nil end
+	local targets, seen = {}, {}
+	for _, value in ipairs(ids) do
+		local id = tonumber(value)
+		if id ~= nil and id > 0 and id == math.floor(id) and not seen[id] then
+			seen[id] = true
+			if living_stalker(id) ~= nil then targets[#targets + 1] = id end
+		end
+	end
+	return targets
+end
+
+local function shuffle(values)
+	for index = #values, 2, -1 do
+		local other = math.random(index)
+		values[index], values[other] = values[other], values[index]
+	end
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, { count = true })
+	if not valid then return false, "rejected", reason end
+	local count, count_error = anomaly_donation_bridge_common.parse_integer(
+		params.count, 1, 1, 99, "companion_kill_count_invalid")
+	if count == nil then return false, "rejected", count_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local targets = companion_targets()
+	if targets == nil then return false, "deferred", "companion_list_unavailable" end
+	if #targets == 0 then return false, "rejected", "no_human_companions" end
+	shuffle(targets)
+	local requested = count == 99 and #targets or math.min(count, #targets)
+	context.options = { count = count, available = #targets, targets = {} }
+	for index = 1, requested do
+		context.options.targets[index] = targets[index]
+	end
+	return true
+end
+
+local function execute(context)
+	local killed, failed = 0, 0
+	for _, id in ipairs(context.options.targets or {}) do
+		local npc, offline = living_stalker(id)
+		if npc == nil then
+			failed = failed + 1
+		else
+			-- The scripted death is attributed to the companion itself, not the
+			-- actor, so it does not create faction retaliation against the player.
+			local kill_ok = pcall(function()
+				if offline then npc:kill() else npc:kill(npc) end
+			end)
+			local state_ok, alive = pcall(function() return npc:alive() end)
+			if kill_ok and state_ok and alive == false then
+				killed = killed + 1
+			else
+				failed = failed + 1
+			end
+		end
+	end
+	local detail = "companions_killed_" .. tostring(killed) .. "_failed_" ..
+		tostring(failed) .. "_requested_" .. tostring(context.options.count) ..
+		"_available_" .. tostring(context.options.available)
+	if failed > 0 then return "uncertain", detail end
+	if killed == 0 then return "rejected", "no_human_companions" end
+	return "executed", detail
+end
+
+local function supported()
+	local ok = axr_companions ~= nil and
+		type(axr_companions.list_actor_squad_by_id) == "function" and
+		type(IsStalker) == "function" and db ~= nil and type(db.storage) == "table"
+	return ok, ok and nil or "companion_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"kill_companions", {
+			can_execute = can_execute, execute = execute, is_supported = supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] kill_companions registration failed: %s", tostring(reason))
+	end
+end

@@ -1,0 +1,518 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.cleanup_corpses",
+  "displayName": "Собрать лут и убрать трупы",
+  "description": "Переносит лут обычных трупов в один рюкзак у ног героя и удаляет опустевшие тела в указанном радиусе. Сюжетные, квестовые и защищённые тела пропускаются. Удаление мутантов не выполняет разделку: неполученные части пропадут. Может помочь с вылетами, если рядом много трупов.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"radius_meters","displayName":"Радиус удаления трупов, м","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"100"},
+    {"key":"delete_mutant_corpses","displayName":"Удалять трупы мутантов (без разделки)","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters": {"radius_meters":"100","delete_mutant_corpses":"false"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.cleanup_corpses"
+local ITEMS_PER_UPDATE = 16
+local WAIT_MS = 5000
+local LOOT_SETTLE_MS = 300
+local job = nil
+local results, result_order = {}, {}
+
+local function log(message)
+    if type(printf) == "function" then pcall(printf, "[ADB cleanup] %s", message) end
+end
+
+local function life_object()
+    local ok, life = pcall(alife)
+    return ok and life or nil
+end
+
+local function server_object(id)
+    local life = life_object()
+    if life == nil then return nil end
+    local ok, object = pcall(function() return life:object(id) end)
+    return ok and object or nil
+end
+
+local function client_object(id)
+    local ok, object = pcall(level.object_by_id, id)
+    return ok and object or nil
+end
+
+local function command_key(context)
+    local id = context.command and context.command.command_id
+    return type(id) == "string" and id ~= "" and #id <= 128 and id or nil
+end
+
+local function kind_of(object)
+    local ok, stalker, mutant = pcall(function()
+        return IsStalker(object), IsMonster(object)
+    end)
+    if not ok then return nil end
+    return stalker and "npc" or mutant and "mutant" or nil
+end
+
+local function protected(object, kind)
+    -- Fail closed if a story/quest/companion probe fails. The stock manager
+    -- additionally checks known_info and dont_release on ordinary stalkers.
+    local ok, keep = pcall(function()
+        local id = object:id()
+        if anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(id)) or
+            se_load_var(id, object:name(), "dont_release") then return true end
+        if utils_item.has_quest_item(object) then return true end
+        local companions = axr_companions
+        if companions and companions.non_task_companions and
+            companions.non_task_companions[id] ~= nil then return true end
+        if companions and companions.companion_squads and
+            type(get_object_squad) == "function" then
+            local squad = get_object_squad(object)
+            if squad and companions.companion_squads[squad.id] ~= nil then return true end
+        end
+        return release_body_manager.get_release_body_manager():can_release(object) ~= true
+    end)
+    return not ok or keep == true
+end
+
+local function identity_matches(server, record)
+    if server == nil then return false end
+    local ok, matches = pcall(function()
+        return server.id == record.id and server:name() == record.name and
+            server:section_name() == record.section and server:alive() == false
+    end)
+    return ok and matches == true
+end
+
+local function eligible_client(record)
+    local object, server = client_object(record.id), server_object(record.id)
+    if object == nil or not identity_matches(server, record) then return nil end
+    local ok, matches = pcall(function()
+        return object:id() == record.id and object:name() == record.name and
+            object:section() == record.section and object:alive() == false
+    end)
+    if not ok or not matches or protected(object, record.kind) then return nil end
+    return object, server
+end
+
+local function is_bolt(item, section)
+    -- Use the same engine class as stock IsBolt, not a section-name allowlist:
+    -- bolt_bullet and add-on skins share obj_bolt / CSE_ALifeItemBolt, whose
+    -- can_save() is false. Only client-only children reach this check.
+    if clsid ~= nil and clsid.obj_bolt ~= nil and type(item.clsid) == "function" then
+        return item:clsid() == clsid.obj_bolt
+    end
+    -- Compatibility for engines without the class export. Never extend this
+    -- fallback to arbitrary non-ALife objects or name-substring matches.
+    return section == "bolt" or section == "bolt_bullet"
+end
+
+local function children(server)
+    local life = life_object()
+    local ok, ids, reason = pcall(function()
+        local found = {}
+        for id in life:get_children(server) do
+            if server_object(id) ~= nil then
+                found[#found + 1] = id
+            else
+                -- InventoryOwner creates a non-ALife bolt when an NPC comes
+                -- online. get_children includes it, but alife():object cannot
+                -- return it. It is an engine-only tool, not persistent loot;
+                -- normal offline switching destroys it with the client NPC.
+                -- Omit ONLY a positively identified, owned, unprotected bolt
+                -- of the engine class (including bolt_bullet/add-on variants).
+                -- An unknown/missing real item still blocks body deletion.
+                local item = client_object(id)
+                local section = item and item:section() or "unknown"
+                local parent = item and item:parent()
+                if item == nil or item:id() ~= id or not is_bolt(item, section) or
+                    parent == nil or parent:id() ~= server.id or
+                    anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(id)) or
+                    IsItem("quest", section) then
+                    return nil, "inventory_child_unavailable_" .. id .. "_" .. section
+                end
+            end
+        end
+        table.sort(found)
+        return found
+    end)
+    if not ok then
+        log("inventory_scan_error_" .. tostring(ids):gsub("[\r\n]", " "))
+        return nil, "inventory_scan_failed"
+    end
+    return ids, reason
+end
+
+local function inventory_protection(ids)
+    for _, id in ipairs(ids) do
+        local item = server_object(id)
+        if item == nil then return "inventory_child_missing_" .. id end
+        local ok, reason = pcall(function()
+            local section = item:section_name()
+            if anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(id)) then
+                return "story_inventory_child_" .. id .. "_" .. section
+            end
+            -- Match utils_item.has_quest_item: Anomaly's
+            -- stock item table already combines quest_item and kind=i_quest.
+            -- Do not duplicate it with raw per-child INI reads. That probe
+            -- previously turned ANY read error into "protected" for the body.
+            if IsItem("quest", section) then
+                return "quest_inventory_child_" .. id .. "_" .. section
+            end
+        end)
+        if not ok then
+            log("inventory_probe_error_" .. id .. "_" .. tostring(reason):gsub("[\r\n]", " "))
+            return "inventory_probe_failed_" .. id
+        end
+        if reason then return reason end
+    end
+end
+
+local function bag_section_safe()
+    local ok, safe = pcall(function()
+        local ini = system_ini()
+        if not ini:section_exist("inv_backpack") or
+            not ini:line_exist("inv_backpack", "class") then return false end
+        local class = ini:r_string("inv_backpack", "class"):upper()
+        return class == "S_INVBOX" or class == "O_INVBOX"
+    end)
+    return ok and safe == true
+end
+
+local function supported()
+    local available = type(alife) == "function" and type(alife_create) == "function" and
+        type(system_ini) == "function" and level ~= nil and
+        type(level.object_by_id) == "function" and type(level.name) == "function" and
+        type(IsStalker) == "function" and type(IsMonster) == "function" and
+        type(IsItem) == "function" and
+        type(get_object_story_id) == "function" and type(se_load_var) == "function" and
+        type(alife_record) == "function" and db ~= nil and type(db.storage) == "table" and
+        utils_item ~= nil and type(utils_item.has_quest_item) == "function" and
+        death_manager ~= nil and type(death_manager.create_release_item) == "function" and
+        release_body_manager ~= nil and
+        type(release_body_manager.get_release_body_manager) == "function"
+    return available, available and nil or "corpse_cleanup_api_unavailable"
+end
+
+local function collect_targets(origin, radius, mutants)
+    local targets, skipped, seen = {}, 0, {}
+    for _, stored in pairs(db.storage) do
+        local object = type(stored) == "table" and stored.object or nil
+        local kind = object and kind_of(object) or nil
+        if kind == "npc" or (kind == "mutant" and mutants) then
+            local ok, record = pcall(function()
+                if object:alive() ~= false then return nil end
+                local distance = origin:distance_to_sqr(object:position())
+                if distance ~= distance or distance > radius * radius then return nil end
+                return { id = object:id(), name = object:name(), section = object:section(),
+                    kind = kind, distance = distance }
+            end)
+            if ok and record and not seen[record.id] then
+                seen[record.id] = true
+                if eligible_client(record) then targets[#targets + 1] = record
+                else skipped = skipped + 1 end
+            end
+        end
+    end
+    table.sort(targets, function(a, b)
+        return a.distance < b.distance or (a.distance == b.distance and a.id < b.id)
+    end)
+    return targets, skipped
+end
+
+local function can_execute(context, params)
+    local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+        radius_meters = true, delete_mutant_corpses = true
+    })
+    if not valid then return false, "rejected", error_code end
+    local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+        params.radius_meters, 100, 1, 999, "cleanup_radius_invalid")
+    if radius == nil then return false, "rejected", radius_error end
+    local checkbox = tostring(params.delete_mutant_corpses or "false"):lower()
+    if checkbox ~= "true" and checkbox ~= "false" then
+        return false, "rejected", "cleanup_mutant_checkbox_invalid"
+    end
+    local key = command_key(context)
+    if key == nil then return false, "rejected", "cleanup_command_id_missing" end
+    context.cleanup_key = key
+    if results[key] ~= nil or (job and job.key == key) then return true end
+    if job ~= nil then return false, "deferred", "corpse_cleanup_busy" end
+    if context.actor == nil then return false, "rejected", "actor_unavailable" end
+    if not bag_section_safe() then return false, "rejected", "cleanup_backpack_section_unsafe" end
+    local ok, origin, vertex, game_vertex, level_name = pcall(function()
+        local p = context.actor:position()
+        return vector():set(p.x, p.y, p.z), context.actor:level_vertex_id(),
+            context.actor:game_vertex_id(), level.name()
+    end)
+    if not ok or origin == nil or
+        not anomaly_donation_bridge_common.valid_vertex(vertex) or
+        type(game_vertex) ~= "number" or game_vertex ~= math.floor(game_vertex) or
+        game_vertex < 0 or game_vertex >= 65535 then
+        return false, "rejected", "cleanup_actor_position_invalid"
+    end
+    local targets, skipped = collect_targets(origin, radius, checkbox == "true")
+    context.cleanup = { key = key, origin = origin, vertex = vertex,
+        game_vertex = game_vertex, level_name = level_name, targets = targets,
+        skipped = skipped, index = 1, removed = 0, items = 0, failed = 0,
+        next_update = 0 }
+    return true
+end
+
+local function remember(key, status, detail)
+    if results[key] == nil then result_order[#result_order + 1] = key end
+    results[key] = { status, detail }
+    while #result_order > 32 do results[table.remove(result_order, 1)] = nil end
+end
+
+local function finish(reason)
+    local completed = job
+    job = nil
+    local status = (reason ~= nil or completed.failed > 0) and "uncertain" or "executed"
+    local detail = "corpses_removed_" .. completed.removed .. "_items_" .. completed.items ..
+        "_skipped_" .. completed.skipped .. "_failed_" .. completed.failed
+    if completed.bag_id then detail = detail .. "_backpack_" .. completed.bag_id end
+    if completed.first_failure then detail = detail .. "_reason_" .. completed.first_failure end
+    if reason then detail = detail .. "_" .. reason end
+    remember(completed.key, status, detail)
+    log(detail)
+    -- X-Ray may only flush the in-memory console log while loading a level.
+    -- Persist diagnostic lines now, even if the next game exit skips flushing.
+    -- This runs once per completed cleanup, not once per corpse/update.
+    if type(flush) == "function" then pcall(flush) end
+    if reason == nil and db and db.actor and news_manager and
+        type(news_manager.send_tip) == "function" then
+        local text = "Удалено тел: " .. completed.removed .. ". Собрано предметов: " ..
+            completed.items .. ". Пропущено тел: " .. (completed.skipped + completed.failed) .. "."
+        if completed.bag_id then text = text .. " Лут в рюкзаке у места запуска очистки." end
+        local encoded = anomaly_donation_bridge_common.game_text_cp1251(text)
+        if encoded then pcall(news_manager.send_tip, db.actor, encoded, nil, nil, 8000) end
+    end
+end
+
+local function skip_current(reason)
+    job.failed = job.failed + 1
+    -- Return the first concrete reason over IPC as well: the app's history is
+    -- durable even when the game log is buffered or a third-party mod hides it.
+    if job.first_failure == nil then job.first_failure = tostring(reason):sub(1, 96) end
+    log("corpse_" .. job.current.record.id .. "_" .. reason)
+    job.index, job.current = job.index + 1, nil
+end
+
+local function bag_matches()
+    local server = job.bag_id and server_object(job.bag_id)
+    if server == nil then return false end
+    local ok, matches = pcall(function()
+        return server:name() == job.bag_name and server:section_name() == "inv_backpack"
+    end)
+    return ok and matches == true
+end
+
+local function ensure_bag(now)
+    if job.bag_id == nil then
+        if type(alife_on_limit) == "function" and alife_on_limit() then
+            return false, "cleanup_alife_limit"
+        end
+        local ok, server = pcall(alife_create, "inv_backpack",
+            vector():set(job.origin.x, job.origin.y + 0.05, job.origin.z),
+            job.vertex, job.game_vertex)
+        if not ok or server == nil then return false, "cleanup_backpack_spawn_failed" end
+        job.bag_id, job.bag_name = server.id, server:name()
+        job.bag_deadline = now + WAIT_MS
+        if type(level.map_add_object_spot_ser) == "function" then
+            local caption = anomaly_donation_bridge_common.game_text_cp1251("Лут с убранных трупов")
+            pcall(level.map_add_object_spot_ser, job.bag_id, "treasure", caption)
+        end
+    end
+    if not bag_matches() then return false, "cleanup_backpack_missing" end
+    local object = client_object(job.bag_id)
+    if object == nil and now >= job.bag_deadline then
+        return false, "cleanup_backpack_online_timeout"
+    end
+    return object
+end
+
+local function gameplay_paused()
+    if db == nil or db.actor == nil then return true end
+    local ok, alive, talking = pcall(function()
+        return db.actor:alive(), db.actor:is_talking()
+    end)
+    if not ok or alive ~= true or talking == true then return true end
+    if type(device) == "function" then
+        local device_ok, paused = pcall(function() return device():is_paused() end)
+        if device_ok and paused then return true end
+    end
+    local menu = rawget(_G, "ActorMenu")
+    if menu and type(menu.get_actor_menu) == "function" then
+        local shown_ok, shown = pcall(function() return menu.get_actor_menu():IsShown() end)
+        if shown_ok and shown then return true end
+    end
+    local mutant_ui = rawget(_G, "ui_mutant_loot")
+    if mutant_ui and mutant_ui.GUI then
+        local shown_ok, shown = pcall(function() return mutant_ui.GUI:IsShown() end)
+        if shown_ok and shown then return true end
+    end
+    return false
+end
+
+local function step(now)
+    local current = job.current
+    if current == nil then
+        local record = job.targets[job.index]
+        if record == nil then finish(); return end
+        local object = eligible_client(record)
+        if object == nil then
+            job.skipped, job.index = job.skipped + 1, job.index + 1
+            return
+        end
+        job.current = { record = record, stage = "loot_wait", deadline = now + LOOT_SETTLE_MS }
+        -- Stock stalker loot is generated lazily on first search. Materialize it
+        -- once through the same guarded function, never clone inventory by section.
+        -- Mutant harvesting is deliberately NOT invoked by this template.
+        if record.kind == "npc" then
+            if type(alife_on_limit) == "function" and alife_on_limit() then
+                skip_current("alife_limit"); return
+            end
+            local ok = pcall(death_manager.create_release_item, object)
+            if not ok then skip_current("stock_loot_failed") end
+        end
+        return
+    end
+
+    local record = current.record
+    local server = server_object(record.id)
+    if current.stage == "release_wait" then
+        if server == nil then
+            job.removed, job.index, job.current = job.removed + 1, job.index + 1, nil
+            return
+        end
+        if not identity_matches(server, record) then skip_current("identity_changed"); return end
+        -- Follow stock safe_release_manager's offline/binder guard, but keep the
+        -- pending work in THIS script. F9 cancels it, rather than carrying an old
+        -- external release queue into a different save with reused object IDs.
+        local offline_ok, offline = pcall(function() return server.online == false end)
+        if offline_ok and offline and client_object(record.id) == nil and
+            not (db.storage[record.id] and db.storage[record.id].object) then
+            local ids = children(server)
+            if ids == nil or #ids ~= 0 then skip_current("offline_inventory_not_empty"); return end
+            local ok = pcall(function()
+                alife_record(server, false)
+                life_object():release(server, true)
+            end)
+            if not ok then skip_current("release_failed"); return end
+        elseif now >= current.deadline then skip_current("offline_timeout") end
+        return
+    end
+
+    local object = eligible_client(record)
+    if object == nil then skip_current("corpse_unavailable_or_protected"); return end
+    if current.stage == "loot_wait" and now < current.deadline then return end
+    if current.pending then
+        if not bag_matches() then finish("backpack_missing"); return end
+        local confirmed = 0
+        for _, id in ipairs(current.pending) do
+            local item = server_object(id)
+            local ok, moved = pcall(function() return item ~= nil and item.parent_id == job.bag_id end)
+            if ok and moved then
+                confirmed = confirmed + 1
+                if not current.confirmed[id] then
+                    current.confirmed[id] = true
+                    job.items = job.items + 1
+                end
+            end
+        end
+        if confirmed ~= #current.pending then
+            if now >= current.deadline then skip_current("transfer_not_confirmed") end
+            return
+        end
+        current.pending = nil
+        if current.abort_reason then skip_current(current.abort_reason); return end
+    end
+
+    local ids, scan_error = children(server)
+    if ids == nil then skip_current(scan_error or "inventory_scan_failed"); return end
+    if #ids == 0 then
+        -- Do not delete a corpse while transfer events still own its children.
+        local ok = pcall(function()
+            local life = life_object()
+            life:set_switch_online(record.id, false)
+            life:set_switch_offline(record.id, true)
+            server:switch_offline()
+        end)
+        if not ok then skip_current("switch_offline_failed"); return end
+        current.stage, current.deadline = "release_wait", now + WAIT_MS
+        return
+    end
+
+    -- Stock has_quest_item only inspects stalkers. Protect unusual quest/story
+    -- children on modded mutants as well, before transferring any of them.
+    local protection_reason = inventory_protection(ids)
+    if protection_reason then skip_current(protection_reason); return end
+
+    local bag, bag_error = ensure_bag(now)
+    if bag_error then finish(bag_error); return end
+    if bag == nil then return end
+    current.pending, current.confirmed, current.deadline = {}, {}, now + WAIT_MS
+    -- Snapshot IDs first; transfers are queued engine events, not an immediate
+    -- mutation of a Lua inventory iterator. Preserve weapon upgrades/condition.
+    for index = 1, math.min(#ids, ITEMS_PER_UPDATE) do
+        local id = ids[index]
+        local item = client_object(id)
+        local se_item = server_object(id)
+        local ok, owned = pcall(function()
+            return item ~= nil and se_item ~= nil and se_item.parent_id == record.id
+        end)
+        if not ok or not owned then
+            current.abort_reason = "inventory_item_unavailable"
+            break
+        end
+        current.pending[#current.pending + 1] = id
+        local transfer_ok = pcall(function() object:transfer_item(item, bag) end)
+        if not transfer_ok then
+            current.abort_reason = "transfer_failed"
+            break
+        end
+    end
+    current.stage = "transfer_wait"
+end
+
+local function update(now)
+    if job == nil or gameplay_paused() then return end
+    local ok, name = pcall(level.name)
+    if not ok or name ~= job.level_name then finish("level_changed"); return end
+    if now < job.next_update then return end
+    job.next_update = now + 100
+    local step_ok, error_code = pcall(step, now)
+    if not step_ok and job then
+        log("update_failed_" .. tostring(error_code))
+        finish("update_failed")
+    end
+end
+
+local function execute(context)
+    local key = context.cleanup_key
+    if results[key] then return results[key][1], results[key][2] end
+    if job ~= nil then return "deferred", "corpse_cleanup_running" end
+    job = context.cleanup
+    if #job.targets == 0 then
+        finish()
+        return results[key][1], results[key][2]
+    end
+    return "deferred", "corpse_cleanup_running"
+end
+
+local function cancel(reason)
+    if job then finish(reason) end
+end
+
+function on_game_start()
+    local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+        can_execute = can_execute, execute = execute, is_supported = supported,
+        update = update,
+        on_game_load = function() cancel("cancelled_by_load") end,
+        on_level_changing = function() cancel("cancelled_by_level_change") end
+    })
+    if not ok then log("registration_failed_" .. tostring(reason)) end
+end

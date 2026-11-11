@@ -1,0 +1,663 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.annoying_fan",
+  "displayName": "Доставучий фанат",
+  "description": "Создаёт NPC с именем донатера и штатным снаряжением. Он следует за героем, игнорирует бой, не считается обычным напарником и несколько раз принудительно начинает штатный диалог. Можно использовать группировку игрока или техническую нейтральную группировку «Торговец».",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"npc_sections","displayName":"Допустимые варианты","kind":"MultiChoice","catalogKind":"Npc","minimumSelections":1,"defaultValue":""},
+    {"key":"use_trader_faction","displayName":"Техническая группировка «Торговец»","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"close_stock_dialogs","displayName":"Безопасно закрывать штатные диалоги перед обращением","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"dialogue_count","displayName":"Количество обращений","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"999"},
+    {"key":"interval_seconds","displayName":"Интервал между обращениями, сек.","kind":"Integer","minimum":1,"maximum":600,"defaultValue":"60"}
+  ],
+  "parameters": {"npc_sections":"","use_trader_faction":"false","close_stock_dialogs":"false","dialogue_count":"999","interval_seconds":"60"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.annoying_fan"
+local DIALOG_ID = "anomaly_donation_bridge_annoying_fan_dialog"
+local LOGIC_FILE = "scripts\\anomaly_donation_bridge_annoying_fan.ltx"
+local STATE_KEY = "__anomaly_donation_bridge_annoying_fan_v1"
+local SAVE_KEY = "anomaly_donation_bridge_annoying_fans_v1"
+local UPDATE_INTERVAL_MS = 250
+local UI_SETTLE_MS = 500
+local UI_CLOSE_RETRY_MS = 1000
+local TALK_DISTANCE_METERS = 5
+local SILENT_TEXT = anomaly_donation_bridge_common.game_text_cp1251("*молчит*") or
+	"*molchit*"
+
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { fans = {}, next_update = 0, callbacks_registered = false }
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.fans) ~= "table" then state.fans = {} end
+if type(state.next_update) ~= "number" then state.next_update = 0 end
+if type(state.ui_quiet_until) ~= "number" then state.ui_quiet_until = 0 end
+if type(state.callbacks_registered) ~= "boolean" then state.callbacks_registered = false end
+if type(state.enemy_callback_registered) ~= "boolean" then
+	state.enemy_callback_registered = false
+end
+
+local function now_ms(value)
+	if type(value) == "number" then return value end
+	if type(time_global) == "function" then
+		local ok, current = pcall(time_global)
+		if ok and type(current) == "number" then return current end
+	end
+	return 0
+end
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function server_object(id)
+	local life = life_object()
+	if life == nil then return nil end
+	local ok, object = pcall(function() return life:object(id, true) end)
+	return ok and object or nil
+end
+
+local function client_object(id)
+	if level == nil or type(level.object_by_id) ~= "function" then return nil end
+	local ok, object = pcall(level.object_by_id, id)
+	return ok and object or nil
+end
+
+local function object_name(object)
+	if object == nil then return nil end
+	local ok, name = pcall(function() return object:name() end)
+	return ok and type(name) == "string" and name ~= "" and name or nil
+end
+
+local function player_faction(actor)
+	local ok, community = pcall(function() return actor:character_community() end)
+	if not ok or type(community) ~= "string" or community == "" then return nil end
+	return (community:gsub("^actor_", ""))
+end
+
+local function parse_boolean(value, default_value, error_code)
+	if value == nil then return default_value end
+	if value == true or value == "true" then return true end
+	if value == false or value == "false" then return false end
+	return nil, error_code
+end
+
+local function parse_donor_name(params)
+	local donor_name = anomaly_donation_bridge_common.trim(params.donor_name)
+	donor_name = anomaly_donation_bridge_common.truncate_utf8(donor_name, 128)
+	if donor_name == "" or donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return nil, "annoying_fan_donor_name_invalid"
+	end
+	local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(donor_name)
+	if encoded_name == nil or encoded_name == "" then
+		return nil, "annoying_fan_donor_name_encoding_invalid"
+	end
+	return encoded_name
+end
+
+local function parse_donation_message(params)
+	local message = tostring(params.donation_message or "")
+	message = message:gsub("[%z\1-\31\127]", " ")
+	message = message:gsub("%s+", " ")
+	message = anomaly_donation_bridge_common.trim(message)
+	message = anomaly_donation_bridge_common.truncate_utf8(message, 2048)
+	if message == "" then return SILENT_TEXT end
+	local encoded = anomaly_donation_bridge_common.game_text_cp1251_lossy(message, "?")
+	return encoded ~= nil and encoded ~= "" and encoded or SILENT_TEXT
+end
+
+local function is_stalker(object)
+	if object == nil or type(IsStalker) ~= "function" then return false end
+	local ok, result = pcall(IsStalker, object)
+	if ok and result == true then return true end
+	local class_ok, class_id = pcall(function() return object:clsid() end)
+	if not class_ok then return false end
+	local server_ok, server_result = pcall(IsStalker, nil, class_id)
+	return server_ok and server_result == true
+end
+
+local function identity_matches(server, fan)
+	if server == nil or type(fan) ~= "table" then return false end
+	local section_ok, section = pcall(function() return server:section_name() end)
+	if not section_ok or tostring(section or "") ~= tostring(fan.section or "") then
+		return false
+	end
+	local expected_name = tostring(fan.object_name or "")
+	if expected_name ~= "" then
+		local current_name = object_name(server)
+		if current_name == nil or current_name ~= expected_name then return false end
+	end
+	return is_stalker(server)
+end
+
+local function copy_fan(fan, current)
+	return {
+		id = tonumber(fan.id), squad_id = tonumber(fan.squad_id),
+		section = tostring(fan.section or ""),
+		object_name = tostring(fan.object_name or ""),
+		community = tostring(fan.community or ""),
+		close_stock_dialogs = fan.close_stock_dialogs == true,
+		dialogue_text = tostring(fan.dialogue_text or SILENT_TEXT),
+		remaining = math.max(0, math.floor(tonumber(fan.remaining) or 0)),
+		interval_ms = math.max(1000, math.floor(tonumber(fan.interval_ms) or 3000)),
+		due_in_ms = math.max(0, math.floor((tonumber(fan.next_due) or current) - current)),
+		waiting_for_close = fan.waiting_for_close == true
+	}
+end
+
+local function save_state(data)
+	if type(data) ~= "table" then return end
+	local current, saved = now_ms(), {}
+	for id, fan in pairs(state.fans) do
+		if type(fan) == "table" then saved[tonumber(id) or id] = copy_fan(fan, current) end
+	end
+	data[SAVE_KEY] = saved
+end
+
+local function load_state(data)
+	local loaded = type(data) == "table" and data[SAVE_KEY] or nil
+	state.fans = {}
+	local current = now_ms()
+	state.ui_quiet_until = current + UI_SETTLE_MS
+	if type(loaded) ~= "table" then return end
+	for id, fan in pairs(loaded) do
+		local target_id = tonumber(fan.id) or tonumber(id)
+		if target_id ~= nil and target_id > 0 then
+			fan.id = target_id
+			fan.squad_id = tonumber(fan.squad_id)
+			fan.close_stock_dialogs = fan.close_stock_dialogs == true
+			fan.ui_close_retry_at = nil
+			fan.remaining = math.max(0, math.floor(tonumber(fan.remaining) or 0))
+			fan.interval_ms = math.max(1000,
+				math.floor(tonumber(fan.interval_ms) or 3000))
+			fan.next_due = current + math.max(0,
+				math.floor(tonumber(fan.due_in_ms) or fan.interval_ms))
+			fan.waiting_for_close = fan.waiting_for_close == true
+			fan.logic_bound = false
+			state.fans[target_id] = fan
+		end
+	end
+	state.next_update = 0
+end
+
+local function on_game_load()
+	local current = now_ms()
+	state.ui_quiet_until = current + UI_SETTLE_MS
+	for _, fan in pairs(state.fans) do
+		fan.logic_bound = false
+		fan.waiting_for_close = false
+		fan.ui_close_retry_at = nil
+		fan.next_due = current + math.max(1000, tonumber(fan.interval_ms) or 3000)
+	end
+	state.next_update = 0
+end
+
+local function unregister_from_smart(server)
+	if server == nil then return end
+	local smart_id = tonumber(server.m_smart_terrain_id)
+	if smart_id == nil or smart_id == 65535 then return end
+	local smart = server_object(smart_id)
+	if smart ~= nil then pcall(function() smart:unregister_npc(server) end) end
+end
+
+local function bind_follow_logic(npc, fan)
+	if npc == nil or xr_logic == nil or modules == nil or ini_file == nil then
+		return false
+	end
+	local api_ok, api_available = pcall(function()
+		return type(xr_logic.configure_schemes) == "function" and
+			type(xr_logic.determine_section_to_activate) == "function" and
+			type(xr_logic.activate_by_section) == "function" and
+			modules.stype_stalker ~= nil
+	end)
+	if not api_ok or not api_available then return false end
+	local storage = db and db.storage and db.storage[fan.id] or nil
+	if storage == nil then return false end
+	if storage.ini_filename == LOGIC_FILE and
+		tostring(storage.active_section or ""):find("beh@fan", 1, true) ~= nil then
+		fan.logic_bound = true
+		return true
+	end
+	local server = server_object(fan.id)
+	unregister_from_smart(server)
+	local ok = pcall(function()
+		npc:inactualize_patrol_path()
+		local ltx = ini_file(LOGIC_FILE)
+		xr_logic.configure_schemes(npc, ltx, LOGIC_FILE,
+			modules.stype_stalker, "logic", "")
+		local section = xr_logic.determine_section_to_activate(
+			npc, ltx, "logic", db.actor)
+		xr_logic.activate_by_section(npc, ltx, section, "", false)
+	end)
+	if ok then fan.logic_bound = true end
+	return ok
+end
+
+local function apply_friendship(actor, npc, server, fan)
+	local community = tostring(fan.community or "")
+	if community ~= "" then
+		pcall(function() npc:set_character_community(community, 0, 0) end)
+		local squad = fan.squad_id and server_object(fan.squad_id) or nil
+		if squad ~= nil then pcall(function() squad.player_id = community end) end
+	end
+	pcall(function() server:force_set_goodwill(5000, actor) end)
+	pcall(function() server:force_set_goodwill(5000, 0) end)
+	pcall(function() npc:force_set_goodwill(5000, actor) end)
+	pcall(function()
+		if game_relations ~= nil and type(game_relations.set_npcs_relation) == "function" then
+			game_relations.set_npcs_relation(npc, actor, "friend")
+		end
+	end)
+end
+
+local function talking(object)
+	if object == nil then return false end
+	local ok, result = pcall(function() return object:is_talking() end)
+	return ok and result == true
+end
+
+local function close_enough(actor, npc)
+	local ok, distance = pcall(function()
+		return actor:position():distance_to(npc:position())
+	end)
+	return ok and type(distance) == "number" and distance <= TALK_DISTANCE_METERS
+end
+
+local function dialogue_ui_snapshot(actor)
+	-- Pure probes only. Do not instantiate GetActorMenu()/a script GUI, repair
+	-- global UI flags, or use HideDialog() on an arbitrary script window.
+	if actor:alive() ~= true then return nil end
+	if type(device) == "function" and device():is_paused() then return nil end
+	if actor_menu == nil or type(actor_menu.is_hud_free) ~= "function" then return nil end
+	local stock_free = actor_menu.is_hud_free() == true
+	local inventory_module = rawget(_G, "ui_inventory")
+	local inventory = inventory_module and inventory_module.GUI or nil
+	local script_shown = inventory ~= nil and inventory:IsShown() == true
+	local menus = rawget(_G, "ActorMenu")
+	local native_inventory = menus and type(menus.get_actor_menu) == "function" and
+		menus.get_actor_menu() or nil
+	local native_shown = native_inventory ~= nil and native_inventory:IsShown() == true
+	local pda_menu = menus and type(menus.get_pda_menu) == "function" and
+		menus.get_pda_menu() or nil
+	local pda_shown = pda_menu ~= nil and pda_menu:IsShown() == true
+	local registered = type(Check_UI) == "function" and Check_UI() == true
+	local closable = true
+	local registry = rawget(_G, "_GUIs")
+	if type(registry) == "table" then
+		for name, entry in pairs(registry) do
+			if name ~= "UIInventory" or type(entry) ~= "table" or
+				entry.path ~= "ui_inventory" or not script_shown then
+				closable = false
+			end
+		end
+		if registered and next(registry) == nil then closable = false end
+	elseif registered then closable = false end
+	if script_shown then
+		-- Stock repair/trade confirmation boxes are separate modal dialogs.
+		-- Do not close their inventory parent underneath them.
+		for _, key in ipairs({ "message_box", "message_box_up" }) do
+			local modal = inventory[key]
+			if modal ~= nil and modal:IsShown() then closable = false end
+		end
+	end
+	return {
+		free = stock_free and not registered and not script_shown and
+			not native_shown and not pda_shown,
+		closable = closable,
+		inventory = script_shown and inventory or nil,
+		native_inventory = native_shown and native_inventory or nil,
+		pda_menu = pda_shown and pda_menu or nil
+	}
+end
+
+local function close_stock_ui(ui)
+	if not ui.closable then return end
+	if ui.inventory ~= nil then
+		-- UIInventory:Close also clears actor_menu mode, the current box and
+		-- Register_UI state. Hiding the window alone bypasses that cleanup.
+		if type(ui.inventory.Close) ~= "function" then return end
+		ui.inventory:Close()
+	elseif ui.native_inventory ~= nil and type(get_hud) == "function" then
+		local hud = get_hud()
+		if hud ~= nil then hud:HideActorMenu() end
+	end
+	if ui.pda_menu ~= nil then
+		-- Unlike the script inventory, native CUIPdaWnd owns its complete
+		-- Show(false) cleanup. A 3D PDA may refuse this; the next probe waits.
+		ui.pda_menu:HideDialog()
+	end
+end
+
+local function prepare_dialog_ui(actor, fan, current)
+	local ok, ui = pcall(dialogue_ui_snapshot, actor)
+	if not ok or ui == nil or not ui.free then
+		-- Shared across all fans: no second NPC may open a dialog on the same
+		-- update that the first NPC closes an inventory. Never persist UI handles.
+		state.ui_quiet_until = current + UI_SETTLE_MS
+		if ok and ui and ui.closable and fan.close_stock_dialogs == true and
+			current >= (tonumber(fan.ui_close_retry_at) or 0) then
+			fan.ui_close_retry_at = current + UI_CLOSE_RETRY_MS
+			pcall(close_stock_ui, ui)
+		end
+		return false
+	end
+	return current >= state.ui_quiet_until
+end
+
+local function try_open_dialog(actor, npc, fan, current)
+	if fan.remaining <= 0 or current < (tonumber(fan.next_due) or current) then return end
+	if talking(actor) or talking(npc) or not close_enough(actor, npc) then return end
+	if not prepare_dialog_ui(actor, fan, current) then return end
+	local opened = pcall(function()
+		npc:set_start_dialog(DIALOG_ID)
+		actor:run_talk_dialog(npc, false)
+	end)
+	local active = opened and (talking(actor) or talking(npc))
+	pcall(function() npc:restore_default_start_dialog() end)
+	if not active then return end
+	fan.remaining = fan.remaining - 1
+	fan.waiting_for_close = true
+	fan.next_due = current + fan.interval_ms
+end
+
+local function update_fan(id, fan, actor, current)
+	local server = server_object(id)
+	if server == nil or not identity_matches(server, fan) then
+		state.fans[id] = nil
+		return
+	end
+	local alive_ok, alive = pcall(function() return server:alive() end)
+	if alive_ok and alive == false then
+		state.fans[id] = nil
+		return
+	end
+	local life = life_object()
+	if life ~= nil then
+		pcall(function() life:set_switch_online(id, true) end)
+		pcall(function() life:set_switch_offline(id, false) end)
+	end
+	local squad = fan.squad_id and server_object(fan.squad_id) or nil
+	if squad ~= nil then pcall(function() squad.scripted_target = "actor" end) end
+	local npc = client_object(id)
+	if npc == nil or not is_stalker(npc) then return end
+	apply_friendship(actor, npc, server, fan)
+	if not fan.logic_bound then bind_follow_logic(npc, fan) else
+		local storage = db and db.storage and db.storage[id] or nil
+		if storage == nil or storage.ini_filename ~= LOGIC_FILE then
+			fan.logic_bound = false
+			bind_follow_logic(npc, fan)
+		end
+	end
+	if fan.waiting_for_close then
+		if not talking(actor) and not talking(npc) then
+			fan.waiting_for_close = false
+			fan.next_due = current + fan.interval_ms
+		end
+		return
+	end
+	try_open_dialog(actor, npc, fan, current)
+end
+
+local function update(now)
+	local current = now_ms(now)
+	if state.next_update > current then return end
+	state.next_update = current + UPDATE_INTERVAL_MS
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	for id, fan in pairs(state.fans) do update_fan(id, fan, actor, current) end
+end
+
+local function on_level_changing()
+	state.ui_quiet_until = now_ms() + UI_SETTLE_MS
+	local life = life_object()
+	if life == nil then return end
+	local actor = life:actor()
+	if actor == nil or type(game_graph) ~= "function" or type(TeleportSquad) ~= "function" then
+		return
+	end
+	local graph_ok, vertex = pcall(function()
+		local graph = game_graph()
+		return graph:vertex(actor.m_game_vertex_id)
+	end)
+	if not graph_ok or vertex == nil then return end
+	local point_ok, position, level_vertex_id = pcall(function()
+		return vertex:level_point(), vertex:level_vertex_id()
+	end)
+	if not point_ok then return end
+	for _, fan in pairs(state.fans) do
+		local squad = fan.squad_id and server_object(fan.squad_id) or nil
+		if squad ~= nil then
+			pcall(TeleportSquad, squad, position, level_vertex_id,
+				actor.m_game_vertex_id)
+			fan.logic_bound = false
+		end
+	end
+end
+
+local function enemy_eval(object, enemy, flags)
+	if object == nil or type(flags) ~= "table" then return end
+	local id_ok, id = pcall(function() return object:id() end)
+	id = id_ok and tonumber(id) or nil
+	local fan = id and state.fans[id] or nil
+	if fan == nil then return end
+	local server = server_object(id)
+	if server == nil or not identity_matches(server, fan) then
+		state.fans[id] = nil
+		return
+	end
+	-- The fan remains mortal, but never selects actors, stalkers or mutants as
+	-- combat targets. This prevents stock combat logic from replacing
+	-- the follow behavior after an enemy is seen or the fan is attacked.
+	flags.override = true
+	flags.result = false
+end
+
+local function supported(context)
+	local actor = actor_for_probe(context)
+	local life = life_object()
+	if actor == nil then return false, "actor_unavailable" end
+	if life == nil then return false, "alife_unavailable" end
+	if anomaly_donation_bridge_catalog == nil or
+		type(anomaly_donation_bridge_catalog.capable) ~= "function" or
+		anomaly_donation_bridge_catalog.capable() ~= true then
+		return false, "catalog_unavailable"
+	end
+	return true
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		npc_sections = true, use_trader_faction = true, close_stock_dialogs = true,
+		dialogue_count = true, interval_seconds = true,
+		catalog_revision = true, donor_name = true, donation_message = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local count, count_error = anomaly_donation_bridge_common.parse_integer(
+		params.dialogue_count, 999, 1, 999, "annoying_fan_dialogue_count_invalid")
+	if count == nil then return false, "rejected", count_error end
+	local interval, interval_error = anomaly_donation_bridge_common.parse_integer(
+		params.interval_seconds, 60, 1, 600, "annoying_fan_interval_invalid")
+	if interval == nil then return false, "rejected", interval_error end
+	local donor_name, donor_error = parse_donor_name(params)
+	if donor_name == nil then return false, "rejected", donor_error end
+	local dialogue_text = parse_donation_message(params)
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "npc_sections", "npc")
+	if entries == nil then return false, "rejected", catalog_error end
+	if #entries == 0 then return false, "rejected", "annoying_fan_selection_empty" end
+	local use_trader_faction, faction_error = parse_boolean(
+		params.use_trader_faction, false, "annoying_fan_faction_mode_invalid")
+	if use_trader_faction == nil then return false, "rejected", faction_error end
+	local close_stock_dialogs, close_error = parse_boolean(
+		params.close_stock_dialogs, false, "annoying_fan_close_dialogs_invalid")
+	if close_stock_dialogs == nil then return false, "rejected", close_error end
+	local community = use_trader_faction and "trader" or player_faction(context.actor)
+	if community == nil or community == "" then
+		return false, "deferred", "annoying_fan_player_faction_unavailable"
+	end
+	local available, support_reason = supported(context)
+	if not available then return false, "rejected", support_reason end
+	local entry = entries[math.random(#entries)]
+	context.options = {
+		section = entry.section_id, dialogue_count = count,
+		interval_ms = interval * 1000, community = community,
+		close_stock_dialogs = close_stock_dialogs,
+		donor_name = donor_name, dialogue_text = dialogue_text
+	}
+	return true
+end
+
+local function execute(context)
+	local options = context.options
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(options.section, "npc") then
+		return "rejected", "spawn_section_unsafe"
+	end
+	local life = life_object()
+	if life == nil then return "deferred", "alife_unavailable" end
+	local points, placement = anomaly_donation_bridge_common.spawn_points(
+		context.actor, 1, 4, 10, 720)
+	if points == nil then return "deferred", placement end
+	local point = points[1]
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	local squad_ok, squad = pcall(function()
+		return life:create("online_offline_group", point.position,
+			point.vertex_id, game_vertex_id)
+	end)
+	if not squad_ok or squad == nil then
+		return "rejected", "annoying_fan_squad_create_failed"
+	end
+	local member_ok, member_id = pcall(function()
+		return squad:add_squad_member(options.section, point.position,
+			point.vertex_id, game_vertex_id)
+	end)
+	member_id = tonumber(member_id)
+	if not member_ok or member_id == nil or member_id <= 0 then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "annoying_fan_member_create_failed_rolled_back" or
+			"annoying_fan_member_create_failed_state_unknown"
+	end
+	local member = server_object(member_id)
+	if member == nil or not is_stalker(member) then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "annoying_fan_member_invalid_rolled_back" or
+			"annoying_fan_member_invalid_state_unknown"
+	end
+	local name = object_name(member)
+	local setup_ok = name ~= nil and pcall(function()
+		if type(member.set_character_name) ~= "function" then
+			error("annoying_fan_name_api_unavailable")
+		end
+		member:set_character_name(options.donor_name)
+		unregister_from_smart(member)
+		squad.player_id = options.community
+		squad.scripted_target = "actor"
+		squad:set_squad_relation("friend")
+		member:force_set_goodwill(5000, context.actor)
+		member:force_set_goodwill(5000, 0)
+		if SIMBOARD ~= nil and type(SIMBOARD.assign_squad_to_smart) == "function" then
+			SIMBOARD:assign_squad_to_smart(squad, nil)
+		end
+		life:set_switch_online(member_id, true)
+		life:set_switch_offline(member_id, false)
+		squad:refresh()
+	end)
+	if not setup_ok then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "annoying_fan_setup_failed_rolled_back" or
+			"annoying_fan_setup_failed_state_unknown"
+	end
+	state.fans[member_id] = {
+		id = member_id, squad_id = tonumber(squad.id), section = options.section,
+		object_name = name, community = options.community,
+		close_stock_dialogs = options.close_stock_dialogs,
+		dialogue_text = options.dialogue_text,
+		remaining = options.dialogue_count, interval_ms = options.interval_ms,
+		next_due = now_ms() + options.interval_ms, waiting_for_close = false,
+		logic_bound = false
+	}
+	return "executed", "annoying_fan_spawned_" .. tostring(member_id) .. "_" ..
+		tostring(options.dialogue_count) .. "_talks_" .. tostring(options.community) ..
+		(placement ~= "requested_ring" and "_" .. tostring(placement) or "")
+end
+
+local function dialogue_fan(first_speaker, second_speaker)
+	if dialogs ~= nil and type(dialogs.who_is_npc) == "function" then
+		local ok, npc = pcall(dialogs.who_is_npc, first_speaker, second_speaker)
+		if ok and npc ~= nil then return npc end
+	end
+	for _, object in ipairs({ first_speaker, second_speaker }) do
+		if object ~= nil then
+			local ok, id = pcall(function() return object:id() end)
+			if ok and state.fans[tonumber(id)] ~= nil then return object end
+		end
+	end
+	return nil
+end
+
+function dialog_fan_text(first_speaker, second_speaker)
+	local npc = dialogue_fan(first_speaker, second_speaker)
+	if npc == nil then return SILENT_TEXT end
+	local ok, id = pcall(function() return npc:id() end)
+	local fan = ok and state.fans[tonumber(id)] or nil
+	return type(fan) == "table" and tostring(fan.dialogue_text or SILENT_TEXT) or
+		SILENT_TEXT
+end
+
+function dialog_actor_text()
+	return anomaly_donation_bridge_common.game_text_cp1251("Отстань") or "Leave me alone"
+end
+
+function init_dialog(dialog)
+	local first = dialog:AddPhrase(
+		"anomaly_donation_bridge_effect_hardcoon_adb_annoying_fan.dialog_fan_text",
+		"0", "", -10000)
+	first:GetPhraseScript():SetScriptText(
+		"anomaly_donation_bridge_effect_hardcoon_adb_annoying_fan.dialog_fan_text")
+	local answer = dialog:AddPhrase(
+		"anomaly_donation_bridge_effect_hardcoon_adb_annoying_fan.dialog_actor_text",
+		"1", "0", -10000)
+	local script = answer:GetPhraseScript()
+	script:SetScriptText(
+		"anomaly_donation_bridge_effect_hardcoon_adb_annoying_fan.dialog_actor_text")
+	script:AddAction("dialogs.break_dialog")
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(ACTION_ID, {
+		can_execute = can_execute, execute = execute, update = update,
+		on_game_load = on_game_load, on_level_changing = on_level_changing,
+		is_supported = supported, support_probe_is_hint = true
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] annoying fan registration failed: %s", tostring(reason))
+	end
+	if not state.callbacks_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("save_state", save_state)
+		RegisterScriptCallback("load_state", load_state)
+		state.callbacks_registered = true
+	end
+	if not state.enemy_callback_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("on_enemy_eval", enemy_eval)
+		state.enemy_callback_registered = true
+	end
+end

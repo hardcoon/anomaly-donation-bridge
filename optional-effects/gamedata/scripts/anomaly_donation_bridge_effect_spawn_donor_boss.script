@@ -1,0 +1,937 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_donor_boss",
+  "displayName": "Донат-босс",
+  "description": "Создаёт на текущей локации одиночного NPC с именем донатчика. NPC принадлежит штатной враждебной группировке арены и преследует игрока.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"npc_sections","displayName":"Допустимые варианты","kind":"MultiChoice","catalogKind":"Npc","minimumSelections":0,"defaultValue":""},
+    {"key":"reward_money","displayName":"Награда за убийство, RU","kind":"Integer","minimum":0,"maximum":100000000,"defaultValue":"10000"},
+    {"key":"health_percent","displayName":"Здоровье босса, %","kind":"Integer","minimum":100,"maximum":1000000,"defaultValue":"3000"},
+    {"key":"lives","displayName":"Количество жизней","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"1"},
+    {"key":"radius_meters","displayName":"Радиус появления, м","kind":"Integer","minimum":10,"maximum":1000,"defaultValue":"300"},
+    {"key":"always_follow","displayName":"Всегда следовать за игроком","kind":"Choice","options":["false","true"],"optionLabels":{"false":"Выключено","true":"Включено"},"defaultValue":"true"}
+  ],
+  "parameters": {"npc_sections":"","reward_money":"10000","health_percent":"3000","lives":"1","radius_meters":"300","always_follow":"true"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local TASK_PREFIX = "adb_donor_boss_"
+local TASK_SLOT_COUNT = 32
+local SAVE_PREFIX = "adb_donor_boss_state_v2_"
+local STATE_KEY = "__anomaly_donation_bridge_donor_boss_v1"
+local COMMUNITY_SAVE_KEY = "adb_donor_boss_community_v1"
+local BOSS_COMMUNITY = "arena_enemy"
+local FOLLOW_REFRESH_MS = 1000
+local runtime = rawget(_G, STATE_KEY)
+
+if type(runtime) ~= "table" then
+	runtime = {
+		bosses = {}, pending = {}, next_update = 0, callbacks_registered = false,
+		hit_hook = nil, previous_hit_hook = nil, hit_hook_installed = false,
+		respawn_errors = {}
+	}
+	rawset(_G, STATE_KEY, runtime)
+end
+if type(runtime.bosses) ~= "table" then runtime.bosses = {} end
+if type(runtime.pending) ~= "table" then runtime.pending = {} end
+if type(runtime.respawn_errors) ~= "table" then runtime.respawn_errors = {} end
+if type(runtime.next_update) ~= "number" then runtime.next_update = 0 end
+
+local function task_id(index)
+	return TASK_PREFIX .. string.format("%02d", index)
+end
+
+local function save_key(id)
+	local suffix = tostring(id or ""):match("^" .. TASK_PREFIX .. "(%d%d)$")
+	return suffix and (SAVE_PREFIX .. suffix) or nil
+end
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function server_object(id)
+	local life = life_object()
+	if life == nil then return nil end
+	local ok, object = pcall(function() return life:object(id, true) end)
+	return ok and object or nil
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function load_task_data(id)
+	if db == nil or db.actor == nil or type(load_var) ~= "function" then return nil end
+	local key = save_key(id)
+	if key == nil then return nil end
+	local ok, data = pcall(load_var, db.actor, key)
+	if ok and type(data) == "table" then return data end
+	-- Migrate a boss created by the first local lives build before the stock
+	-- task manager gets a chance to clear its task-owned save_var.
+	local legacy_ok, legacy = pcall(load_var, db.actor, id)
+	if not legacy_ok or type(legacy) ~= "table" then return nil end
+	if type(save_var) == "function" then pcall(save_var, db.actor, key, legacy) end
+	return legacy
+end
+
+local function save_task_data(id, data)
+	if db == nil or db.actor == nil or type(save_var) ~= "function" then return false end
+	local key = save_key(id)
+	if key == nil then return false end
+	return pcall(save_var, db.actor, key, data)
+end
+
+local function cp1251(value)
+	local converted = anomaly_donation_bridge_common.game_text_cp1251(value)
+	return converted or tostring(value or "")
+end
+
+local function donor_boss_text(id, field)
+	local data = load_task_data(id)
+	if data == nil then return cp1251("Донат-босс") end
+	local name = tostring(data.donor_name or cp1251("Анонимный донатчик"))
+	if field == "title" then
+		return cp1251("Ликвидировать цель «") .. name .. cp1251("»")
+	end
+	return cp1251("Он идёт за мной, нужно срочно уносить ноги или дать бой.")
+end
+
+local function donor_boss_target(id)
+	local data = load_task_data(id)
+	return data and tonumber(data.target_id) or nil
+end
+
+local function server_identity_matches(server, data)
+	if server == nil or type(data) ~= "table" then return false end
+	local expected_section = tostring(data.section or "")
+	if expected_section == "" then return false end
+	local section_ok, current_section = pcall(function()
+		return server:section_name()
+	end)
+	if not section_ok or tostring(current_section or "") ~= expected_section then
+		return false
+	end
+	local expected_name = tostring(data.object_name or "")
+	if expected_name ~= "" then
+		local name_ok, current_name = pcall(function() return server:name() end)
+		if not name_ok or tostring(current_name or "") ~= expected_name then
+			return false
+		end
+	end
+	return true
+end
+
+local function is_stalker_server(server)
+	if server == nil or type(IsStalker) ~= "function" then return false end
+	local class_ok, class_id = pcall(function() return server:clsid() end)
+	if not class_ok then return false end
+	local stalker_ok, stalker = pcall(IsStalker, nil, class_id)
+	return stalker_ok and stalker == true
+end
+
+local function is_stalker_client(object)
+	if object == nil or type(IsStalker) ~= "function" then return false end
+	local ok, stalker = pcall(IsStalker, object)
+	return ok and stalker == true
+end
+
+local release_forced_online
+local client_object
+
+local function capture_respawn_point(data, object, server)
+	if type(data) ~= "table" then return false end
+	local position = nil
+	if object ~= nil then
+		local ok, value = pcall(function() return object:position() end)
+		if ok and value ~= nil then position = value end
+	end
+	if position == nil and server ~= nil then
+		local ok, value = pcall(function() return server.position end)
+		if ok and value ~= nil then position = value end
+	end
+	local x = position and tonumber(position.x) or tonumber(data.respawn_x)
+	local y = position and tonumber(position.y) or tonumber(data.respawn_y)
+	local z = position and tonumber(position.z) or tonumber(data.respawn_z)
+	local level_vertex_id = nil
+	local game_vertex_id = nil
+	if object ~= nil then
+		local level_ok, level_value = pcall(function()
+			return object:level_vertex_id()
+		end)
+		if level_ok then level_vertex_id = tonumber(level_value) end
+		local game_ok, game_value = pcall(function()
+			return object:game_vertex_id()
+		end)
+		if game_ok then game_vertex_id = tonumber(game_value) end
+	end
+	if server ~= nil then
+		if level_vertex_id == nil then
+			local ok, value = pcall(function() return server.m_level_vertex_id end)
+			if ok then level_vertex_id = tonumber(value) end
+		end
+		if game_vertex_id == nil then
+			local ok, value = pcall(function() return server.m_game_vertex_id end)
+			if ok then game_vertex_id = tonumber(value) end
+		end
+	end
+	level_vertex_id = level_vertex_id or tonumber(data.respawn_level_vertex_id)
+	game_vertex_id = game_vertex_id or tonumber(data.respawn_game_vertex_id)
+	if x == nil or y == nil or z == nil or level_vertex_id == nil or
+		game_vertex_id == nil then return false end
+	data.respawn_x, data.respawn_y, data.respawn_z = x, y, z
+	data.respawn_level_vertex_id = level_vertex_id
+	data.respawn_game_vertex_id = game_vertex_id
+	return true
+end
+
+local function record_boss_death(id, data, target_id, victim)
+	if type(data) ~= "table" or data.current_dead == true or
+		data.finished == true then return false end
+	local server = server_object(target_id)
+	capture_respawn_point(data, victim, server)
+	local remaining = math.max(0, math.floor(tonumber(data.lives_remaining) or
+		tonumber(data.total_lives) or 1) - 1)
+	data.total_lives = math.max(1, math.floor(tonumber(data.total_lives) or 1))
+	data.lives_remaining = remaining
+	data.quest_complete = true
+	data.current_dead = true
+	data.respawn_pending = remaining > 0
+	data.respawn_corpse_removed = false
+	data.finished = remaining <= 0
+	data.dead = data.finished
+	if not save_task_data(id, data) then return false end
+	runtime.bosses[target_id] = nil
+	if data.respawn_pending then
+		runtime.pending[id] = true
+		-- Keep only the corpse of the final life. The saved position and graph
+		-- vertices are sufficient to recreate every intermediate life. Actual
+		-- corpse destruction is deferred to update: mutating ALife from inside
+		-- npc_on_death_callback is unsafe on some engine builds.
+	else
+		runtime.pending[id] = nil
+		release_forced_online(target_id)
+	end
+	return true
+end
+
+local function invalidate_boss(target_id, data, reason)
+	local boss = runtime.bosses[target_id]
+	runtime.bosses[target_id] = nil
+	if type(data) ~= "table" or data.invalid_reason ~= nil then return end
+	data.invalid_reason = tostring(reason or "donor_boss_target_invalid")
+	local id = boss and boss.task_id or nil
+	if type(id) == "string" and id ~= "" then save_task_data(id, data) end
+end
+
+local function donor_boss_status(_, id)
+	local data = load_task_data(id)
+	if data == nil then return "fail" end
+	if data.invalid_reason ~= nil then return "fail" end
+	if data.quest_complete == true or data.dead == true then return "complete" end
+	local target_id = tonumber(data.target_id)
+	local server = server_object(target_id)
+	if server == nil then
+		local npc = client_object(target_id)
+		local alive_ok, alive = false, nil
+		if npc ~= nil then
+			alive_ok, alive = pcall(function() return npc:alive() end)
+		end
+		if alive_ok and alive == false and is_stalker_client(npc) then
+			record_boss_death(id, data, target_id, npc)
+			return "complete"
+		end
+		return "fail"
+	end
+	if not server_identity_matches(server, data) or not is_stalker_server(server) then
+		invalidate_boss(target_id, data, "donor_boss_target_identity_changed")
+		return "fail"
+	end
+	local ok, alive = pcall(function() return server:alive() end)
+	if ok and alive == false then
+		record_boss_death(id, data, target_id, nil)
+		return "complete"
+	end
+	return nil
+end
+
+release_forced_online = function(id)
+	local life = life_object()
+	if life == nil or id == nil then return end
+	pcall(function() life:set_switch_online(id, false) end)
+	pcall(function() life:set_switch_offline(id, false) end)
+end
+
+local function donor_boss_complete(_, _, p)
+	local id = p and tostring(p[1] or "") or ""
+	local data = load_task_data(id)
+	if data == nil then return end
+	local target_id = tonumber(data.target_id)
+	if data.invalid_reason ~= nil then
+		if target_id ~= nil then runtime.bosses[target_id] = nil end
+		return
+	end
+	if data.reward_granted ~= true then
+		local reward = math.max(0, math.floor(tonumber(data.reward_money) or 0))
+		data.reward_granted = true
+		if save_task_data(id, data) and db ~= nil and db.actor ~= nil and reward > 0 then
+			pcall(function() db.actor:give_money(reward) end)
+		end
+	end
+	if data.finished == true and target_id ~= nil then
+		runtime.bosses[target_id] = nil
+		local server = server_object(target_id)
+		if server ~= nil and server_identity_matches(server, data) then
+			release_forced_online(target_id)
+		end
+	end
+end
+
+local function donor_boss_cleanup(_, _, p)
+	local id = p and tostring(p[1] or "") or ""
+	local data = load_task_data(id)
+	if data == nil then return end
+	local target_id = tonumber(data.target_id)
+	data.respawn_pending = false
+	data.finished = true
+	data.dead = true
+	runtime.pending[id] = nil
+	save_task_data(id, data)
+	if target_id ~= nil then
+		runtime.bosses[target_id] = nil
+		local server = server_object(target_id)
+		if server ~= nil and server_identity_matches(server, data) then
+			anomaly_donation_bridge_common.rollback_server_objects({ server })
+		end
+	end
+end
+
+local function register_task_api()
+	if type(task_functor) ~= "table" or type(task_status_functor) ~= "table" or
+		type(xr_effects) ~= "table" then return false end
+	task_functor.adb_donor_boss_text = donor_boss_text
+	task_functor.adb_donor_boss_target = donor_boss_target
+	task_status_functor.adb_donor_boss_status = donor_boss_status
+	xr_effects.adb_donor_boss_complete = donor_boss_complete
+	xr_effects.adb_donor_boss_cleanup = donor_boss_cleanup
+	return true
+end
+
+local function find_free_task_slot(actor)
+	if task_manager == nil or type(task_manager.get_task_manager) ~= "function" then
+		return nil
+	end
+	local ok, manager = pcall(task_manager.get_task_manager)
+	if not ok or manager == nil or type(manager.task_info) ~= "table" then return nil end
+	for index = 1, TASK_SLOT_COUNT do
+		local id = task_id(index)
+		local actor_task_ok, actor_task = pcall(function() return actor:get_task(id, true) end)
+		local data = load_task_data(id)
+		local state_free = data == nil or data.finished == true or
+			data.invalid_reason ~= nil
+		if state_free and manager.task_info[id] == nil and
+			(not actor_task_ok or actor_task == nil) then
+			return id, manager
+		end
+	end
+	return nil
+end
+
+local function supported(context)
+	local actor = actor_for_probe(context)
+	local life = life_object()
+	local catalog_ok = anomaly_donation_bridge_catalog ~= nil and
+		type(anomaly_donation_bridge_catalog.capable) == "function" and
+		anomaly_donation_bridge_catalog.capable() == true
+	local task_ok = type(task_manager) == "table" and
+		type(task_manager.get_task_manager) == "function" and
+		type(task_functor) == "table" and type(task_status_functor) == "table" and
+		type(xr_effects) == "table" and type(save_var) == "function" and
+		type(load_var) == "function"
+	local stalker_api_ok = type(IsStalker) == "function"
+	return catalog_ok and task_ok and stalker_api_ok and actor ~= nil and life ~= nil,
+		catalog_ok and task_ok and stalker_api_ok and actor ~= nil and life ~= nil and nil or
+		"donor_boss_api_unsupported"
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		npc_sections = true, reward_money = true, health_percent = true, lives = true,
+		radius_meters = true, always_follow = true,
+		donor_name = true, catalog_revision = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local reward, reward_error = anomaly_donation_bridge_common.parse_integer(
+		params.reward_money, 10000, 0, 100000000, "donor_boss_reward_invalid")
+	if reward == nil then return false, "rejected", reward_error end
+	local health, health_error = anomaly_donation_bridge_common.parse_integer(
+		params.health_percent, 3000, 100, 1000000, "donor_boss_health_invalid")
+	if health == nil then return false, "rejected", health_error end
+	local lives, lives_error = anomaly_donation_bridge_common.parse_integer(
+		params.lives, 1, 1, 100, "donor_boss_lives_invalid")
+	if lives == nil then return false, "rejected", lives_error end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, 300, 10, 1000, "donor_boss_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+	local always_follow = tostring(params.always_follow or "true"):lower()
+	if always_follow ~= "true" and always_follow ~= "false" then
+		return false, "rejected", "donor_boss_follow_invalid"
+	end
+	local donor_name = anomaly_donation_bridge_common.trim(params.donor_name)
+	if donor_name == "" or #donor_name > 256 or
+		donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return false, "rejected", "donor_boss_name_invalid"
+	end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "npc_sections", "npc")
+	if entries == nil then return false, "rejected", catalog_error end
+	if #entries == 0 then return false, "rejected", "donor_boss_selection_empty" end
+	local entry = entries[math.random(#entries)]
+	local available, support_reason = supported(context)
+	if not available then return false, "rejected", support_reason end
+	local slot, manager = find_free_task_slot(context.actor)
+	if slot == nil then return false, "rejected", "donor_boss_task_slots_full" end
+	context.options = {
+		section = entry.section_id, reward = reward, health = health, lives = lives,
+		radius = radius, always_follow = always_follow == "true",
+		donor_name = donor_name, task_id = slot,
+		task_manager = manager, community = BOSS_COMMUNITY
+	}
+	return true
+end
+
+client_object = function(id)
+	if level == nil or type(level.object_by_id) ~= "function" then return nil end
+	local ok, object = pcall(level.object_by_id, id)
+	return ok and object or nil
+end
+
+local function force_actor_target(id, data, actor, now)
+	local server = server_object(id)
+	if server == nil then return false, "donor_boss_target_missing" end
+	if not server_identity_matches(server, data) then
+		invalidate_boss(id, data, "donor_boss_target_identity_changed")
+		return false, "donor_boss_target_identity_changed"
+	end
+	if not is_stalker_server(server) then
+		invalidate_boss(id, data, "donor_boss_target_not_stalker")
+		return false, "donor_boss_target_not_stalker"
+	end
+	local life = life_object()
+	if life ~= nil then
+		-- The forced-online flag is not assumed to survive save/load. Keep a
+		-- distant boss active so its stock combat AI can really walk to actor.
+		pcall(function() life:set_switch_online(id, true) end)
+		pcall(function() life:set_switch_offline(id, false) end)
+	end
+	pcall(function() server:force_set_goodwill(-5000, actor) end)
+	pcall(function() server:force_set_goodwill(-5000, 0) end)
+	local npc = client_object(id)
+	if npc == nil then return false end
+	if not is_stalker_client(npc) then
+		invalidate_boss(id, data, "donor_boss_target_not_stalker")
+		return false, "donor_boss_target_not_stalker"
+	end
+	pcall(function() npc:set_character_community(BOSS_COMMUNITY, 0, 0) end)
+	pcall(function()
+		if game_relations ~= nil and type(game_relations.set_npcs_relation) == "function" then
+			game_relations.set_npcs_relation(npc, actor, "enemy")
+		end
+	end)
+	pcall(function() npc:force_set_goodwill(-5000, actor) end)
+	pcall(function() npc:set_relation(game_object.enemy, actor) end)
+	-- Stock stalker AI needs a visible memory record to select a distant actor.
+	-- The on_enemy_eval callback below permits only the actor, so ordinary
+	-- smart-terrain logic cannot replace the player with an incidental target.
+	-- Do not call game_object:set_enemy here: despite its placement in generated
+	-- Lua help, that binding belongs to CAI_Bloodsucker and logs an engine error
+	-- when invoked on a regular stalker.
+	local boss = runtime.bosses[id]
+	now = tonumber(now) or (type(time_global) == "function" and time_global() or 0)
+	if data.always_follow ~= false and boss ~= nil and
+		now >= (boss.next_follow_update or 0) then
+		boss.next_follow_update = now + FOLLOW_REFRESH_MS
+		local seen_ok, visible = pcall(function() return npc:see(actor) end)
+		if not seen_ok or visible ~= true then
+			-- make_object_visible_somewhen uses fictitious=true in the engine:
+			-- an EXISTING record keeps its old position. Remove only this NPC's
+			-- memory of actor, then let the stock API refill the current vertex
+			-- and position. Leave live vision/combat untouched while actor is seen.
+			pcall(function() npc:memory_remove_links(actor) end)
+		end
+	end
+	pcall(function() npc:make_object_visible_somewhen(actor) end)
+	pcall(function() npc:enable_memory_object(actor, true) end)
+	return true
+end
+
+local function execute(context)
+	local options = context.options
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(options.section, "npc") then
+		return "rejected", "spawn_section_unsafe"
+	end
+	local tolerance = math.max(10, options.radius * 0.10)
+	local minimum_distance = math.max(10, options.radius - tolerance)
+	local point, placement_error = anomaly_donation_bridge_common.random_safe_point(
+		context.spawn_anchor or context.actor, minimum_distance, options.radius,
+		math.max(2400, options.radius * 6), math.huge)
+	if point == nil then return "deferred", placement_error end
+	local actual_distance = tonumber(point.distance) or 0
+	local placement = actual_distance >= minimum_distance and
+		"requested_ring" or "farthest_available_vertex"
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return (context.spawn_anchor or context.actor):game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	if type(alife_create) ~= "function" then return "deferred", "alife_create_unavailable" end
+	local create_ok, server = pcall(alife_create, options.section, point.position,
+		point.vertex_id, game_vertex_id)
+	if not create_ok or server == nil then return "rejected", "donor_boss_spawn_failed" end
+	local target_id = tonumber(server.id)
+	if target_id == nil or target_id <= 0 then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "donor_boss_id_invalid_rolled_back" or
+			"donor_boss_id_invalid_state_unknown"
+	end
+	local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(options.donor_name)
+	local object_name = nil
+	local setup_ok = encoded_name ~= nil and encoded_name ~= "" and pcall(function()
+		if type(server.set_character_name) ~= "function" then
+			error("donor_boss_name_api_unavailable")
+		end
+		server:set_character_name(encoded_name)
+		server:force_set_goodwill(-5000, context.actor)
+		server:force_set_goodwill(-5000, 0)
+		object_name = server:name()
+		if type(se_save_var) == "function" and type(object_name) == "string" then
+			se_save_var(server.id, object_name, COMMUNITY_SAVE_KEY, options.community)
+		end
+	end)
+	if not setup_ok then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "donor_boss_setup_failed_rolled_back" or
+			"donor_boss_setup_failed_state_unknown"
+	end
+
+	local data = {
+		target_id = target_id, donor_name = encoded_name,
+		reward_money = options.reward, health_percent = options.health,
+		total_lives = options.lives, lives_remaining = options.lives,
+		always_follow = options.always_follow,
+		community = options.community, section = options.section,
+		object_name = object_name, dead = false, current_dead = false,
+		quest_complete = false, reward_granted = false,
+		respawn_pending = false, finished = false,
+		respawn_x = tonumber(point.position.x),
+		respawn_y = tonumber(point.position.y),
+		respawn_z = tonumber(point.position.z),
+		respawn_level_vertex_id = tonumber(point.vertex_id),
+		respawn_game_vertex_id = tonumber(game_vertex_id)
+	}
+	if not save_task_data(options.task_id, data) then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "donor_boss_state_failed_rolled_back" or
+			"donor_boss_state_failed_state_unknown"
+	end
+
+	runtime.bosses[target_id] = {
+		task_id = options.task_id, health_scale = options.health / 100,
+		community = options.community, section = options.section,
+		object_name = object_name
+	}
+	local life = life_object()
+	if life ~= nil then
+		pcall(function() life:set_switch_online(target_id, true) end)
+		pcall(function() life:set_switch_offline(target_id, false) end)
+	end
+	local task_ok = pcall(function()
+		options.task_manager:give_task(options.task_id, target_id)
+	end)
+	local created_task = task_ok and options.task_manager.task_info[options.task_id] ~= nil
+	if not created_task then
+		runtime.bosses[target_id] = nil
+		save_task_data(options.task_id, nil)
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "donor_boss_task_failed_rolled_back" or
+			"donor_boss_task_failed_state_unknown"
+	end
+	force_actor_target(target_id, data, context.actor)
+	runtime.next_update = 0
+	return "executed", "spawned_donor_boss_" .. tostring(target_id) .. "_" ..
+		options.section .. "_task_" .. options.task_id .. "_hp_" ..
+		tostring(options.health) .. "_reward_" .. tostring(options.reward) ..
+		"_lives_" .. tostring(options.lives) ..
+		"_distance_" .. tostring(math.floor(actual_distance + 0.5)) .. "m" ..
+		(placement ~= "requested_ring" and "_" .. placement or "")
+end
+
+local function resolve_respawn_point(data, actor)
+	if level == nil then
+		return nil, nil, nil, "navigation_api_unavailable"
+	end
+	local x, y, z = tonumber(data.respawn_x), tonumber(data.respawn_y),
+		tonumber(data.respawn_z)
+	if x == nil or y == nil or z == nil then
+		return nil, nil, nil, "death_position_missing"
+	end
+	local origin_ok, origin = pcall(function() return vector():set(x, y, z) end)
+	if not origin_ok or origin == nil then
+		return nil, nil, nil, "death_position_invalid"
+	end
+	local base_vertex = nil
+	local vertex_ok, vertex_value = pcall(function()
+		return level.vertex_id(origin)
+	end)
+	if vertex_ok and anomaly_donation_bridge_common.valid_vertex(vertex_value) then
+		base_vertex = tonumber(vertex_value)
+	end
+	if base_vertex == nil then
+		local stored = tonumber(data.respawn_level_vertex_id)
+		if anomaly_donation_bridge_common.valid_vertex(stored) then
+			base_vertex = stored
+		end
+	end
+	if base_vertex == nil then return nil, nil, nil, "death_vertex_invalid" end
+	local probe = {
+		level_vertex_id = function() return base_vertex end,
+		position = function() return origin end
+	}
+	local point = nil
+	if type(anomaly_donation_bridge_common.safe_points) == "function" then
+		local ok, points = pcall(anomaly_donation_bridge_common.safe_points,
+			probe, 1, 0.5, 3, 96, 4, true)
+		if ok and type(points) == "table" then point = points[1] end
+	end
+	if point == nil then
+		local ok, position = pcall(level.vertex_position, base_vertex)
+		if not ok or position == nil then
+			return nil, nil, nil, "death_vertex_position_unavailable"
+		end
+		point = {
+			vertex_id = base_vertex,
+			position = vector():set(position.x, position.y + 0.10, position.z)
+		}
+	end
+	local game_vertex_id = nil
+	if actor ~= nil then
+		local ok, value = pcall(function() return actor:game_vertex_id() end)
+		if ok then game_vertex_id = tonumber(value) end
+	end
+	game_vertex_id = game_vertex_id or tonumber(data.respawn_game_vertex_id)
+	if game_vertex_id == nil then return nil, nil, nil, "game_vertex_missing" end
+	return point.position, tonumber(point.vertex_id), game_vertex_id
+end
+
+local function spawn_remaining_life(id, data, actor)
+	if type(data) ~= "table" or data.respawn_pending ~= true or
+		math.floor(tonumber(data.lives_remaining) or 0) <= 0 then
+		return false, "state_not_pending"
+	end
+	local previous_target_id = tonumber(data.target_id)
+	if data.respawn_corpse_removed ~= true then
+		local corpse = server_object(previous_target_id)
+		if corpse ~= nil then
+			if not server_identity_matches(corpse, data) then
+				data.invalid_reason = "donor_boss_target_identity_changed"
+				data.respawn_pending = false
+				data.finished = true
+				data.dead = true
+				runtime.pending[id] = nil
+				save_task_data(id, data)
+				return false, "corpse_identity_changed"
+			end
+			local alive_ok, alive = pcall(function() return corpse:alive() end)
+			if not alive_ok or alive ~= false then return false, "corpse_not_dead" end
+			if not anomaly_donation_bridge_common.rollback_server_objects({ corpse }) then
+				return false, "corpse_release_failed"
+			end
+		end
+		-- A released server object can remain visible through alife():object for
+		-- more than one update. Waiting for that stale handle to become nil made
+		-- the respawn queue stall forever on some engine builds. The release is
+		-- already outside the death callback, so spawning the replacement now is
+		-- safe; remember the completed release to avoid touching the old id again.
+		data.respawn_corpse_removed = true
+		if not save_task_data(id, data) then
+			return false, "corpse_release_state_save_failed"
+		end
+	end
+	if type(alife_create) ~= "function" then return false, "alife_create_unavailable" end
+	local position, level_vertex_id, game_vertex_id, point_error =
+		resolve_respawn_point(data, actor)
+	if position == nil or level_vertex_id == nil or game_vertex_id == nil then
+		return false, point_error or "respawn_point_unavailable"
+	end
+	local create_ok, server = pcall(alife_create, tostring(data.section or ""),
+		position, level_vertex_id, game_vertex_id)
+	if not create_ok or server == nil then return false, "alife_create_failed" end
+	local target_id = tonumber(server.id)
+	if target_id == nil or target_id <= 0 then
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return false, "spawned_id_invalid"
+	end
+	local object_name = nil
+	local setup_ok = pcall(function()
+		if type(server.set_character_name) ~= "function" then
+			error("donor_boss_name_api_unavailable")
+		end
+		server:set_character_name(tostring(data.donor_name or ""))
+		server:force_set_goodwill(-5000, actor)
+		server:force_set_goodwill(-5000, 0)
+		object_name = server:name()
+		if type(se_save_var) == "function" and type(object_name) == "string" then
+			se_save_var(server.id, object_name, COMMUNITY_SAVE_KEY, BOSS_COMMUNITY)
+		end
+	end)
+	if not setup_ok or type(object_name) ~= "string" or object_name == "" then
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return false, "spawned_boss_setup_failed"
+	end
+	local old_target_id, old_object_name = data.target_id, data.object_name
+	data.target_id = target_id
+	data.object_name = object_name
+	data.current_dead = false
+	data.respawn_pending = false
+	data.respawn_corpse_removed = false
+	data.dead = false
+	if not save_task_data(id, data) then
+		data.target_id, data.object_name = old_target_id, old_object_name
+		data.current_dead = true
+		data.respawn_pending = true
+		anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return false, "spawned_boss_state_save_failed"
+	end
+	runtime.pending[id] = nil
+	runtime.bosses[target_id] = {
+		task_id = id,
+		health_scale = math.max(1,
+			(tonumber(data.health_percent) or 100) / 100),
+		community = BOSS_COMMUNITY, section = data.section,
+		object_name = object_name
+	}
+	force_actor_target(target_id, data, actor)
+	return true, nil
+end
+
+local function report_respawn_result(id, reason)
+	reason = tostring(reason or "unknown")
+	if runtime.respawn_errors[id] == reason then return end
+	runtime.respawn_errors[id] = reason
+	if type(printf) == "function" then
+		pcall(printf, "[ADB] donor boss respawn %s: %s", tostring(id), reason)
+	end
+end
+
+local function rebuild_runtime()
+	runtime.bosses = {}
+	runtime.pending = {}
+	for index = 1, TASK_SLOT_COUNT do
+		local id = task_id(index)
+		local data = load_task_data(id)
+		local target_id = data and tonumber(data.target_id) or nil
+		if type(data) == "table" and data.invalid_reason == nil then
+			local migrated = false
+			if data.always_follow == nil then
+				data.always_follow = true
+				migrated = true
+			end
+			if data.total_lives == nil then
+				data.total_lives = 1
+				data.lives_remaining = data.dead == true and 0 or 1
+				data.quest_complete = data.dead == true
+				data.current_dead = data.dead == true
+				data.respawn_pending = false
+				data.finished = data.dead == true
+				migrated = true
+			end
+			if migrated then save_task_data(id, data) end
+			if data.respawn_pending == true and
+				math.floor(tonumber(data.lives_remaining) or 0) > 0 then
+				runtime.pending[id] = true
+			end
+		end
+		if target_id ~= nil and type(data) == "table" and
+			data.current_dead ~= true and data.finished ~= true and
+			data.invalid_reason == nil then
+			-- Migrate bosses created by the first local test build, which copied
+			-- the player's faction and could therefore remain neutral.
+			if data.community ~= BOSS_COMMUNITY then
+				data.community = BOSS_COMMUNITY
+				save_task_data(id, data)
+			end
+			local server = server_object(target_id)
+			if server ~= nil and server_identity_matches(server, data) and
+				is_stalker_server(server) then
+				local alive_ok, alive = pcall(function() return server:alive() end)
+				if alive_ok and alive == false then
+					record_boss_death(id, data, target_id, nil)
+				else
+					runtime.bosses[target_id] = {
+						task_id = id,
+						health_scale = math.max(1,
+							(tonumber(data.health_percent) or 100) / 100),
+						community = BOSS_COMMUNITY, section = data.section,
+						object_name = data.object_name
+					}
+				end
+			elseif server ~= nil then
+				data.invalid_reason = "donor_boss_target_identity_changed"
+				save_task_data(id, data)
+			end
+		end
+	end
+end
+
+local function update(now)
+	now = tonumber(now) or (type(time_global) == "function" and time_global() or 0)
+	if now > 0 and runtime.next_update > now then return end
+	runtime.next_update = now + 500
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	for id in pairs(runtime.pending) do
+		local data = load_task_data(id)
+		if data == nil or data.respawn_pending ~= true or
+			data.finished == true or data.invalid_reason ~= nil then
+			runtime.pending[id] = nil
+		else
+			local spawned, reason = spawn_remaining_life(id, data, actor)
+			if spawned then
+				report_respawn_result(id, "spawned")
+			else
+				report_respawn_result(id, reason)
+			end
+		end
+	end
+	for target_id, boss in pairs(runtime.bosses) do
+		local data = load_task_data(boss.task_id)
+		if data == nil or data.current_dead == true or data.finished == true then
+			runtime.bosses[target_id] = nil
+		else
+			local server = server_object(target_id)
+			local alive_ok, alive = false, nil
+			if server ~= nil then
+				alive_ok, alive = pcall(function() return server:alive() end)
+			end
+			if alive_ok and alive == false then
+				record_boss_death(boss.task_id, data, target_id,
+					client_object(target_id))
+			else
+				force_actor_target(target_id, data, actor, now)
+			end
+		end
+	end
+end
+
+local function npc_on_death(victim)
+	if victim == nil then return end
+	local ok, id = pcall(function() return victim:id() end)
+	id = ok and tonumber(id) or nil
+	local boss = id and runtime.bosses[id] or nil
+	if boss == nil then return end
+	local data = load_task_data(boss.task_id)
+	local server = server_object(id)
+	if not is_stalker_client(victim) or
+		(server ~= nil and not server_identity_matches(server, data)) then
+		invalidate_boss(id, data, "donor_boss_target_identity_changed")
+		return
+	end
+	record_boss_death(boss.task_id, data, id, victim)
+end
+
+local function enemy_eval(object, enemy, flags)
+	if object == nil or enemy == nil or type(flags) ~= "table" then return end
+	local object_ok, object_id = pcall(function() return object:id() end)
+	local id = object_ok and tonumber(object_id) or nil
+	local boss = id and runtime.bosses[id] or nil
+	if boss == nil then return end
+	local data = load_task_data(boss.task_id)
+	local server = server_object(id)
+	if not is_stalker_client(object) or server == nil or
+		not server_identity_matches(server, data) then
+		invalidate_boss(id, data, "donor_boss_target_identity_changed")
+		return
+	end
+	local enemy_ok, enemy_id = pcall(function() return enemy:id() end)
+	flags.override = true
+	flags.result = enemy_ok and tonumber(enemy_id) == 0
+end
+
+local function install_hit_hook()
+	if runtime.hit_hook == nil then
+		runtime.hit_hook = function(object, hit, bone_id)
+			local previous = runtime.previous_hit_hook
+			if type(previous) == "function" then
+				local ok, result = pcall(previous, object, hit, bone_id)
+				if ok and result == false then return false end
+			end
+			local object_ok, id = pcall(function() return object:id() end)
+			local target_id = object_ok and tonumber(id) or nil
+			local boss = target_id and runtime.bosses[target_id] or nil
+			if boss ~= nil and hit ~= nil then
+				local data = load_task_data(boss.task_id)
+				local server = server_object(target_id)
+				if is_stalker_client(object) and server ~= nil and
+					server_identity_matches(server, data) then
+					pcall(function()
+						local scale = math.max(1, tonumber(boss.health_scale) or 1)
+						hit.power = hit.power / scale
+					end)
+				else
+					invalidate_boss(target_id, data,
+						"donor_boss_target_identity_changed")
+				end
+			end
+			return true
+		end
+	end
+	local current = rawget(_G, "CAI_Stalker__BeforeHitCallback")
+	if current == runtime.hit_hook then
+		runtime.hit_hook_installed = true
+		return
+	end
+	if runtime.hit_hook_installed then return end
+	runtime.previous_hit_hook = type(current) == "function" and current or nil
+	rawset(_G, "CAI_Stalker__BeforeHitCallback", runtime.hit_hook)
+	runtime.hit_hook_installed = true
+end
+
+local function on_game_load()
+	register_task_api()
+	rebuild_runtime()
+	runtime.next_update = 0
+end
+
+function on_game_start()
+	register_task_api()
+	install_hit_hook()
+	rebuild_runtime()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"spawn_donor_boss", {
+			can_execute = can_execute, execute = execute, update = update,
+			on_game_load = on_game_load, is_supported = supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_donor_boss registration failed: %s", tostring(reason))
+	end
+	if not runtime.callbacks_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("npc_on_death_callback", npc_on_death)
+		RegisterScriptCallback("on_enemy_eval", enemy_eval)
+		runtime.callbacks_registered = true
+	end
+end

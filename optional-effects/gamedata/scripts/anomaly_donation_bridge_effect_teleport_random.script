@@ -1,0 +1,1234 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "teleport_random",
+  "displayName": "Случайный телепорт",
+  "description": "Перемещает персонажа на безопасную вершину текущей локации.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "minimum_meters",
+      "displayName": "Минимум, м",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 2000,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "25",
+      "catalogKind": null,
+      "minimumSelections": 0
+    },
+    {
+      "key": "maximum_meters",
+      "displayName": "Максимум, м",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 2000,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "100",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "minimum_meters": "25",
+    "maximum_meters": "100"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_spawn_effects_v1"
+local ANOMALY_PSTOR_KEY = "anomaly_donation_bridge_active_anomalies_v1"
+local state = rawget(_G, STATE_KEY)
+local MAX_ACTIVE_ANOMALIES = 8
+local MAX_OBJECT_ID = 65534
+local ANOMALY_LOAD_GRACE_MS = 1500
+local SQUAD_MINIMUM_RADIUS = 10
+local SQUAD_MAXIMUM_RADIUS = 100
+local SQUAD_DEFAULT_RADIUS = 25
+local SQUAD_VISIBILITY_MS = 30000
+local RANDOM_ANOMALY_SECTION = "__adb_random_anomaly__"
+local VISUAL_ANOMALY_CLASSES = {
+	ZS_BFUZZ = true, Z_RUSTYH = true, ZS_AMEBA = true
+}
+
+if type(state) ~= "table" then
+	state = { anomalies = {}, anomalies_loaded = false,
+		anomalies_restore_after = 0, anomalies_persist_dirty = false,
+		squad_visibility = {} }
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.anomalies) ~= "table" then state.anomalies = {} end
+if type(state.anomalies_loaded) ~= "boolean" then state.anomalies_loaded = false end
+if type(state.anomalies_restore_after) ~= "number" then state.anomalies_restore_after = 0 end
+if type(state.anomalies_persist_dirty) ~= "boolean" then state.anomalies_persist_dirty = false end
+if type(state.squad_visibility) ~= "table" then state.squad_visibility = {} end
+
+local function register(action_id, can_execute, execute, update, on_game_load,
+	on_level_changing, is_supported)
+	return anomaly_donation_bridge_registry.register_builtin(action_id, {
+		can_execute = can_execute, execute = execute, update = update,
+		on_game_load = on_game_load, on_level_changing = on_level_changing,
+		is_supported = is_supported, support_probe_is_hint = true
+	})
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function catalog_api_supported()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+local function alife_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function create_server_object(section, position, level_vertex_id, game_vertex_id,
+	expected_kind)
+	-- alife_create is Anomaly's stock wrapper around alife():create.  Besides
+	-- validating the section it updates the game's ALife bookkeeping and fires
+	-- the normal callbacks expected by other addons.
+	-- Native entity constructors may assert before Lua regains control, so pcall
+	-- alone is not crash protection. Reclassify the merged section immediately
+	-- before entering C++.
+	if expected_kind ~= nil and
+		not anomaly_donation_bridge_catalog.is_spawn_safe(section, expected_kind) then
+		return nil, "spawn_section_unsafe"
+	end
+	if type(alife_create) ~= "function" then return nil, "alife_create_unavailable" end
+	local ok, object = pcall(alife_create, section, position, level_vertex_id,
+		game_vertex_id)
+	if not ok then return nil, "alife_create_failed" end
+	return object
+end
+
+local function parse_spawn_groups(value)
+	value = tostring(value or "")
+	if value == "" or #value > 4000 or value:sub(1, 1) == ";" or
+		value:sub(-1) == ";" or value:find(";;", 1, true) then
+		return nil, "spawn_group_bundle_invalid"
+	end
+	local rows, total = {}, 0
+	for encoded in value:gmatch("[^;]+") do
+		local section, strength, count_text = encoded:match(
+			"^([^%*]+)%*([^%*]+)%*(%d+)$")
+		local count = tonumber(count_text)
+		if section == nil or not anomaly_donation_bridge_common.valid_section_id(section) or
+			(strength ~= "any" and strength ~= "lite" and strength ~= "normal" and
+			 strength ~= "strong" and strength ~= "unclassified") or
+			count == nil or count < 1 or count > 99 or count ~= math.floor(count) then
+			return nil, "spawn_group_bundle_invalid"
+		end
+		total = total + count
+		if total > 200 or #rows >= 128 then return nil, "spawn_group_bundle_too_large" end
+		rows[#rows + 1] = { section = section, strength = "any", count = count }
+	end
+	return #rows > 0 and rows or nil, #rows > 0 and nil or "spawn_group_bundle_invalid"
+end
+
+local function direct_spawn_can(kind, context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		groups = true, section_id = true, strength = true, count = true,
+		catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local requested_rows, rows_error
+	if params.groups ~= nil then
+		requested_rows, rows_error = parse_spawn_groups(params.groups)
+	else
+		local count, count_error = anomaly_donation_bridge_common.parse_integer(
+			params.count, 1, 1, 99, kind .. "_count_invalid")
+		if count == nil then return false, "rejected", count_error end
+		requested_rows = { { section = tostring(params.section_id or ""),
+			strength = "any", count = count } }
+	end
+	if requested_rows == nil then return false, "rejected", rows_error end
+	local rows, total = {}, 0
+	for _, requested in ipairs(requested_rows) do
+		local entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+			catalog_revision = params.catalog_revision, section_id = requested.section
+		}, "section_id", kind)
+		if entry == nil then return false, "rejected", catalog_error end
+		rows[#rows + 1] = { section = entry.section_id, count = requested.count,
+			strength = "any" }
+		total = total + requested.count
+	end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	context.options = { rows = rows, total = total, kind = kind }
+	return true
+end
+
+local function direct_spawn_execute(context)
+	for _, row in ipairs(context.options.rows) do
+		if not anomaly_donation_bridge_catalog.is_spawn_safe(
+			row.section, context.options.kind) then
+			return "rejected", "spawn_section_unsafe"
+		end
+	end
+	local points, placement = anomaly_donation_bridge_common.spawn_points(
+		context.actor, context.options.total, 15, 25,
+		math.max(360, context.options.total * 20))
+	if points == nil then return "deferred", placement end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	local created, point_index = {}, 1
+	for _, row in ipairs(context.options.rows) do
+		for _ = 1, row.count do
+			local point = points[point_index]
+			local object, create_error = create_server_object(row.section,
+				point.position, point.vertex_id, game_vertex_id, context.options.kind)
+			if create_error ~= nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				if create_error == "spawn_section_unsafe" and rolled_back then
+					return "rejected", "spawn_section_unsafe"
+				end
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and context.options.kind .. "_spawn_failed_rolled_back" or
+					context.options.kind .. "_spawn_failed_state_unknown"
+			end
+			if object == nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and context.options.kind .. "_spawn_failed_rolled_back" or
+					context.options.kind .. "_spawn_failed_rollback_incomplete"
+			end
+			created[#created + 1] = object
+			point_index = point_index + 1
+		end
+	end
+	return "executed", "spawned_" .. context.options.kind .. "s_" ..
+		tostring(context.options.total) .. "_groups_" .. tostring(#context.options.rows) ..
+		(placement ~= "requested_ring" and "_" .. placement or "")
+end
+
+local function spawn_mutants_can(context, params)
+	return direct_spawn_can("mutant", context, params)
+end
+
+local function spawn_npcs_can(context, params)
+	return direct_spawn_can("npc", context, params)
+end
+
+local function hostile_to_actor(actor, faction)
+	if relation_registry == nil then return false end
+	local ok, attitude = pcall(function()
+		return relation_registry.community_relation(faction, actor:character_community()) +
+			relation_registry.community_goodwill(faction, actor:id())
+	end)
+	return ok and tonumber(attitude) ~= nil and tonumber(attitude) <= -1000
+end
+
+local function force_member_hostile(id, actor, life)
+	local applied = false
+	local client_object = nil
+	if level ~= nil and type(level.object_by_id) == "function" then
+		local ok, object = pcall(level.object_by_id, id)
+		if ok then client_object = object end
+	end
+	if client_object ~= nil then
+		-- Stock game_relations uses the online game-object API.  The additional
+		-- -5000 override is the same value used by Anomaly's debug launcher and
+		-- remains hostile even when the two factions normally like each other.
+		local relation_ok = pcall(function()
+			local relations = _G["game_relations"]
+			if relations == nil or type(relations.set_npcs_relation) ~= "function" then
+				error("game_relations_unavailable")
+			end
+			relations.set_npcs_relation(client_object, actor, "enemy")
+		end)
+		local goodwill_ok = pcall(function()
+			client_object:force_set_goodwill(-5000, actor)
+		end)
+		local engine_relation_ok = pcall(function()
+			client_object:set_relation(game_object.enemy, actor)
+		end)
+		if relation_ok or goodwill_ok or engine_relation_ok then applied = true end
+	end
+	if life ~= nil then
+		local ok, server_object = pcall(function() return life:object(id, true) end)
+		if ok and server_object ~= nil then
+			local object_goodwill_ok = pcall(function()
+				server_object:force_set_goodwill(-5000, actor)
+			end)
+			local actor_id_goodwill_ok = pcall(function()
+				-- sim_squad_scripted uses the actor's fixed ALife id (0) for an
+				-- offline member.  Keep this call as a compatibility fallback.
+				server_object:force_set_goodwill(-5000, 0)
+			end)
+			if object_goodwill_ok or actor_id_goodwill_ok then applied = true end
+		end
+	end
+	return applied
+end
+
+local function remember_squad_visibility(member_ids, now, force_hostile)
+	local expires_at = (tonumber(now) or (time_global and time_global() or 0)) +
+		SQUAD_VISIBILITY_MS
+	for _, id in ipairs(member_ids) do
+		state.squad_visibility[id] = {
+			expires_at = expires_at,
+			force_hostile = force_hostile == true
+		}
+	end
+end
+
+local function squad_visibility_update(now)
+	now = tonumber(now) or (time_global and time_global() or 0)
+	local actor = db and db.actor or nil
+	local life = alife_object()
+	for id, saved in pairs(state.squad_visibility) do
+		local expires_at = type(saved) == "table" and saved.expires_at or saved
+		local force_hostile = type(saved) == "table" and saved.force_hostile == true
+		local client_object = nil
+		if level ~= nil and type(level.object_by_id) == "function" then
+			local ok, object = pcall(level.object_by_id, id)
+			if ok then client_object = object end
+		end
+		if client_object ~= nil then
+			if actor ~= nil then
+				pcall(function() client_object:make_object_visible_somewhen(actor) end)
+			end
+			if force_hostile and actor ~= nil then
+				force_member_hostile(id, actor, life)
+			end
+			if now >= tonumber(expires_at or 0) then state.squad_visibility[id] = nil end
+		elseif now >= tonumber(expires_at or 0) or life == nil then
+			state.squad_visibility[id] = nil
+		else
+			local exists_ok, server_object = pcall(function()
+				return life:object(id, true)
+			end)
+			if not exists_ok or server_object == nil then state.squad_visibility[id] = nil end
+		end
+	end
+end
+
+local function clear_squad_visibility()
+	state.squad_visibility = {}
+end
+
+local function squad_can(kind, require_hostile, context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		squad_sections = true, strength = true, radius_meters = true,
+		force_hostile = true, minimum_count = true, maximum_count = true,
+		catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "squad_sections", kind)
+	if entries == nil then return false, "rejected", catalog_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	local force_text = tostring(params.force_hostile == nil and "true" or
+		params.force_hostile):lower()
+	if force_text ~= "true" and force_text ~= "false" then
+		return false, "rejected", "force_hostile_invalid"
+	end
+	local force_hostile = force_text == "true"
+	if require_hostile and not force_hostile and (relation_registry == nil or
+		type(relation_registry.community_relation) ~= "function" or
+		type(relation_registry.community_goodwill) ~= "function") then
+		return false, "rejected", "faction_relation_api_unsupported"
+	end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, SQUAD_DEFAULT_RADIUS, SQUAD_MINIMUM_RADIUS,
+		SQUAD_MAXIMUM_RADIUS, "squad_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+	local minimum_count, minimum_error = anomaly_donation_bridge_common.parse_integer(
+		params.minimum_count, 1, 1, 99, "squad_count_invalid")
+	if minimum_count == nil then return false, "rejected", minimum_error end
+	local maximum_count, maximum_error = anomaly_donation_bridge_common.parse_integer(
+		params.maximum_count, 10, 1, 99, "squad_count_invalid")
+	if maximum_count == nil or minimum_count > maximum_count then
+		return false, "rejected", maximum_error or "squad_count_invalid"
+	end
+	local eligible = {}
+	for _, entry in ipairs(entries) do
+		if (not require_hostile or force_hostile or
+				hostile_to_actor(context.actor, entry.faction)) then
+			eligible[#eligible + 1] = entry
+		end
+	end
+	if #eligible == 0 then
+		return false, "rejected", require_hostile and "hostile_squad_selection_empty" or
+			"mutant_squad_selection_empty"
+	end
+	context.options = {
+		entries = eligible, kind = kind, radius = radius,
+		force_hostile = force_hostile, minimum_count = minimum_count,
+		maximum_count = maximum_count
+	}
+	return true
+end
+
+local function hostile_squad_can(context, params)
+	return squad_can("stalker_squad", true, context, params)
+end
+
+local function mutant_squad_can(context, params)
+	return squad_can("mutant_squad", false, context, params)
+end
+
+local function selected_squad_can(kind, context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		groups = true, radius_meters = true, force_hostile = true,
+		catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local requested_rows, rows_error = parse_spawn_groups(params.groups)
+	if requested_rows == nil then return false, "rejected", rows_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, SQUAD_DEFAULT_RADIUS, SQUAD_MINIMUM_RADIUS,
+		SQUAD_MAXIMUM_RADIUS, "squad_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+	local force_text = tostring(params.force_hostile == nil and "true" or
+		params.force_hostile):lower()
+	if force_text ~= "true" and force_text ~= "false" then
+		return false, "rejected", "force_hostile_invalid"
+	end
+	local rows = {}
+	for _, requested in ipairs(requested_rows) do
+		local entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+			catalog_revision = params.catalog_revision, section_id = requested.section
+		}, "section_id", kind)
+		if entry == nil then return false, "rejected", catalog_error end
+		rows[#rows + 1] = { entry = entry, count = requested.count }
+	end
+	context.options = { rows = rows, kind = kind, radius = radius,
+		force_hostile = force_text == "true", selected = true }
+	return true
+end
+
+local function selected_npc_squads_can(context, params)
+	return selected_squad_can("stalker_squad", context, params)
+end
+
+local function selected_mutant_squads_can(context, params)
+	return selected_squad_can("mutant_squad", context, params)
+end
+
+local function prepare_squad_members(entry, kind, desired_count)
+	if not anomaly_donation_bridge_catalog.is_available(entry.section_id, kind) then
+		return nil, "catalog_selection_stale_or_quarantined"
+	end
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(entry.section_id, kind) then
+		return nil, "spawn_section_unsafe"
+	end
+	local template_members, member_error, expected_kind =
+		anomaly_donation_bridge_catalog.resolve_squad_members(entry.section_id, kind)
+	if template_members == nil then return nil, member_error end
+	local members = {}
+	desired_count = desired_count or #template_members
+	for index = 1, desired_count do
+		members[index] = template_members[((index - 1) % #template_members) + 1]
+	end
+	return { entry = entry, members = members, expected_kind = expected_kind }
+end
+
+local function spawn_squad_plans(context, plans, random_detail)
+	local life = alife_object()
+	if life == nil then return "deferred", "alife_unavailable" end
+	local member_total = 0
+	for _, plan in ipairs(plans) do
+		member_total = member_total + #plan.members
+		if member_total > 200 then return "rejected", "squad_member_bundle_too_large" end
+	end
+	local maximum = context.options.radius
+	local switch_ok, switch_distance = pcall(function() return life:switch_distance() end)
+	switch_distance = tonumber(switch_distance)
+	if switch_ok and switch_distance ~= nil and switch_distance > 0 then
+		local visible_maximum = math.floor(switch_distance - 5)
+		if visible_maximum >= 5 then maximum = math.min(maximum, visible_maximum) end
+	end
+	local minimum = math.max(5, math.min(maximum - 1, math.floor(maximum * 0.6)))
+	local points, placement = anomaly_donation_bridge_common.spawn_points(
+		context.actor, member_total, minimum, maximum, math.max(300, member_total * 80))
+	if points == nil then return "deferred", placement end
+	if type(printf) == "function" then
+		pcall(printf, "[ADB] safe squad bundle begin: %d", #plans)
+	end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	local created, member_ids, point_index = {}, {}, 1
+	for _, plan in ipairs(plans) do
+		for _, member_section in ipairs(plan.members) do
+			local object, create_error = create_server_object(
+				member_section, points[point_index].position, points[point_index].vertex_id,
+				game_vertex_id, plan.expected_kind)
+			if object == nil or create_error ~= nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and (create_error or "group_spawn_failed_rolled_back") or
+					"group_spawn_failed_state_unknown"
+			end
+			local id = tonumber(object.id)
+			if id == nil or id <= 0 or id > MAX_OBJECT_ID then
+				created[#created + 1] = object
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "spawned_member_id_invalid" or
+					"spawned_member_id_invalid_state_unknown"
+			end
+			created[#created + 1] = object
+			member_ids[#member_ids + 1] = id
+			point_index = point_index + 1
+		end
+	end
+	if context.options.force_hostile then
+		for _, id in ipairs(member_ids) do
+			force_member_hostile(id, context.actor, life)
+		end
+	end
+	remember_squad_visibility(member_ids, context.now, context.options.force_hostile)
+	if type(printf) == "function" then
+		pcall(printf, "[ADB] safe squad bundle complete: %d", #plans)
+	end
+	if random_detail ~= nil then
+		return "executed", "spawned_" .. context.options.kind .. "_near_actor_" ..
+			tostring(math.floor(points[1].distance + 0.5)) .. "m_" .. random_detail ..
+			"_members_" .. tostring(member_total) ..
+			(context.options.force_hostile and "_forced_hostile" or "_natural_hostility") ..
+			(placement ~= "requested_ring" and "_" .. placement or "")
+	end
+	return "executed", "spawned_selected_" .. context.options.kind .. "s_" ..
+		tostring(#plans) .. "_near_actor_" ..
+		tostring(math.floor(points[1].distance + 0.5)) .. "m_members_" ..
+		tostring(member_total) ..
+		(context.options.force_hostile and "_forced_hostile" or "_natural_hostility") ..
+		(placement ~= "requested_ring" and "_" .. placement or "")
+end
+
+local function squad_execute(context)
+	local entry = context.options.entries[math.random(1, #context.options.entries)]
+	if context.options.kind == "stalker_squad" and not context.options.force_hostile and
+		not hostile_to_actor(context.actor, entry.faction) then
+		return "rejected", "selected_squad_no_longer_hostile"
+	end
+	local desired_count = math.random(context.options.minimum_count,
+		context.options.maximum_count)
+	local plan, plan_error = prepare_squad_members(
+		entry, context.options.kind, desired_count)
+	if plan == nil then return "rejected", plan_error end
+	return spawn_squad_plans(context, { plan }, entry.section_id)
+end
+
+local function nearest_same_level_smart(position)
+	if sim_board == nil or type(sim_board.get_sim_board) ~= "function" or
+		simulation_objects == nil or
+		type(simulation_objects.is_on_the_same_level) ~= "function" then
+		return nil, nil
+	end
+	local ok, board = pcall(sim_board.get_sim_board)
+	if not ok or board == nil or type(board.smarts_by_names) ~= "table" then
+		return board, nil
+	end
+	local life = alife_object()
+	local server_actor = life and life:actor() or nil
+	if server_actor == nil then return board, nil end
+	local nearest, nearest_distance = nil, math.huge
+	for _, smart in pairs(board.smarts_by_names) do
+		local same_ok, same_level = pcall(function()
+			return smart ~= nil and smart.position ~= nil and smart.id ~= nil and
+				type(board.smarts) == "table" and board.smarts[smart.id] ~= nil and
+				simulation_objects.is_on_the_same_level(smart, server_actor)
+		end)
+		if same_ok and same_level then
+			local distance_ok, distance = pcall(function()
+				return smart.position:distance_to_sqr(position)
+			end)
+			if distance_ok and tonumber(distance) ~= nil and distance < nearest_distance then
+				nearest, nearest_distance = smart, distance
+			end
+		end
+	end
+	return board, nearest
+end
+
+local function remove_created_squads(board, squads)
+	local complete = true
+	for index = #squads, 1, -1 do
+		local squad = squads[index]
+		local ok = board ~= nil and pcall(function() board:remove_squad(squad) end)
+		if not ok then
+			ok = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		end
+		if not ok then complete = false end
+	end
+	return complete
+end
+
+local function squad_member_ids(squad)
+	local ids, seen = {}, {}
+	local ok = pcall(function()
+		for member in squad:squad_members() do
+			local id = tonumber(member and (member.id or
+				(member.object and member.object.id)))
+			if id ~= nil and id > 0 and id <= MAX_OBJECT_ID and not seen[id] then
+				seen[id] = true
+				ids[#ids + 1] = id
+			end
+		end
+	end)
+	if not ok then return nil end
+	return ids
+end
+
+local function selected_squads_execute(context)
+	local squad_total = 0
+	for _, row in ipairs(context.options.rows) do
+		squad_total = squad_total + row.count
+		if squad_total > 200 then return "rejected", "spawn_group_bundle_too_large" end
+	end
+	local maximum = context.options.radius
+	local life = alife_object()
+	if life == nil then return "deferred", "alife_unavailable" end
+	local switch_ok, switch_distance = pcall(function() return life:switch_distance() end)
+	switch_distance = tonumber(switch_distance)
+	if switch_ok and switch_distance ~= nil and switch_distance > 0 then
+		local visible_maximum = math.floor(switch_distance - 5)
+		if visible_maximum < SQUAD_MINIMUM_RADIUS then
+			return "deferred", "alife_switch_distance_too_small"
+		end
+		maximum = math.min(maximum, visible_maximum)
+	end
+	local minimum = math.max(5, math.min(maximum - 1, math.floor(maximum * 0.6)))
+	local points, point_error = anomaly_donation_bridge_common.safe_points(
+		context.actor, squad_total, minimum, maximum, math.max(300, squad_total * 80))
+	if points == nil then return "deferred", point_error end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	local board, smart = nearest_same_level_smart(points[1].position)
+	if board == nil or smart == nil then return "deferred", "same_level_smart_unavailable" end
+	local created_squads, member_ids, point_index = {}, {}, 1
+	for _, row in ipairs(context.options.rows) do
+		if not anomaly_donation_bridge_catalog.is_available(
+			row.entry.section_id, context.options.kind) then
+			return "rejected", "catalog_selection_stale_or_quarantined"
+		end
+		if not anomaly_donation_bridge_catalog.is_spawn_safe(
+			row.entry.section_id, context.options.kind) then
+			return "rejected", "spawn_section_unsafe"
+		end
+		for _ = 1, row.count do
+			local created_ok, squad = pcall(function()
+				return board:create_squad(smart, row.entry.section_id)
+			end)
+			if not created_ok then
+				remove_created_squads(board, created_squads)
+				return "uncertain", "squad_creation_state_unknown"
+			end
+			if squad == nil then
+				local rolled_back = remove_created_squads(board, created_squads)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "squad_creation_not_confirmed" or
+					"squad_creation_state_unknown"
+			end
+			created_squads[#created_squads + 1] = squad
+			local detached = pcall(function()
+				board:assign_squad_to_smart(squad, nil)
+			end)
+			if not detached then
+				local rolled_back = remove_created_squads(board, created_squads)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "squad_detach_failed_rolled_back" or
+					"squad_detach_failed_state_unknown"
+			end
+			local moved = type(TeleportSquad) == "function" and pcall(TeleportSquad,
+				squad, points[point_index].position, points[point_index].vertex_id,
+				game_vertex_id)
+			if not moved then
+				local rolled_back = remove_created_squads(board, created_squads)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "squad_position_failed_rolled_back" or
+					"squad_position_failed_state_unknown"
+			end
+			pcall(function() squad:update() end)
+			local ids = squad_member_ids(squad)
+			if ids == nil or #ids == 0 then
+				local rolled_back = remove_created_squads(board, created_squads)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "squad_members_unconfirmed_rolled_back" or
+					"squad_members_unconfirmed_state_unknown"
+			end
+			for _, id in ipairs(ids) do member_ids[#member_ids + 1] = id end
+			point_index = point_index + 1
+		end
+	end
+	if context.options.force_hostile then
+		for _, id in ipairs(member_ids) do force_member_hostile(id, context.actor, life) end
+	end
+	remember_squad_visibility(member_ids, context.now, context.options.force_hostile)
+	return "executed", "spawned_selected_" .. context.options.kind .. "s_" ..
+		tostring(#created_squads) .. "_near_actor_" ..
+		tostring(math.floor(points[1].distance + 0.5)) .. "m_members_" ..
+		tostring(#member_ids) ..
+		(context.options.force_hostile and "_forced_hostile" or "_natural_hostility")
+end
+
+local function anomaly_point(actor, distance)
+	if distance == 0 then
+		local vertex = actor:level_vertex_id()
+		if not anomaly_donation_bridge_common.valid_vertex(vertex) then
+			return nil, "actor_vertex_invalid"
+		end
+		local position = actor:position()
+		return { vertex_id = vertex,
+			position = vector():set(position.x, position.y + 0.05, position.z), distance = 0 }
+	end
+	local minimum = math.max(1, distance - 5)
+	local maximum = math.min(100, math.max(minimum + 1, distance + 5))
+	local points, error_code = anomaly_donation_bridge_common.safe_points(
+		actor, 1, minimum, maximum, 240)
+	return points and points[1] or nil, error_code
+end
+
+local function active_anomaly_count()
+	local count = 0
+	for _ in pairs(state.anomalies) do count = count + 1 end
+	return count
+end
+
+local function script_namespace(name)
+	local ok, value = pcall(function() return _G[name] end)
+	return ok and type(value) == "table" and value or nil
+end
+
+local function anomaly_class(section)
+	if type(system_ini) ~= "function" then return nil end
+	local ok, ini = pcall(system_ini)
+	if not ok or ini == nil then return nil end
+	local class_name = anomaly_donation_bridge_common.ini_string(ini, section, "class")
+	return class_name and class_name:upper() or nil
+end
+
+local function anomaly_shape_adapter(section)
+	local toolkit = script_namespace("utils_stpk")
+	local class_name = anomaly_class(section)
+	if toolkit == nil or class_name == nil then return nil end
+	local getter_name = VISUAL_ANOMALY_CLASSES[class_name] and
+		"get_visual_zone_data" or "get_anom_zone_data"
+	local setter_name = VISUAL_ANOMALY_CLASSES[class_name] and
+		"set_visual_zone_data" or "set_anom_zone_data"
+	local getter, setter = toolkit[getter_name], toolkit[setter_name]
+	if type(getter) == "function" and type(setter) == "function" then
+		return { get = getter, set = setter, class_name = class_name }
+	end
+	-- Modified binaries sometimes retain only the stock debug-spawner wrapper.
+	-- It is safe here because the catalog admitted only known anomaly classes.
+	if type(toolkit.get_object_data) == "function" and
+		type(toolkit.set_object_data) == "function" then
+		return { get = toolkit.get_object_data, set = toolkit.set_object_data,
+			class_name = class_name }
+	end
+	return nil
+end
+
+local function initialize_anomaly_shape(object, adapter)
+	if adapter == nil or object == nil then return false end
+	local ok, initialized = pcall(function()
+		local data = adapter.get(object)
+		if type(data) ~= "table" then return false end
+		local offset = vector():set(0, 0, 0)
+		local center = vector():set(0, 0, 0)
+		-- This is the stock bind_anomaly_field dynamic-anomaly shape. A bare
+		-- alife_create entity has no active restrictor volume.
+		data.object_flags = 31
+		data.restrictor_type = 0
+		data.shapes = {
+			{ shtype = 0, offset = offset, center = center, radius = 3 }
+		}
+		adapter.set(data, object)
+		local verified = adapter.get(object)
+		local shape = type(verified) == "table" and type(verified.shapes) == "table" and
+			verified.shapes[1] or nil
+		return type(shape) == "table" and tonumber(shape.shtype) == 0 and
+			tonumber(shape.radius) ~= nil and tonumber(shape.radius) >= 2.9
+	end)
+	return ok and initialized == true
+end
+
+local function sorted_anomaly_ids()
+	local ids = {}
+	for id in pairs(state.anomalies) do ids[#ids + 1] = id end
+	table.sort(ids)
+	return ids
+end
+
+local function valid_coordinate(value)
+	return type(value) == "number" and value == value and math.abs(value) <= 1000000
+end
+
+local function encode_anomaly_records()
+	local encoded = {}
+	for _, id in ipairs(sorted_anomaly_ids()) do
+		local record = state.anomalies[id]
+		encoded[#encoded + 1] = string.format("%d|%s|%.3f|%.3f|%.3f",
+			id, record.section, record.x, record.y, record.z)
+	end
+	return table.concat(encoded, ";")
+end
+
+local function persist_anomaly_records()
+	if db == nil or db.actor == nil then
+		state.anomalies_persist_dirty = true
+		return false
+	end
+	local encoded = encode_anomaly_records()
+	local ok = false
+	if type(save_var) == "function" and type(load_var) == "function" then
+		ok = pcall(save_var, db.actor, ANOMALY_PSTOR_KEY, encoded)
+		if ok then
+			local read_ok, stored = pcall(load_var, db.actor, ANOMALY_PSTOR_KEY,
+				"__anomaly_donation_bridge_missing__")
+			ok = read_ok and stored == encoded
+		end
+	elseif xr_logic ~= nil and type(xr_logic.pstor_store) == "function" and
+		type(xr_logic.pstor_retrieve) == "function" then
+		-- Compatibility adapter for a third-party script pack which exposes the
+		-- older pstor helpers.  Vanilla 1.5.3 uses save_var/load_var above.
+		ok = pcall(xr_logic.pstor_store, db.actor, ANOMALY_PSTOR_KEY, encoded)
+	end
+	state.anomalies_persist_dirty = not ok
+	return ok
+end
+
+local function retrieve_anomaly_records()
+	if db == nil or db.actor == nil then return false, nil end
+	if type(load_var) == "function" then
+		local ok, encoded = pcall(load_var, db.actor, ANOMALY_PSTOR_KEY, "")
+		return ok, encoded
+	end
+	if xr_logic ~= nil and type(xr_logic.pstor_retrieve) == "function" then
+		local ok, encoded = pcall(xr_logic.pstor_retrieve, db.actor,
+			ANOMALY_PSTOR_KEY, "")
+		return ok, encoded
+	end
+	return false, nil
+end
+
+local function decode_anomaly_records(encoded)
+	local records, seen = {}, {}
+	if type(encoded) ~= "string" or #encoded > 4096 then return nil, false end
+	if encoded == "" then return records, true end
+	if encoded:sub(1, 1) == ";" or encoded:sub(-1) == ";" or
+		encoded:find(";;", 1, true) then return nil, false end
+	for row in encoded:gmatch("[^;]+") do
+		local fields = {}
+		for value in row:gmatch("[^|]+") do fields[#fields + 1] = value end
+		if #fields ~= 5 or #fields[1] > 10 or
+			not anomaly_donation_bridge_common.valid_section_id(fields[2]) then
+			return nil, false
+		end
+		local id = tonumber(fields[1])
+		local x, y, z = tonumber(fields[3]), tonumber(fields[4]), tonumber(fields[5])
+		if id == nil or id ~= math.floor(id) or id <= 0 or id > MAX_OBJECT_ID or
+			seen[id] or #records >= MAX_ACTIVE_ANOMALIES or not valid_coordinate(x) or
+			not valid_coordinate(y) or not valid_coordinate(z) then return nil, false end
+		seen[id] = true
+		records[#records + 1] = { id = id, section = fields[2], x = x, y = y, z = z,
+			expires_at = 0 }
+	end
+	return records, true
+end
+
+local function anomaly_matches(object, record)
+	if object == nil or type(record) ~= "table" then return false end
+	local section_ok, section = pcall(function() return object:section_name() end)
+	if not section_ok then return nil end
+	if section ~= record.section then return false end
+	local position_ok, x, y, z = pcall(function()
+		return object.position.x, object.position.y, object.position.z
+	end)
+	if not position_ok or not valid_coordinate(x) or not valid_coordinate(y) or
+		not valid_coordinate(z) then return nil end
+	local dx, dy, dz = x - record.x, y - record.y, z - record.z
+	return dx * dx + dy * dy + dz * dz <= 1
+end
+
+local function forget_anomaly(id, persist)
+	state.anomalies[id] = nil
+	if persist ~= false then persist_anomaly_records() end
+end
+
+local function forget_or_release_anomaly(id, record, persist)
+	local life = alife and alife() or nil
+	if life == nil then return false end
+	local ok, object = pcall(function() return life:object(id, true) end)
+	if not ok then return false end
+	local matches = anomaly_matches(object, record)
+	if matches == nil then return false end
+	if matches and not pcall(function() life:release(object, true) end) then return false end
+	forget_anomaly(id, persist)
+	return true
+end
+
+local function restore_and_cleanup_anomalies()
+	if state.anomalies_loaded then
+		if state.anomalies_persist_dirty then return persist_anomaly_records() end
+		return true
+	end
+	local now = time_global and time_global() or 0
+	if now < state.anomalies_restore_after then return false end
+	if db == nil or db.actor == nil or alife_object() == nil then
+		return false
+	end
+	local ok, encoded = retrieve_anomaly_records()
+	if not ok then return false end
+	local records, valid = decode_anomaly_records(encoded)
+	if not valid then return false end
+	state.anomalies = {}
+	for _, record in ipairs(records) do state.anomalies[record.id] = record end
+	state.anomalies_loaded = true
+	state.anomalies_persist_dirty = true
+	for _, id in ipairs(sorted_anomaly_ids()) do
+		forget_or_release_anomaly(id, state.anomalies[id], false)
+	end
+	return persist_anomaly_records()
+end
+
+local function spawn_anomaly_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		section_id = true, distance_meters = true, lifetime_seconds = true,
+		catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local requested_section = tostring(params.section_id or "")
+	local entry, catalog_error
+	if requested_section == RANDOM_ANOMALY_SECTION then
+		local revision_ok, revision_error =
+			anomaly_donation_bridge_catalog.validate_revision(params)
+		if not revision_ok then return false, "rejected", revision_error end
+		entry, catalog_error = anomaly_donation_bridge_catalog.random_available_anomaly()
+	else
+		entry, catalog_error = anomaly_donation_bridge_catalog.validate_section(
+			params, "section_id", "anomaly")
+	end
+	if entry == nil then return false, "rejected", catalog_error end
+	local distance, distance_error = anomaly_donation_bridge_common.parse_number(
+		params.distance_meters, 20, 0, 100, "anomaly_distance_invalid")
+	if distance == nil then return false, "rejected", distance_error end
+	local lifetime, lifetime_error = anomaly_donation_bridge_common.parse_integer(
+		params.lifetime_seconds, 60, 10, 300, "anomaly_lifetime_invalid")
+	if lifetime == nil then return false, "rejected", lifetime_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	local shape_adapter = anomaly_shape_adapter(entry.section_id)
+	if shape_adapter == nil then
+		return false, "rejected", "anomaly_shape_api_unsupported"
+	end
+	if not restore_and_cleanup_anomalies() then
+		return false, "deferred", "anomaly_tracking_unavailable"
+	end
+	if active_anomaly_count() >= MAX_ACTIVE_ANOMALIES then
+		return false, "rejected", "active_anomaly_limit_reached"
+	end
+	local point, point_error = anomaly_point(context.actor, distance)
+	if point == nil then return false, "deferred", point_error end
+	context.options = { section = entry.section_id, lifetime = lifetime, point = point,
+		shape_adapter = shape_adapter }
+	return true
+end
+
+local function spawn_anomaly_execute(context)
+	local object, create_error = create_server_object(context.options.section,
+		context.options.point.position, context.options.point.vertex_id,
+		context.actor:game_vertex_id(), "anomaly")
+	if create_error == "spawn_section_unsafe" then
+		return "rejected", "spawn_section_unsafe"
+	end
+	if create_error ~= nil then return "uncertain", "anomaly_spawn_state_unknown" end
+	if object == nil then return "rejected", "anomaly_spawn_failed" end
+	if not initialize_anomaly_shape(object, context.options.shape_adapter) then
+		local cleaned = anomaly_donation_bridge_common.rollback_server_objects({ object })
+		return cleaned and "rejected" or "uncertain",
+			cleaned and "anomaly_shape_failed_rolled_back" or
+			"anomaly_shape_failed_cleanup_failed"
+	end
+	local id_ok, id = pcall(function() return object.id end)
+	if not id_ok or type(id) ~= "number" or id ~= math.floor(id) or id <= 0 or
+		id > MAX_OBJECT_ID then
+		local cleaned = anomaly_donation_bridge_common.rollback_server_objects({ object })
+		return cleaned and "rejected" or "uncertain",
+			cleaned and "anomaly_id_invalid_rolled_back" or "anomaly_id_invalid_cleanup_failed"
+	end
+	local position_ok, x, y, z = pcall(function()
+		return object.position.x, object.position.y, object.position.z
+	end)
+	if not position_ok or not valid_coordinate(x) or not valid_coordinate(y) or
+		not valid_coordinate(z) then
+		local cleaned = anomaly_donation_bridge_common.rollback_server_objects({ object })
+		return cleaned and "rejected" or "uncertain",
+			cleaned and "anomaly_position_invalid_rolled_back" or
+			"anomaly_position_invalid_cleanup_failed"
+	end
+	state.anomalies[id] = {
+		expires_at = (context.now or time_global()) + context.options.lifetime * 1000,
+		section = context.options.section, x = x, y = y, z = z
+	}
+	if not persist_anomaly_records() then
+		local cleaned = forget_or_release_anomaly(id, state.anomalies[id], false)
+		state.anomalies_persist_dirty = true
+		persist_anomaly_records()
+		return cleaned and "rejected" or "uncertain",
+			cleaned and "anomaly_tracking_failed_rolled_back" or
+			"anomaly_tracking_and_cleanup_failed"
+	end
+	return "executed", "temporary_anomaly_" .. context.options.section .. "_" ..
+		tostring(context.options.lifetime) .. "s"
+end
+
+local function anomaly_update(now)
+	if not state.anomalies_loaded and not restore_and_cleanup_anomalies() then return end
+	if state.anomalies_persist_dirty then persist_anomaly_records() end
+	for _, id in ipairs(sorted_anomaly_ids()) do
+		local record = state.anomalies[id]
+		if now >= record.expires_at then
+			forget_or_release_anomaly(id, record)
+		else
+			local life = alife and alife() or nil
+			if life ~= nil then
+				local ok, object = pcall(function() return life:object(id, true) end)
+				if ok and object == nil then
+					forget_anomaly(id)
+				elseif ok and anomaly_matches(object, record) == false then
+					forget_anomaly(id)
+				end
+			end
+		end
+	end
+end
+
+local function anomaly_load()
+	state.anomalies = {}
+	state.anomalies_loaded = false
+	state.anomalies_persist_dirty = false
+	state.teleport_anchor = nil
+	state.anomalies_restore_after = (time_global and time_global() or 0) +
+		ANOMALY_LOAD_GRACE_MS
+end
+
+local function anomaly_level_changing()
+	-- Best effort while the old level's ALife objects are still addressable.  If
+	-- cleanup cannot complete, the identity records remain in pstor and the next
+	-- load pass retries without ever releasing an unrelated recycled object id.
+	if not state.anomalies_loaded then
+		state.anomalies_restore_after = 0
+		restore_and_cleanup_anomalies()
+	end
+	if state.anomalies_loaded then
+		for _, id in ipairs(sorted_anomaly_ids()) do
+			forget_or_release_anomaly(id, state.anomalies[id], false)
+		end
+		persist_anomaly_records()
+	end
+	state.anomalies = {}
+	state.anomalies_loaded = false
+	state.anomalies_persist_dirty = false
+	state.anomalies_restore_after = math.huge
+	state.teleport_anchor = nil
+end
+
+local function teleport_start_vertex(actor, level_name)
+	local position_ok, actor_position = pcall(function() return actor:position() end)
+	if not position_ok or actor_position == nil then return nil end
+	local function vertex_matches(vertex_id, expected_position)
+		if not anomaly_donation_bridge_common.valid_vertex(vertex_id) then return false end
+		local vertex_ok, vertex_position = pcall(level.vertex_position, vertex_id)
+		if not vertex_ok or vertex_position == nil then return false end
+		local dx, dz = vertex_position.x - expected_position.x,
+			vertex_position.z - expected_position.z
+		return dx * dx + dz * dz <= 16 and
+			math.abs(vertex_position.y - expected_position.y) <= 5
+	end
+
+	local current_ok, current_vertex = pcall(function()
+		return actor:level_vertex_id()
+	end)
+	if current_ok and vertex_matches(current_vertex, actor_position) then
+		return current_vertex
+	end
+	local anchor = state.teleport_anchor
+	if type(anchor) == "table" and anchor.level_name == level_name and
+		type(anchor.position) == "table" then
+		local dx, dz = actor_position.x - anchor.position.x,
+			actor_position.z - anchor.position.z
+		if dx * dx + dz * dz <= 16 and
+			math.abs(actor_position.y - anchor.position.y) <= 5 and
+			vertex_matches(anchor.vertex_id, actor_position) then
+			return anchor.vertex_id
+		end
+	end
+	return current_ok and anomaly_donation_bridge_common.valid_vertex(current_vertex) and
+		current_vertex or nil
+end
+
+local function teleport_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		minimum_meters = true, maximum_meters = true, minimum = true, maximum = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local minimum, minimum_error = anomaly_donation_bridge_common.parse_number(
+		params.minimum_meters or params.minimum, 25, 10, 2000, "teleport_distance_invalid")
+	if minimum == nil then return false, "rejected", minimum_error end
+	local maximum, maximum_error = anomaly_donation_bridge_common.parse_number(
+		params.maximum_meters or params.maximum, 100, 10, 2000, "teleport_distance_invalid")
+	if maximum == nil or minimum > maximum then
+		return false, "rejected", maximum_error or "teleport_distance_invalid"
+	end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local level_ok, level_name = pcall(function() return level.name() end)
+	if not level_ok or type(level_name) ~= "string" or level_name == "" then
+		return false, "deferred", "level_unavailable"
+	end
+	local start_vertex = teleport_start_vertex(context.actor, level_name)
+	if start_vertex == nil then return false, "rejected", "actor_vertex_invalid" end
+	local point, point_error = anomaly_donation_bridge_common.random_safe_point(
+		context.actor, minimum, maximum, 720, math.huge, start_vertex)
+	-- An impossible destination is terminal for this event.  It must never be
+	-- requeued indefinitely and block otherwise valid stream effects.
+	if point == nil then
+		return false, "rejected", point_error or "teleport_destination_unavailable"
+	end
+	context.options = { point = point, level_name = level_name }
+	return true
+end
+
+local function teleport_execute(context)
+	local point, destination = context.options.point, context.options.point.position
+	local level_ok, level_name = pcall(function() return level.name() end)
+	if not level_ok or level_name ~= context.options.level_name or
+		not anomaly_donation_bridge_common.valid_vertex(point.vertex_id) then
+		return "rejected", "teleport_destination_stale"
+	end
+	local target_ok, target_vertex_position = pcall(level.vertex_position, point.vertex_id)
+	if not target_ok or target_vertex_position == nil then
+		return "rejected", "teleport_destination_stale"
+	end
+	local tx, ty, tz = target_vertex_position.x - destination.x,
+		target_vertex_position.y - destination.y, target_vertex_position.z - destination.z
+	if tx * tx + tz * tz > 1 or math.abs(ty) > 1 then
+		return "rejected", "teleport_destination_stale"
+	end
+	local ok = pcall(function() context.actor:set_actor_position(destination) end)
+	if not ok then return "uncertain", "teleport_result_unknown" end
+	local read_ok, actual, final_level = pcall(function()
+		return context.actor:position(), level.name()
+	end)
+	if not read_ok or actual == nil or final_level ~= context.options.level_name then
+		return "uncertain", "teleport_confirmation_unavailable"
+	end
+	local dx, dy, dz = actual.x - destination.x, actual.y - destination.y, actual.z - destination.z
+	if dx * dx + dz * dz > 9 or math.abs(dy) > 3 then
+		return "uncertain", "teleport_confirmation_mismatch"
+	end
+	state.teleport_anchor = {
+		vertex_id = point.vertex_id,
+		level_name = context.options.level_name,
+		position = { x = actual.x, y = actual.y, z = actual.z }
+	}
+	return "executed", "teleported_randomly_" ..
+		tostring(math.floor(context.options.point.distance + 0.5)) .. "m"
+end
+
+local function navigation_supported()
+	return level ~= nil and type(level.vertex_in_direction) == "function" and
+		type(level.vertex_position) == "function" and vector ~= nil
+end
+
+local function direct_spawn_supported(context)
+	local life = alife_object()
+	local supported = catalog_api_supported() and navigation_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "level_vertex_id", "game_vertex_id", "position" }) and
+		object_has_methods(life, { "release" }) and type(alife_create) == "function"
+	return supported, supported and nil or "direct_spawn_api_unsupported"
+end
+
+local function squad_supported(context)
+	local supported = catalog_api_supported() and navigation_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "level_vertex_id", "game_vertex_id", "position", "id",
+				"character_community" }) and
+		object_has_methods(alife_object(), { "object", "release" }) and
+		type(alife_create) == "function" and
+		type(anomaly_donation_bridge_catalog.resolve_squad_members) == "function"
+	return supported, supported and nil or "dynamic_squad_api_unsupported"
+end
+
+local function selected_squad_supported(context)
+	local random_supported = squad_supported(context)
+	local supported = random_supported and sim_board ~= nil and
+		type(sim_board.get_sim_board) == "function" and simulation_objects ~= nil and
+		type(simulation_objects.is_on_the_same_level) == "function" and
+		type(TeleportSquad) == "function"
+	return supported, supported and nil or "selected_squad_api_unsupported"
+end
+
+local function hostile_squad_supported(context)
+	return squad_supported(context)
+end
+
+local function anomaly_supported(context)
+	local supported = catalog_api_supported() and navigation_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "level_vertex_id", "game_vertex_id", "position" }) and
+		object_has_methods(alife_object(), { "object", "release" }) and
+		type(alife_create) == "function" and
+		((type(save_var) == "function" and type(load_var) == "function") or
+			(xr_logic ~= nil and type(xr_logic.pstor_store) == "function" and
+				type(xr_logic.pstor_retrieve) == "function"))
+	return supported, supported and nil or "temporary_anomaly_api_unsupported"
+end
+
+local function teleport_supported(context)
+	local actor = context and context.actor or (db and db.actor or nil)
+	local supported = navigation_supported() and level ~= nil and
+		type(level.name) == "function" and object_has_methods(actor,
+			{ "set_actor_position", "position", "level_vertex_id" })
+	return supported, supported and nil or "teleport_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = register("teleport_random", teleport_can, teleport_execute, nil, nil, nil,
+		teleport_supported)
+	if not ok and type(printf) == "function" then
+		printf("[ADB] teleport_random registration failed: %s", tostring(reason))
+	end
+end

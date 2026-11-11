@@ -1,0 +1,570 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.wasd_warmup",
+  "displayName": "Сделать разминку WASD",
+  "description": "Блокирует действия движения и взаимодействия, пока игрок не повторит показанную последовательность своих назначенных клавиш. Ошибка возвращает прогресс в начало; после F9 незавершённая разминка запускается заново.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"press_count","displayName":"Количество нажатий","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"10"}
+  ],
+  "parameters": {
+    "press_count":"10"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.wasd_warmup"
+local STATE_KEY = "__anomaly_donation_bridge_wasd_warmup_v1"
+local SESSION_ENV = "ADB_WASD_WARMUP_SESSION_V2"
+local HUD_WIDTH = 1024
+local HUD_HEIGHT = 768
+local HUD_TOP_Y = 330
+local HUD_PROGRESS_Y = 362
+local HUD_RESTORE_DELAY_MS = 1500
+
+local ACTION_NAMES = {
+	"kFWD", "kBACK", "kL_STRAFE", "kR_STRAFE", "kUSE",
+	"kACCEL", "kCROUCH", "kJUMP", "kSPRINT_TOGGLE"
+}
+
+local KEY_NAMES = {
+	{ "DIK_A", "A" }, { "DIK_B", "B" }, { "DIK_C", "C" },
+	{ "DIK_D", "D" }, { "DIK_E", "E" }, { "DIK_F", "F" },
+	{ "DIK_G", "G" }, { "DIK_H", "H" }, { "DIK_I", "I" },
+	{ "DIK_J", "J" }, { "DIK_K", "K" }, { "DIK_L", "L" },
+	{ "DIK_M", "M" }, { "DIK_N", "N" }, { "DIK_O", "O" },
+	{ "DIK_P", "P" }, { "DIK_Q", "Q" }, { "DIK_R", "R" },
+	{ "DIK_S", "S" }, { "DIK_T", "T" }, { "DIK_U", "U" },
+	{ "DIK_V", "V" }, { "DIK_W", "W" }, { "DIK_X", "X" },
+	{ "DIK_Y", "Y" }, { "DIK_Z", "Z" },
+	{ "DIK_0", "0" }, { "DIK_1", "1" }, { "DIK_2", "2" },
+	{ "DIK_3", "3" }, { "DIK_4", "4" }, { "DIK_5", "5" },
+	{ "DIK_6", "6" }, { "DIK_7", "7" }, { "DIK_8", "8" },
+	{ "DIK_9", "9" },
+	{ "DIK_F1", "F1" }, { "DIK_F2", "F2" }, { "DIK_F3", "F3" },
+	{ "DIK_F4", "F4" }, { "DIK_F5", "F5" }, { "DIK_F6", "F6" },
+	{ "DIK_F7", "F7" }, { "DIK_F8", "F8" }, { "DIK_F9", "F9" },
+	{ "DIK_F10", "F10" }, { "DIK_F11", "F11" }, { "DIK_F12", "F12" },
+	{ "DIK_SPACE", "SPACE" }, { "DIK_LCONTROL", "LCTRL" },
+	{ "DIK_RCONTROL", "RCTRL" }, { "DIK_LSHIFT", "LSHIFT" },
+	{ "DIK_RSHIFT", "RSHIFT" }, { "DIK_LMENU", "LALT" },
+	{ "DIK_RMENU", "RALT" }, { "DIK_RETURN", "ENTER" },
+	{ "DIK_TAB", "TAB" }, { "DIK_BACK", "BACKSPACE" },
+	{ "DIK_CAPITAL", "CAPS LOCK" }, { "DIK_UP", "UP" },
+	{ "DIK_DOWN", "DOWN" }, { "DIK_LEFT", "LEFT" },
+	{ "DIK_RIGHT", "RIGHT" }, { "DIK_HOME", "HOME" },
+	{ "DIK_END", "END" }, { "DIK_PRIOR", "PAGE UP" },
+	{ "DIK_NEXT", "PAGE DOWN" }, { "DIK_INSERT", "INSERT" },
+	{ "DIK_DELETE", "DELETE" },
+	{ "DIK_NUMPAD0", "NUM 0" }, { "DIK_NUMPAD1", "NUM 1" },
+	{ "DIK_NUMPAD2", "NUM 2" }, { "DIK_NUMPAD3", "NUM 3" },
+	{ "DIK_NUMPAD4", "NUM 4" }, { "DIK_NUMPAD5", "NUM 5" },
+	{ "DIK_NUMPAD6", "NUM 6" }, { "DIK_NUMPAD7", "NUM 7" },
+	{ "DIK_NUMPAD8", "NUM 8" }, { "DIK_NUMPAD9", "NUM 9" },
+	{ "DIK_ADD", "NUM +" }, { "DIK_SUBTRACT", "NUM -" },
+	{ "DIK_MULTIPLY", "NUM *" }, { "DIK_DIVIDE", "NUM /" },
+	{ "DIK_DECIMAL", "NUM ." }, { "DIK_NUMPADENTER", "NUM ENTER" },
+	{ "DIK_COMMA", "," }, { "DIK_PERIOD", "." },
+	{ "DIK_MINUS", "-" }, { "DIK_EQUALS", "=" },
+	{ "DIK_SEMICOLON", ";" }, { "DIK_APOSTROPHE", "'" },
+	{ "DIK_SLASH", "/" }, { "DIK_BACKSLASH", "\\" },
+	{ "DIK_LBRACKET", "[" }, { "DIK_RBRACKET", "]" },
+	{ "DIK_GRAVE", "`" }, { "MOUSE_1", "MOUSE 1" },
+	{ "MOUSE_2", "MOUSE 2" }, { "MOUSE_3", "MOUSE 3" }
+}
+
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32 = nil
+if ffi_ok then
+	pcall(ffi.cdef, [[
+		unsigned long __stdcall GetEnvironmentVariableA(const char* name,
+			char* buffer, unsigned long size);
+		int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+	]])
+	local loaded, library = pcall(ffi.load, "kernel32")
+	if loaded then kernel32 = library end
+end
+
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false,
+		sequence = {},
+		index = 1,
+		press_count = 0,
+		blocked_actions = {},
+		blocked_diks = {},
+		callbacks_registered = false,
+		callback_functions = nil
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.sequence) ~= "table" then state.sequence = {} end
+if type(state.blocked_actions) ~= "table" then state.blocked_actions = {} end
+if type(state.blocked_diks) ~= "table" then state.blocked_diks = {} end
+if type(state.press_count) ~= "number" then state.press_count = 0 end
+-- Engine UI userdata must never survive F9 in the persistent state table.
+-- The HUD destroys its C++ windows during a load, leaving Lua userdata stale.
+state.hud_window = nil
+state.hud_controls = nil
+
+local hud_window = nil
+local hud_controls = nil
+local hud_step = nil
+local hud_restore_after_ms = 0
+
+local function action(name)
+	if key_bindings == nil then return nil end
+	local ok, value = pcall(function() return key_bindings[name] end)
+	if not ok or type(value) ~= "number" then return nil end
+	return value
+end
+
+local function bound_dik(action_id)
+	if type(action_id) ~= "number" or type(bind_to_dik) ~= "function" then return nil end
+	local ok, dik = pcall(bind_to_dik, action_id)
+	if not ok or type(dik) ~= "number" or dik <= 0 then return nil end
+	return dik
+end
+
+local function assigned_actions()
+	local result, actions, diks = {}, {}, {}
+	for _, name in ipairs(ACTION_NAMES) do
+		local action_id = action(name)
+		local dik = bound_dik(action_id)
+		if action_id ~= nil and dik ~= nil and not actions[action_id] and not diks[dik] then
+			result[#result + 1] = action_id
+			actions[action_id] = true
+			diks[dik] = true
+		end
+	end
+	return result, actions, diks
+end
+
+local function rebuild_blocked_actions()
+	local _, actions, diks = assigned_actions()
+	state.blocked_actions = actions
+	state.blocked_diks = diks
+end
+
+local function build_sequence(available, count)
+	local sequence, previous = {}, nil
+	for index = 1, count do
+		local selected = math.random(#available)
+		if #available > 1 and available[selected] == previous then
+			selected = selected % #available + 1
+		end
+		sequence[index] = available[selected]
+		previous = sequence[index]
+	end
+	return sequence
+end
+
+local function key_name(dik)
+	if DIK_keys ~= nil then
+		for _, entry in ipairs(KEY_NAMES) do
+			local ok, value = pcall(function() return DIK_keys[entry[1]] end)
+			if ok and value == dik then return entry[2] end
+		end
+	end
+	return "KEY " .. tostring(dik)
+end
+
+local function session_store_available()
+	if not ffi_ok or kernel32 == nil then return false end
+	local read_ok = pcall(function() return kernel32.GetEnvironmentVariableA end)
+	local write_ok = pcall(function() return kernel32.SetEnvironmentVariableA end)
+	return read_ok and write_ok
+end
+
+local function session_store_write(value)
+	if not session_store_available() then return false end
+	local ok, result = pcall(kernel32.SetEnvironmentVariableA, SESSION_ENV, value)
+	return ok and tonumber(result) ~= 0
+end
+
+local function session_store_read()
+	if not session_store_available() then return nil end
+	local ok, required = pcall(kernel32.GetEnvironmentVariableA,
+		SESSION_ENV, nil, 0)
+	required = ok and tonumber(required) or 0
+	if required <= 1 or required > 4096 then return nil end
+	local buffer = ffi.new("char[?]", required)
+	local read_ok, length = pcall(kernel32.GetEnvironmentVariableA,
+		SESSION_ENV, buffer, required)
+	length = read_ok and tonumber(length) or 0
+	if length <= 0 or length >= required then return nil end
+	return ffi.string(buffer, length)
+end
+
+local function session_store_clear()
+	if session_store_available() then
+		pcall(kernel32.SetEnvironmentVariableA, SESSION_ENV, nil)
+	end
+end
+
+local function restore_session_state()
+	local encoded = session_store_read()
+	if type(encoded) ~= "string" then return false end
+	local version, count_text = encoded:match("^(%d+)|(%d+)$")
+	local count = tonumber(count_text)
+	if version ~= "2" or count == nil or count < 1 or count > 100 or
+		count % 1 ~= 0 then
+		session_store_clear()
+		return false
+	end
+	local available = assigned_actions()
+	if #available < 1 then
+		session_store_clear()
+		return false
+	end
+	state.active = true
+	state.sequence = build_sequence(available, count)
+	state.index = 1
+	state.press_count = count
+	rebuild_blocked_actions()
+	return true
+end
+
+local function hud_text(value)
+	if anomaly_donation_bridge_common ~= nil and
+		type(anomaly_donation_bridge_common.game_text_cp1251) == "function" then
+		local ok, encoded = pcall(anomaly_donation_bridge_common.game_text_cp1251, value)
+		if ok and type(encoded) == "string" then return encoded end
+	end
+	return value
+end
+
+local function hide_prompt()
+	local window = hud_window
+	hud_window = nil
+	hud_controls = nil
+	hud_step = nil
+	if window == nil then return end
+	pcall(function()
+		local hud = type(get_hud) == "function" and get_hud() or nil
+		if hud ~= nil then hud:RemoveDialogToRender(window) end
+	end)
+end
+
+local function set_window_rect(control, x, y, width, height)
+	local position = vector2()
+	position:set(x, y)
+	control:SetWndPos(position)
+	local size = vector2()
+	size:set(width, height)
+	control:SetWndSize(size)
+end
+
+local function create_text_control(parent, font, value, color, x, y,
+	width, alignment)
+	local control = CUITextWnd()
+	control:SetAutoDelete(true)
+	control:SetFont(font)
+	control:SetTextComplexMode(false)
+	control:SetTextColor(color)
+	control:SetTextAlignment(alignment)
+	set_window_rect(control, x, y, width, 30)
+	control:SetText(hud_text(value))
+	parent:AttachChild(control)
+	return control
+end
+
+local function remove_render_window(window)
+	if window == nil or type(get_hud) ~= "function" then return end
+	pcall(function()
+		local hud = get_hud()
+		if hud ~= nil then hud:RemoveDialogToRender(window) end
+	end)
+end
+
+local function show_prompt()
+	if not state.active then hide_prompt() return false end
+	local action_id = state.sequence[state.index]
+	local dik = bound_dik(action_id)
+	if dik == nil or type(get_hud) ~= "function" then return false end
+	if hud_window ~= nil and hud_step == state.index then
+		return true
+	end
+	local previous = hud_window
+	hud_window = nil
+	hud_controls = nil
+	hud_step = nil
+	remove_render_window(previous)
+	local total = #state.sequence
+	local created_window = nil
+	local ok = pcall(function()
+		local hud = get_hud()
+		if hud == nil then return end
+		local wnd = CUIScriptWnd()
+		created_window = wnd
+		wnd:SetAutoDelete(false)
+		set_window_rect(wnd, 0, 0, HUD_WIDTH, HUD_HEIGHT)
+		local prompt_font = GetFontGraffiti22Russian()
+		local progress_font = GetFontGraffiti19Russian()
+		local white = GetARGB(255, 240, 240, 240)
+		local gold = GetARGB(255, 238, 153, 26)
+		local prefix = create_text_control(wnd, prompt_font, "Нажмите « ",
+			white, 0, HUD_TOP_Y, HUD_WIDTH, 2)
+		local key = create_text_control(wnd, prompt_font, key_name(dik),
+			gold, 0, HUD_TOP_Y, HUD_WIDTH, 2)
+		local suffix = create_text_control(wnd, prompt_font, " »",
+			white, 0, HUD_TOP_Y, HUD_WIDTH, 2)
+		prefix:AdjustWidthToText()
+		key:AdjustWidthToText()
+		suffix:AdjustWidthToText()
+		local prompt_width = prefix:GetWidth() + key:GetWidth() + suffix:GetWidth()
+		local prompt_x = math.max(0, (HUD_WIDTH - prompt_width) * 0.5)
+		set_window_rect(prefix, prompt_x, HUD_TOP_Y, prefix:GetWidth(), 30)
+		set_window_rect(key, prompt_x + prefix:GetWidth(), HUD_TOP_Y,
+			key:GetWidth(), 30)
+		set_window_rect(suffix,
+			prompt_x + prefix:GetWidth() + key:GetWidth(), HUD_TOP_Y,
+			suffix:GetWidth(), 30)
+		local progress = create_text_control(wnd, progress_font,
+			"Прогресс " .. tostring(state.index) .. "/" .. tostring(total),
+			white, 0, HUD_PROGRESS_Y, HUD_WIDTH, 2)
+		hud:AddDialogToRender(wnd)
+		wnd:Show(true)
+		hud_window = wnd
+		hud_controls = { prefix, key, suffix, progress }
+		hud_step = state.index
+	end)
+	if not ok or hud_window == nil then
+		remove_render_window(created_window)
+		hud_window = nil
+		hud_controls = nil
+		hud_step = nil
+	end
+	return ok and hud_window ~= nil
+end
+
+local function release_blocked_actions()
+	local released = {}
+	for action_id in pairs(state.blocked_actions) do
+		local dik = bound_dik(action_id)
+		if dik ~= nil and not released[dik] then
+			if level ~= nil and type(level.release_action) == "function" then
+				pcall(level.release_action, dik)
+			end
+			released[dik] = true
+		end
+	end
+end
+
+local function clear_state()
+	release_blocked_actions()
+	hide_prompt()
+	hud_restore_after_ms = 0
+	state.active = false
+	state.sequence = {}
+	state.index = 1
+	state.press_count = 0
+	state.blocked_actions = {}
+	state.blocked_diks = {}
+	session_store_clear()
+end
+
+local function quick_load_input(dik, bind)
+	local quick_load = action("kQUICK_LOAD")
+	return quick_load ~= nil and (bind == quick_load or dik == bound_dik(quick_load))
+end
+
+local function prepare_for_load()
+	if not state.active then return end
+	release_blocked_actions()
+	hide_prompt()
+	hud_restore_after_ms = 0
+end
+
+local function on_before_key_press(dik, bind, disabled, flags)
+	if not state.active or disabled == true or type(flags) ~= "table" then return end
+	if quick_load_input(dik, bind) then
+		-- Detach our native dialog while CUIGameCustom is still valid.  Waiting
+		-- until on_game_load is too late: F9 has already destroyed the old HUD.
+		prepare_for_load()
+		return
+	end
+	local expected_action = state.sequence[state.index]
+	local expected_dik = bound_dik(expected_action)
+	if expected_dik ~= nil and dik == expected_dik then
+		flags.ret_value = false
+		state.index = state.index + 1
+		if state.index > #state.sequence then
+			clear_state()
+			return
+		end
+		show_prompt()
+		return
+	end
+	state.index = 1
+	show_prompt()
+	if state.blocked_actions[bind] or state.blocked_diks[dik] then
+		flags.ret_value = false
+	end
+end
+
+local function on_before_key_hold(dik, bind, disabled, flags)
+	if not state.active or disabled == true or type(flags) ~= "table" then return end
+	if state.blocked_actions[bind] or state.blocked_diks[dik] then
+		flags.ret_value = false
+	end
+end
+
+local function on_before_key_release(dik, bind, disabled, flags)
+	if not state.active or type(flags) ~= "table" then return end
+	if state.blocked_actions[bind] or state.blocked_diks[dik] then
+		flags.ret_value = false
+	end
+end
+
+local function parse_count(params)
+	return anomaly_donation_bridge_common.parse_integer(
+		params.press_count, 10, 1, 100, "wasd_warmup_press_count_invalid")
+end
+
+local function warmup_can(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		press_count = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if not state.callbacks_registered then
+		return false, "rejected", "wasd_warmup_input_callbacks_unavailable"
+	end
+	local count, count_error = parse_count(params)
+	if count == nil then return false, "rejected", count_error end
+	local available = assigned_actions()
+	if #available < 1 then
+		return false, "rejected", "wasd_warmup_no_bound_actions"
+	end
+	context.options = { count = count, available = available }
+	return true
+end
+
+local function warmup_execute(context)
+	clear_state()
+	state.active = true
+	state.sequence = build_sequence(context.options.available, context.options.count)
+	state.index = 1
+	state.press_count = context.options.count
+	rebuild_blocked_actions()
+	release_blocked_actions()
+	if not session_store_write("2|" .. tostring(context.options.count)) then
+		clear_state()
+		return "rejected", "wasd_warmup_session_store_write_failed"
+	end
+	show_prompt()
+	return "executed", "wasd_warmup_presses_" .. tostring(#state.sequence) ..
+		"_actions_" .. tostring(#context.options.available)
+end
+
+local function warmup_update(now)
+	if not state.active then return end
+	if hud_restore_after_ms > 0 then
+		if type(now) ~= "number" or now < hud_restore_after_ms then return end
+		hud_restore_after_ms = 0
+	end
+	show_prompt()
+end
+
+local function warmup_level_changing()
+	prepare_for_load()
+end
+
+local function warmup_game_load()
+	-- Never dereference the old dialog here: the engine has already rebuilt HUD.
+	hud_window = nil
+	hud_controls = nil
+	hud_step = nil
+	state.active = false
+	state.sequence = {}
+	state.index = 1
+	state.press_count = 0
+	state.blocked_actions = {}
+	state.blocked_diks = {}
+	restore_session_state()
+	if not state.active then return end
+	rebuild_blocked_actions()
+	release_blocked_actions()
+	-- on_game_load runs while the engine is still rebuilding CUIGameCustom.
+	-- Creating a dialog there can leave a native dangling pointer and crash F9.
+	local now = type(time_global) == "function" and time_global() or 0
+	hud_restore_after_ms = now + HUD_RESTORE_DELAY_MS
+end
+
+local function warmup_actor_on_net_destroy()
+	prepare_for_load()
+end
+
+local function warmup_supported(context)
+	local actor = context and context.actor or (db and db.actor or nil)
+	if actor == nil then return false, "actor_unavailable" end
+	if not state.callbacks_registered then
+		return false, "wasd_warmup_input_callbacks_unavailable"
+	end
+	if type(bind_to_dik) ~= "function" or action("kFWD") == nil then
+		return false, "wasd_warmup_key_binding_api_unavailable"
+	end
+	if level == nil or type(level.release_action) ~= "function" then
+		return false, "wasd_warmup_action_api_unavailable"
+	end
+	if not session_store_available() then
+		return false, "wasd_warmup_session_store_unavailable"
+	end
+	return true
+end
+
+function on_game_start()
+	if type(state.callback_functions) == "table" and
+		type(UnregisterScriptCallback) == "function" then
+		pcall(UnregisterScriptCallback, "on_before_key_press",
+			state.callback_functions.press)
+		pcall(UnregisterScriptCallback, "on_before_key_hold",
+			state.callback_functions.hold)
+		pcall(UnregisterScriptCallback, "on_before_key_release",
+			state.callback_functions.release)
+		if state.callback_functions.actor_destroy ~= nil then
+			pcall(UnregisterScriptCallback, "actor_on_net_destroy",
+				state.callback_functions.actor_destroy)
+		end
+	end
+	state.callbacks_registered = false
+	state.callback_functions = nil
+	if type(RegisterScriptCallback) == "function" then
+		local press_ok = pcall(RegisterScriptCallback,
+			"on_before_key_press", on_before_key_press)
+		local hold_ok = pcall(RegisterScriptCallback,
+			"on_before_key_hold", on_before_key_hold)
+		local release_ok = pcall(RegisterScriptCallback,
+			"on_before_key_release", on_before_key_release)
+		local destroy_ok = pcall(RegisterScriptCallback,
+			"actor_on_net_destroy", warmup_actor_on_net_destroy)
+		state.callbacks_registered = press_ok and hold_ok and release_ok and destroy_ok
+		if state.callbacks_registered then
+			state.callback_functions = {
+				press = on_before_key_press,
+				hold = on_before_key_hold,
+				release = on_before_key_release,
+				actor_destroy = warmup_actor_on_net_destroy
+			}
+		end
+	end
+	restore_session_state()
+	local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+		can_execute = warmup_can,
+		execute = warmup_execute,
+		update = warmup_update,
+		on_game_load = warmup_game_load,
+		on_level_changing = warmup_level_changing,
+		is_supported = warmup_supported,
+		support_probe_is_hint = true
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] WASD warmup registration failed: %s", tostring(reason))
+	end
+end

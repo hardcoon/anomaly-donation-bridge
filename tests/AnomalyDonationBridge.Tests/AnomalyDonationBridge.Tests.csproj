@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.Core\AnomalyDonationBridge.Core.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.Persistence\AnomalyDonationBridge.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.DonationAlerts\AnomalyDonationBridge.DonationAlerts.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.DonateX\AnomalyDonationBridge.DonateX.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.GameIpc\AnomalyDonationBridge.GameIpc.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\fixtures\catalog-*.json">
+      <Link>fixtures\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

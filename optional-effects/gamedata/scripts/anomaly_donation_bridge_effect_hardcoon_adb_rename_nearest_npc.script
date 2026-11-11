@@ -1,0 +1,317 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.rename_nearest_npc",
+  "displayName": "Переименовать ближайшего важного NPC",
+  "description": "Переименовывает ближайшего живого важного NPC на текущей локации в ник донатера и сообщает об этом в КПК. Учитывает NPC в офлайне; если важных NPC нет, выбирает ближайшего обычного NPC. Напарники всегда пропускаются. Имя сохраняется штатно вместе с NPC.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [],
+  "parameters": {},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.rename_nearest_npc"
+local MAX_OBJECT_ID = 65534
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function object_id(object)
+	if object == nil then return nil end
+	local property_ok, value = pcall(function() return object.id end)
+	if property_ok and type(value) == "number" then return value end
+	if property_ok and type(value) == "function" then
+		local method_ok, method_value = pcall(function() return object:id() end)
+		if method_ok and type(method_value) == "number" then return method_value end
+	end
+	return nil
+end
+
+local function finite(value)
+	return type(value) == "number" and value == value and
+		value > -10000000 and value < 10000000
+end
+
+local function coordinates(position)
+	if position == nil then return nil end
+	local ok, x, y, z = pcall(function()
+		return position.x, position.y, position.z
+	end)
+	if not ok or not finite(x) or not finite(y) or not finite(z) then return nil end
+	return x, y, z
+end
+
+local function distance_sqr(first, second)
+	local ax, ay, az = coordinates(first)
+	local bx, by, bz = coordinates(second)
+	if ax == nil or bx == nil then return nil end
+	local dx, dy, dz = ax - bx, ay - by, az - bz
+	return dx * dx + dy * dy + dz * dz
+end
+
+local function graph_level_id(graph, object)
+	if graph == nil or object == nil then return nil end
+	local ok, level_id = pcall(function()
+		return graph:vertex(object.m_game_vertex_id):level_id()
+	end)
+	return ok and type(level_id) == "number" and level_id or nil
+end
+
+local function is_companion(object, id)
+	if axr_companions == nil then return false end
+	if type(axr_companions.non_task_companions) == "table" and
+		axr_companions.non_task_companions[id] ~= nil then return true end
+	if type(axr_companions.companion_squads) ~= "table" then return false end
+	local group_ok, group_id = pcall(function() return object.group_id end)
+	if group_ok and type(group_id) == "number" and group_id ~= 65535 and
+		axr_companions.companion_squads[group_id] ~= nil then return true end
+	if type(get_object_squad) ~= "function" then return false end
+	local squad_ok, squad = pcall(get_object_squad, object)
+	if not squad_ok or squad == nil then return false end
+	local squad_id = object_id(squad)
+	return squad_id ~= nil and axr_companions.companion_squads[squad_id] ~= nil
+end
+
+local function is_living_stalker(object, actor_id)
+	local id = object_id(object)
+	if id == nil or id == actor_id or type(IsStalker) ~= "function" then return false end
+	if is_companion(object, id) then return false end
+	local kind_ok, is_stalker = pcall(IsStalker, object)
+	if not kind_ok or is_stalker ~= true then return false end
+	local alive_ok, alive = pcall(function() return object:alive() end)
+	if not alive_ok or alive ~= true then return false end
+	local method_ok, method = pcall(function() return object.set_character_name end)
+	return method_ok and type(method) == "function"
+end
+
+local function story_from_spawn_ini(object)
+	local ini_ok, spawn_ini = pcall(function() return object:spawn_ini() end)
+	if not ini_ok or spawn_ini == nil then return nil end
+	local section_ok, exists = pcall(function()
+		return spawn_ini:section_exist("story_object")
+	end)
+	if not section_ok or exists ~= true then return nil end
+	local line_ok, _, key, value = pcall(function()
+		return spawn_ini:r_line("story_object", 0, "", "")
+	end)
+	if not line_ok then return nil end
+	if key == "story_id" then return value end
+	return key
+end
+
+local function server_section(object)
+	local ok, section = pcall(function() return object:section_name() end)
+	return ok and type(section) == "string" and section ~= "" and section or nil
+end
+
+local function is_important(object, id)
+	if type(get_object_story_id) == "function" then
+		local ok, story_id = pcall(get_object_story_id, id)
+		if ok and anomaly_donation_bridge_common.meaningful_story_id(story_id) then
+			return true
+		end
+	end
+	if anomaly_donation_bridge_common.meaningful_story_id(
+		story_from_spawn_ini(object)) then return true end
+	local section = server_section(object)
+	if section == nil or type(system_ini) ~= "function" then return false end
+	local ini_ok, ini = pcall(system_ini)
+	if not ini_ok or ini == nil then return false end
+	return anomaly_donation_bridge_common.meaningful_story_id(
+		anomaly_donation_bridge_common.ini_string(ini, section, "story_id"))
+end
+
+local function visit_server_objects(life, visitor)
+	local table_ok, objects = pcall(function() return life:objects() end)
+	if table_ok and type(objects) == "table" then
+		local iterate_ok = pcall(function()
+			for _, object in pairs(objects) do visitor(object) end
+		end)
+		if iterate_ok then return true end
+	end
+
+	local max_ok, maximum = pcall(function() return life:max_id() end)
+	if not max_ok or type(maximum) ~= "number" then return false end
+	maximum = math.max(0, math.min(MAX_OBJECT_ID, math.floor(maximum)))
+	for id = 0, maximum do
+		local object_ok, object = pcall(function() return life:object(id) end)
+		if object_ok and object ~= nil then visitor(object) end
+	end
+	return true
+end
+
+local function candidate_is_better(candidate, current)
+	if current == nil then return true end
+	if candidate.distance ~= current.distance then
+		return candidate.distance < current.distance
+	end
+	return candidate.id < current.id
+end
+
+local function choose_target(life, server_actor, graph)
+	local actor_id = object_id(server_actor)
+	local actor_level = graph_level_id(graph, server_actor)
+	local actor_position = server_actor and server_actor.position or nil
+	if actor_id == nil or actor_level == nil or coordinates(actor_position) == nil then
+		return nil, "actor_server_state_invalid"
+	end
+
+	local nearest_important, nearest_any = nil, nil
+	local iterated = visit_server_objects(life, function(object)
+		if is_living_stalker(object, actor_id) and
+			graph_level_id(graph, object) == actor_level then
+			local distance = distance_sqr(actor_position, object.position)
+			local id = object_id(object)
+			if distance ~= nil and id ~= nil then
+				local candidate = {
+					object = object,
+					id = id,
+					distance = distance,
+					important = is_important(object, id)
+				}
+				if candidate_is_better(candidate, nearest_any) then
+					nearest_any = candidate
+				end
+				if candidate.important and candidate_is_better(candidate, nearest_important) then
+					nearest_important = candidate
+				end
+			end
+		end
+	end)
+	if not iterated then return nil, "alife_object_enumeration_unavailable" end
+	return nearest_important or nearest_any,
+		(nearest_important ~= nil and "important" or "ordinary")
+end
+
+local function parse_donor_name(params)
+	local donor_name = tostring(params.donor_name or "")
+	donor_name = donor_name:match("^%s*(.-)%s*$") or ""
+	donor_name = anomaly_donation_bridge_common.truncate_utf8(donor_name, 128)
+	if donor_name == "" or donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return nil, "rename_npc_donor_name_invalid"
+	end
+	local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(donor_name)
+	if encoded_name == nil or encoded_name == "" then
+		return nil, "rename_npc_donor_name_encoding_invalid"
+	end
+	return encoded_name
+end
+
+local function send_rename_tip(actor, previous_name, new_name)
+	local manager = rawget(_G, "news_manager")
+	if actor == nil or type(manager) ~= "table" or
+		type(manager.send_tip) ~= "function" then return false end
+	local phrase = anomaly_donation_bridge_common.game_text_cp1251(
+		" стал известен как: ")
+	if phrase == nil then return false end
+	local text = "%c[255,100,255,100]" .. tostring(previous_name or "NPC") ..
+		"%c[default]" .. phrase .. "%c[255,238,153,26]" .. new_name ..
+		"%c[default]"
+	local ok, sent = pcall(manager.send_tip, actor, text, nil, nil, 8000)
+	return ok and sent ~= false
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		donor_name = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context == nil or context.actor == nil then
+		return false, "deferred", "actor_unavailable"
+	end
+	local encoded_name, name_error = parse_donor_name(params)
+	if encoded_name == nil then return false, "rejected", name_error end
+	local life = life_object()
+	if life == nil then return false, "deferred", "alife_unavailable" end
+	local actor_ok, server_actor = pcall(function() return life:actor() end)
+	if not actor_ok or server_actor == nil then
+		return false, "deferred", "actor_server_object_unavailable"
+	end
+	if type(game_graph) ~= "function" then
+		return false, "deferred", "game_graph_unavailable"
+	end
+	local graph_ok, graph = pcall(game_graph)
+	if not graph_ok or graph == nil then
+		return false, "deferred", "game_graph_unavailable"
+	end
+	local target, target_kind = choose_target(life, server_actor, graph)
+	if target == nil then
+		local status = target_kind == "actor_server_state_invalid" and "deferred" or "rejected"
+		return false, status, target_kind == "ordinary" and
+			"no_living_npc_on_current_level" or target_kind
+	end
+	context.options = {
+		target = target.object,
+		target_id = target.id,
+		important = target.important,
+		name = encoded_name
+	}
+	return true
+end
+
+local function execute(context)
+	local options = context and context.options or nil
+	local target = options and options.target or nil
+	local new_name = options and options.name or nil
+	if target == nil or new_name == nil or type(options.target_id) ~= "number" then
+		return "rejected", "rename_npc_context_invalid"
+	end
+	local alive_ok, alive = pcall(function() return target:alive() end)
+	if not alive_ok or alive ~= true then return "rejected", "rename_npc_target_no_longer_alive" end
+	local read_ok, previous_name = pcall(function() return target:character_name() end)
+	if not read_ok then return "deferred", "rename_npc_name_read_failed" end
+	local target_kind = options.important and "important" or "ordinary"
+	if previous_name == new_name then
+		local notified = send_rename_tip(context.actor, previous_name, new_name)
+		return "executed", "npc_name_unchanged_" .. options.target_id .. "_" ..
+			target_kind .. (notified and "_pda" or "_pda_unavailable")
+	end
+	local write_ok = pcall(function() target:set_character_name(new_name) end)
+	if not write_ok then return "uncertain", "rename_npc_write_failed" end
+	local confirm_ok, actual_name = pcall(function() return target:character_name() end)
+	if not confirm_ok or actual_name ~= new_name then
+		return "uncertain", "rename_npc_change_not_confirmed"
+	end
+	local online = db ~= nil and type(db.storage) == "table" and
+		type(db.storage[options.target_id]) == "table" and
+		db.storage[options.target_id].object ~= nil
+	local notified = send_rename_tip(context.actor, previous_name, new_name)
+	return "executed", "npc_renamed_" .. options.target_id .. "_" .. target_kind ..
+		(online and "_online" or "_offline") ..
+		(notified and "_pda" or "_pda_unavailable")
+end
+
+local function supported(context)
+	if context ~= nil and context.actor == nil then return false, "actor_unavailable" end
+	local life = life_object()
+	if life == nil then return false, "alife_unavailable" end
+	if type(game_graph) ~= "function" or type(IsStalker) ~= "function" then
+		return false, "rename_npc_api_unavailable"
+	end
+	local objects_ok, objects_method = pcall(function() return life.objects end)
+	local max_ok, max_method = pcall(function() return life.max_id end)
+	local object_ok, object_method = pcall(function() return life.object end)
+	if not ((objects_ok and type(objects_method) == "function") or
+		(max_ok and type(max_method) == "function" and
+			object_ok and type(object_method) == "function")) then
+		return false, "alife_object_enumeration_unavailable"
+	end
+	return true
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+		can_execute = can_execute,
+		execute = execute,
+		is_supported = supported
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] %s registration failed: %s", ACTION_ID, tostring(reason))
+	end
+end

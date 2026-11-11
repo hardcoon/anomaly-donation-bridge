@@ -1,0 +1,833 @@
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function parse_checkbox(value, key, default_value)
+	local text = tostring(value == nil and (default_value and "true" or "false") or value):lower()
+	if text == "true" then return true end
+	if text == "false" then return false end
+	return nil, key .. "_invalid"
+end
+
+local COMMUNITY_SAVE_KEY = "adb_companion_community_v1"
+local NICK_SAVE_KEY = "adb_companion_3d_nick_v1"
+local DAMAGE_SAVE_KEY = "adb_companion_damage_percent_v1"
+local STATE_KEY = "__anomaly_donation_bridge_named_companion_v1"
+local companion_state = rawget(_G, STATE_KEY)
+if type(companion_state) ~= "table" then
+	companion_state = { managed = {}, reload_pending = false, last_sync = 0 }
+	rawset(_G, STATE_KEY, companion_state)
+end
+companion_state.nicknames=companion_state.nicknames or {}
+companion_state.damage=companion_state.damage or {}
+local update_nicknames,hide_nicknames,load_nicknames
+
+local function damage_profile(id,name)
+    local cached=companion_state.damage[id]
+    if cached and cached.name==name then return cached.percent end
+    -- The per-object save marker identifies only NPCs created by this template.
+    -- Read lazily too: a hit can arrive before the first post-load actor update.
+    if type(se_load_var)~="function" then return nil end
+    local ok,percent=pcall(se_load_var,id,name,DAMAGE_SAVE_KEY)
+    percent=ok and tonumber(percent) or nil
+    if not percent or percent<1 or percent>100 or percent~=math.floor(percent) then return nil end
+    companion_state.damage[id]={name=name,percent=percent}
+    return percent
+end
+local function companion_before_hit(object,hit,bone,flags)
+    if object==nil or hit==nil or type(flags)=="table" and flags.ret_value==false then return end
+    local ok,id,name=pcall(function() return object:id(),object:name() end)
+    if not ok or not axr_companions or not axr_companions.non_task_companions or
+        axr_companions.non_task_companions[id]~=true then return end
+    local percent=damage_profile(id,name)
+    local power=tonumber(hit.power)
+    if percent and percent<100 and power and power>0 and power<math.huge then
+        hit.power=power*percent/100
+    end
+end
+
+local function member_name(member)
+	if member == nil then return nil end
+	local ok, name = pcall(function() return member:name() end)
+	return ok and type(name) == "string" and name ~= "" and name or nil
+end
+
+local function save_member_community(member, community)
+	local name = member_name(member)
+	if name == nil or type(se_save_var) ~= "function" then return false end
+	local ok = pcall(se_save_var, member.id, name, COMMUNITY_SAVE_KEY, community)
+	if ok and type(community) == "string" and community ~= "" then
+		companion_state.managed[member.id] = community
+	elseif ok then
+		companion_state.managed[member.id] = nil
+	end
+	return ok
+end
+
+local function load_member_community(member)
+	local name = member_name(member)
+	if name == nil or type(se_load_var) ~= "function" then return nil end
+	local ok, community = pcall(se_load_var, member.id, name, COMMUNITY_SAVE_KEY)
+	return ok and type(community) == "string" and community ~= "" and community or nil
+end
+
+local function repair_legacy_community_override(member)
+	if member == nil then return false end
+	local ok, current = pcall(function() return member.community end)
+	if not ok or type(current) ~= "string" then return true end
+	return pcall(function() member.community = nil end)
+end
+
+local function apply_online_community(member_id, community)
+	if level == nil then return false end
+	local object_ok, object = pcall(level.object_by_id, member_id)
+	if not object_ok or object == nil then return false end
+	local set_ok = pcall(function()
+		object:set_character_community(community, 0, 0)
+	end)
+	if not set_ok then return false end
+	local read_ok, current = pcall(function() return object:character_community() end)
+	return read_ok and current == community
+end
+
+local function discover_saved_communities()
+	if axr_companions == nil or type(axr_companions.companion_squads) ~= "table" then
+		return
+	end
+	for _, squad in pairs(axr_companions.companion_squads) do
+		pcall(function()
+			for member in squad:squad_members() do
+				repair_legacy_community_override(member)
+				local community = load_member_community(member)
+				if community ~= nil then
+					companion_state.managed[member.id] = community
+					squad.player_id = community
+				end
+			end
+		end)
+	end
+	local life = life_object()
+	if life ~= nil and type(axr_companions.non_task_companions) == "table" then
+		for member_id in pairs(axr_companions.non_task_companions) do
+			local ok, member = pcall(function() return life:object(member_id, true) end)
+			if ok and member ~= nil then
+                repair_legacy_community_override(member)
+                local name=member_name(member)
+                local read_ok,value=pcall(se_load_var,member_id,name,NICK_SAVE_KEY)
+                if read_ok and type(value)=="string" and value~="" and name then
+                    local _,initial=pcall(se_load_var,member_id,name,NICK_SAVE_KEY.."_default")
+                    local _,key=pcall(se_load_var,member_id,name,NICK_SAVE_KEY.."_key")
+                    companion_state.nicknames[tonumber(member_id)]={name=name,donor_name=value,show_3d_nick=initial~=false,nickname_key=type(key)=="string" and key or "PRIOR"}
+                end
+            end
+		end
+	end
+end
+
+local pending_visuals={}
+local visual_storage_hook=false
+local function visual_key(value)
+    return tostring(value or ""):lower():gsub("/","\\"):gsub("%.ogf$","")
+end
+local function master_rank()
+    local ini=type(system_ini)=="function" and system_ini() or ini_sys
+    if not ini or not ini:line_exist("game_relations","rating") then return nil end
+    local values={}
+    for value in ini:r_string("game_relations","rating"):gmatch("[^,]+") do
+        values[#values+1]=value:match("^%s*(.-)%s*$")
+    end
+    for i=1,#values,2 do
+        if values[i]=="master" then
+            local lower=i==1 and -1 or tonumber(values[i-1])
+            local upper=i==#values and 2147483647 or tonumber(values[i+1])
+            if lower and upper and lower==math.floor(lower) and upper>lower+1 and lower>=-1 and lower<2147483646 then
+                return lower+1
+            end
+        end
+    end
+end
+local function install_visual_storage_hook()
+    if visual_storage_hook then return true end
+    if not alife_storage_manager or type(alife_storage_manager.get_se_obj_state)~="function" then return false end
+    local original=alife_storage_manager.get_se_obj_state
+    alife_storage_manager.get_se_obj_state=function(se_obj,...)
+        local data=original(se_obj,...)
+        -- Migrate our local.1 saves before xr_motivator reads m_data.visual.
+        -- Its native setter runs inside net_spawn and can trigger a BusyHands
+        -- emergency save while the NPC's network deque is still empty.
+        if data and se_obj and data.name==se_obj:name() and type(data.adb_special_companion_visual)=="string" and
+            data.visual and visual_key(data.visual)==visual_key(data.adb_special_companion_visual) then data.visual=nil end
+        return data
+    end
+    visual_storage_hook=true
+    return true
+end
+local function update_special_visuals(now)
+    now=tonumber(now) or (type(time_global)=="function" and time_global() or 0)
+    for id,row in pairs(pending_visuals) do
+        if now>=row.after then
+            pending_visuals[id]=nil -- one attempt per online object, never a retry loop
+            local npc=level and level.object_by_id(id)
+            -- game_object userdata has no __eq in LuaBind, and repeated
+            -- lookups can return different wrappers. Compare stable values.
+            if npc and npc:id()==id and npc:name()==row.name then
+                local ok,err=pcall(function()
+                    local life=life_object()
+                    local server=life and life:object(id,true)
+                    local data=server and alife_storage_manager.get_se_obj_state(server)
+                    if not data or data.name~=row.name or visual_key(data.adb_special_companion_visual)~=visual_key(row.visual) then return end
+                    local section=type(npc.section)=="function" and npc:section() or data.adb_special_companion_section
+                    local prepared,reason=anomaly_donation_bridge_npc_visuals.prepare_visual(row.visual,section)
+                    assert(prepared,reason or "special_companion_visual_unsafe")
+                    -- An unsafe saved appearance is never passed to the engine.
+                    row.visual=prepared
+                    data.adb_special_companion_visual=prepared:gsub("%.ogf$","")
+                    -- Same post-spawn operation as wandering_trader.bind_npc.
+                    -- Never invoke this from the binder's net_spawn callback.
+                    if visual_key(npc:get_visual_name())~=visual_key(row.visual) then
+                        npc:set_visual_name(row.visual,false)
+                    end
+                    assert(visual_key(npc:get_visual_name())==visual_key(row.visual),"special_companion_visual_not_applied")
+                    local rank=data.adb_special_companion_rank or master_rank()
+                    if rank then
+                        server:set_rank(rank);npc:set_character_rank(rank)
+                        data.adb_special_companion_rank=rank
+                    end
+                    if not data.adb_special_companion_icon and anomaly_donation_bridge_npc_visuals and
+                        type(anomaly_donation_bridge_npc_visuals.resolve_visual_icon)=="function" then
+                        if type(anomaly_donation_bridge_catalog.ensure)=="function" then anomaly_donation_bridge_catalog.ensure() end
+                        local icon=anomaly_donation_bridge_npc_visuals.resolve_visual_icon(row.visual)
+                        if icon then data.icon_name=icon;data.adb_special_companion_icon=icon end
+                    end
+                    if data.adb_special_companion_icon then npc:set_character_icon(data.adb_special_companion_icon) end
+                end)
+                if not ok and type(printf)=="function" then
+                    printf("[ADB] special companion visual failed for "..row.name..": "..tostring(err))
+                end
+            end
+        end
+    end
+end
+local function companion_update(now)
+    -- Both installed templates share one companion runtime and HUD.
+    if now~=nil and companion_state.last_update==now then return end
+    companion_state.last_update=now
+    update_special_visuals(now)
+    if update_nicknames then update_nicknames() end
+	if companion_state.reload_pending then
+		companion_state.reload_pending = false
+		discover_saved_communities()
+	end
+	now = tonumber(now) or (type(time_global) == "function" and time_global() or 0)
+	if now > 0 and companion_state.last_sync > 0 and
+		now - companion_state.last_sync < 1000 then return end
+	companion_state.last_sync = now
+	for member_id, community in pairs(companion_state.managed) do
+		apply_online_community(member_id, community)
+	end
+end
+
+local function companion_load()
+    companion_state.last_update=nil
+    if load_nicknames then load_nicknames() end
+	companion_state.nicknames={}
+	companion_state.damage={}
+	companion_state.reload_pending = true
+	companion_state.last_sync = 0
+end
+
+local function player_faction(actor)
+	local ok, community = pcall(function() return actor:character_community() end)
+	if not ok or type(community) ~= "string" or community == "" then return nil end
+	return (community:gsub("^actor_", ""))
+end
+
+-- Only speech is muted. Weapon, movement and inventory sounds belong to other
+-- engine objects. Replacing native speech collections once at net_spawn also
+-- survives the AI resetting its sound mask when it enters combat.
+local silent_prefix="characters_voice\\adb_special_companion_silent\\"
+local muted_clients={}
+local speech_hooks_installed=false
+local function special_muted(npc)
+    return npc and muted_clients[npc:id()]==npc:name()
+end
+local function silent_on_net_spawn(npc,se_obj)
+    if not npc or not se_obj or not alife_storage_manager then return end
+    local data=alife_storage_manager.get_se_obj_state(se_obj)
+    if not data or data.name~=npc:name() or not data.adb_special_companion_visual then return end
+    if special_muted(npc) then return end
+    pending_visuals[npc:id()]={name=npc:name(),visual=data.adb_special_companion_visual,
+        after=(type(time_global)=="function" and time_global() or 0)+100}
+    if not object_has_methods(npc,{"sound_prefix","set_sound_mask","add_sound","remove_sound"}) then
+        if type(printf)=="function" then printf("[ADB] special_companion_silence_api_unavailable") end
+        return
+    end
+    npc:sound_prefix(silent_prefix)
+    npc:set_sound_mask(-1) -- stop any speech queued during the native spawn
+    -- Native speech occupies [0,sound_script). Some engines omit an entry or
+    -- export the wrong enum for enemy_killed_or_wounded. Ensure the collection
+    -- exists before remove_sound, which otherwise asserts in C++.
+    for id=0,stalker_ids.sound_script-1 do
+        npc:add_sound("unused",1,snd_type.talk,0,0,id,"bip01_head")
+        npc:remove_sound(id)
+        npc:add_sound("unused",1,snd_type.talk,0,0,id,"bip01_head")
+    end
+    npc:set_sound_mask(0)
+    muted_clients[npc:id()]=npc:name()
+end
+local function install_speech_hooks()
+    if speech_hooks_installed then return true end
+    if not stalker_ids or type(stalker_ids.sound_script)~="number" or stalker_ids.sound_script<1 or stalker_ids.sound_script>128 or
+        not snd_type or not snd_type.talk or
+        not sound_theme or not sound_theme.npc_sound or type(sound_theme.npc_sound.play)~="function" or
+        not xr_sound or type(xr_sound.play_sound)~="function" or type(RegisterScriptCallback)~="function" then return false end
+    local play=sound_theme.npc_sound.play
+    sound_theme.npc_sound.play=function(self,npc_id,...)
+        local npc=level and level.object_by_id(npc_id)
+        if special_muted(npc) then return false end
+        return play(self,npc_id,...)
+    end
+    local legacy_play=xr_sound.play_sound
+    xr_sound.play_sound=function(npc,...)
+        if special_muted(npc) then return end
+        return legacy_play(npc,...)
+    end
+    RegisterScriptCallback("npc_on_net_spawn",silent_on_net_spawn)
+    RegisterScriptCallback("npc_on_net_destroy",function(npc)
+        if special_muted(npc) then muted_clients[npc:id()]=nil end
+        local pending=npc and pending_visuals[npc:id()]
+        if pending and pending.name==npc:name() then pending_visuals[npc:id()]=nil end
+    end)
+    speech_hooks_installed=true
+    return true
+end
+local function companion_supported(context, special)
+	if special and (not alife_storage_manager or type(alife_storage_manager.get_se_obj_state)~="function" or
+        not anomaly_donation_bridge_npc_visuals or not install_visual_storage_hook()) then
+		return false,"special_companion_visual_api_unavailable"
+    end
+    if special and (type(anomaly_donation_bridge_npc_visuals.prepare_visual)~="function" or
+        type(anomaly_donation_bridge_npc_visuals.spawn_section)~="function") then
+        return false,"special_companion_visual_safety_api_unavailable"
+    end
+	local life = life_object()
+	local actor = actor_for_probe(context)
+    if special and not object_has_methods(actor,{"get_visual_name","set_visual_name","set_character_rank","set_character_icon"}) then
+        return false,"special_companion_visual_api_unavailable"
+    end
+    if special and (not stalker_ids or type(stalker_ids.sound_script)~="number" or
+        stalker_ids.sound_script<1 or stalker_ids.sound_script>128 or not snd_type or not snd_type.talk or
+        not object_has_methods(actor,{"sound_prefix","set_sound_mask","add_sound","remove_sound"}) or
+        not install_speech_hooks()) then return false,"special_companion_silence_api_unavailable" end
+	local supported = anomaly_donation_bridge_catalog ~= nil and
+		type(anomaly_donation_bridge_catalog.capable) == "function" and
+		anomaly_donation_bridge_catalog.capable() == true and
+		object_has_methods(actor, { "id", "level_vertex_id", "game_vertex_id", "position",
+			"character_community" }) and
+		object_has_methods(life, { "actor", "create", "object", "release" }) and
+		axr_companions ~= nil and type(axr_companions.companion_squads) == "table" and
+		type(axr_companions.non_task_companions) == "table" and
+		SIMBOARD ~= nil and type(SIMBOARD.assign_squad_to_smart) == "function" and
+		type(SIMBOARD.setup_squad_and_group) == "function" and
+		type(se_save_var) == "function" and type(se_load_var) == "function"
+	return supported, supported and nil or "companion_api_unsupported"
+end
+
+local function companion_can(context, params, special)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		section_id = true, catalog_revision = true, radius_meters = true,
+		donor_name = true, random_npc = true, use_player_faction = true,show_3d_nick=true,nickname_visibility=true,nickname_key=true,
+        incoming_damage_percent=true
+	})
+	if not valid then return false, "rejected", error_code end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, 25, 10, 100, "companion_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+    local damage,damage_error=anomaly_donation_bridge_common.parse_integer(
+        params.incoming_damage_percent,100,1,100,"companion_damage_percent_invalid")
+    if not damage then return false,"rejected",damage_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local random_npc, random_error = parse_checkbox(params.random_npc, "companion_random_npc", false)
+	if random_npc == nil then return false, "rejected", random_error end
+	local use_player_faction, faction_error = parse_checkbox(
+		params.use_player_faction, "companion_player_faction", true)
+	if use_player_faction == nil then return false, "rejected", faction_error end
+    local show_3d_nick,label_error=parse_checkbox(params.show_3d_nick,"companion_show_3d_nick",false)
+    if show_3d_nick==nil then return false,"rejected",label_error end
+    if params.nickname_visibility~=nil then
+        if params.nickname_visibility~="show" and params.nickname_visibility~="hide" then return false,"rejected","companion_nickname_visibility_invalid" end
+        show_3d_nick=params.nickname_visibility=="show"
+    end
+    local nickname_key=tostring(params.nickname_key or "PRIOR"):upper()
+    if not DIK_keys or type(DIK_keys["DIK_"..nickname_key])~="number" or nickname_key=="ESCAPE" or
+        nickname_key=="F5" or nickname_key=="F9" or nickname_key:find("CONTROL") or nickname_key:find("SHIFT") or nickname_key:find("MENU") then
+        return false,"rejected","companion_nickname_key_invalid"
+    end
+    if type(bind_to_dik)=="function" and key_bindings then
+        for _,name in ipairs({"kQUICK_SAVE","kQUICK_LOAD"}) do
+            if key_bindings[name] and bind_to_dik(key_bindings[name])==DIK_keys["DIK_"..nickname_key] then return false,"rejected","companion_nickname_key_reserved_for_save" end
+        end
+    end
+	local kind = special and "npc_visual" or "npc"
+	local entry, catalog_error
+	if random_npc then
+		local revision_ok, revision_error = anomaly_donation_bridge_catalog.validate_revision(params)
+		if not revision_ok then return false, "rejected", revision_error end
+		entry, catalog_error = anomaly_donation_bridge_catalog.random_available(kind)
+	else
+		entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+			catalog_revision = params.catalog_revision,
+			section_id = params.section_id
+		}, "section_id", kind)
+	end
+	if entry == nil then return false, "rejected", catalog_error end
+	local donor_name = tostring(params.donor_name or "")
+	donor_name = donor_name:match("^%s*(.-)%s*$") or ""
+	if donor_name == "" or #donor_name > 256 or
+		donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return false, "rejected", "companion_donor_name_invalid"
+	end
+	local supported, reason = companion_supported(context, special)
+	if not supported then return false, "rejected", reason end
+	local community = nil
+	if use_player_faction then
+		community = player_faction(context.actor)
+		if community == nil then
+			return false, "deferred", "companion_player_faction_unavailable"
+		end
+	end
+    local visual,icon,rank
+    if special then
+        visual = anomaly_donation_bridge_npc_visuals.resolve(entry.section_id)
+        if not visual then return false,"rejected","special_companion_visual_unavailable" end
+        icon=anomaly_donation_bridge_npc_visuals.resolve_icon(entry.section_id)
+        rank=master_rank()
+        if not rank then return false,"rejected","special_companion_master_rank_unavailable" end
+        -- Spawn a normal simulation NPC. Never instantiate the story section,
+        -- character profile, inventory, quests or binder that supplied a model.
+        local base=anomaly_donation_bridge_npc_visuals.spawn_section()
+        if not base or not anomaly_donation_bridge_catalog.is_available(base,"npc") then
+            return false,"rejected","special_companion_safe_spawn_base_missing"
+        end
+        entry={section_id=base}
+        local prepared,reason=anomaly_donation_bridge_npc_visuals.prepare_visual(visual,base)
+        if not prepared then return false,"rejected",reason end
+        visual=prepared
+    end
+	context.options = {
+		section = entry.section_id, radius = radius, donor_name = donor_name, visual = visual,icon=icon,rank=rank,
+		community = community, random_npc = random_npc,show_3d_nick=show_3d_nick,nickname_key=nickname_key,
+        incoming_damage_percent=damage
+	}
+	return true
+end
+
+local function clear_registration(squad, member)
+	if member ~= nil then
+		local name_ok, object_name = pcall(function() return member:name() end)
+        if name_ok and alife_storage_manager and type(alife_storage_manager.get_se_obj_state)=="function" then
+            pcall(function()
+                local data=alife_storage_manager.get_se_obj_state(member)
+                if data and data.name==object_name and data.adb_special_companion_visual then
+                    if data.visual and visual_key(data.visual)==visual_key(data.adb_special_companion_visual) then data.visual=nil end
+                    data.adb_special_companion_visual=nil
+                    data.adb_special_companion_section=nil
+                    if data.icon_name==data.adb_special_companion_icon then data.icon_name=nil end
+                    data.adb_special_companion_icon=nil;data.adb_special_companion_rank=nil
+                    pending_visuals[member.id]=nil
+                end
+            end)
+        end
+		pcall(function()
+			if name_ok then se_save_var(member.id, object_name, "companion", nil) end
+		end)
+		pcall(function()
+			if name_ok then se_save_var(member.id, object_name, COMMUNITY_SAVE_KEY, nil) end
+		end)
+        pcall(function() if name_ok then se_save_var(member.id,object_name,NICK_SAVE_KEY,nil) end end)
+        pcall(function() if name_ok then se_save_var(member.id,object_name,NICK_SAVE_KEY.."_default",nil);se_save_var(member.id,object_name,NICK_SAVE_KEY.."_key",nil) end end)
+        companion_state.nicknames[member.id]=nil
+        pcall(function() if name_ok then se_save_var(member.id,object_name,DAMAGE_SAVE_KEY,nil) end end)
+        companion_state.damage[member.id]=nil
+		companion_state.managed[member.id] = nil
+		if axr_companions and axr_companions.non_task_companions then
+			axr_companions.non_task_companions[member.id] = nil
+		end
+	end
+	if squad ~= nil and axr_companions and axr_companions.companion_squads then
+		axr_companions.companion_squads[squad.id] = nil
+	end
+end
+
+-- A former companion keeps its model/name, but no longer receives our
+-- companion-only faction maintenance. A consumed Azazel target also releases
+-- its appearance override before the old-body visual is applied.
+function release_following(member, consumed)
+    if consumed then clear_registration(nil,member);return end
+    companion_state.managed[member.id]=nil
+    companion_state.nicknames[member.id]=nil
+    se_save_var(member.id,member:name(),COMMUNITY_SAVE_KEY,nil)
+end
+
+-- The identity exchange journals these small scalar overrides BEFORE removing
+-- them. In particular a net_spawn appearance callback must not repaint the
+-- former body with the consumed companion's model. Rollback restores them.
+local relife_vars={COMMUNITY_SAVE_KEY,NICK_SAVE_KEY,NICK_SAVE_KEY.."_default",NICK_SAVE_KEY.."_key",DAMAGE_SAVE_KEY}
+local relife_fields={"visual","icon_name","adb_special_companion_visual","adb_special_companion_section",
+    "adb_special_companion_icon","adb_special_companion_rank"}
+function snapshot_registration(member)
+    local result={vars={},fields={}}
+    for _,key in ipairs(relife_vars) do result.vars[key]=se_load_var(member.id,member:name(),key) end
+    local data=alife_storage_manager.get_se_obj_state(member)
+    if data and data.name==member:name() then
+        for _,key in ipairs(relife_fields) do result.fields[key]=data[key] end
+    end
+    return result
+end
+function restore_registration(member,snapshot)
+    for _,key in ipairs(relife_vars) do se_save_var(member.id,member:name(),key,snapshot.vars[key]) end
+    local data=alife_storage_manager.get_se_obj_state(member,true)
+    for _,key in ipairs(relife_fields) do data[key]=snapshot.fields[key] end
+    companion_state.managed[member.id]=snapshot.vars[COMMUNITY_SAVE_KEY]
+    companion_state.reload_pending=true
+    companion_state.damage[member.id]=nil
+    local n=level.object_by_id(member.id)
+    if n then silent_on_net_spawn(n,member) end
+end
+
+local function companion_execute(context)
+	local section = context.options.section
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(section, "npc") then
+		return "rejected", "spawn_section_unsafe"
+	end
+    if context.options.visual then
+        local visual,reason=anomaly_donation_bridge_npc_visuals.prepare_visual(context.options.visual,section)
+        if not visual then return "rejected",reason end
+        context.options.visual=visual
+    end
+	local life = life_object()
+	if life == nil then return "deferred", "alife_unavailable" end
+	local points, placement = anomaly_donation_bridge_common.spawn_points(
+		context.actor, 1, math.max(1, context.options.radius - 5),
+		context.options.radius, 720)
+	if points == nil then return "deferred", placement end
+	local point = points[1]
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+
+	local create_ok, squad = pcall(function()
+		return life:create("online_offline_group", point.position,
+			point.vertex_id, game_vertex_id)
+	end)
+	if not create_ok or squad == nil then return "rejected", "companion_squad_create_failed" end
+
+	local add_ok, member_id = pcall(function()
+		return squad:add_squad_member(section, point.position,
+			point.vertex_id, game_vertex_id)
+	end)
+	member_id = tonumber(member_id)
+	if not add_ok or member_id == nil or member_id <= 0 then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "companion_member_create_failed_rolled_back" or
+			"companion_member_create_failed_state_unknown"
+	end
+
+	local member_ok, member = pcall(function() return life:object(member_id, true) end)
+	if not member_ok or member == nil then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "companion_member_unavailable_rolled_back" or
+			"companion_member_unavailable_state_unknown"
+	end
+
+	local setup_ok, setup_error = pcall(function()
+        if context.options.visual then
+            -- Store only our own marker. The stock m_data.visual path calls a
+            -- native setter inside net_spawn and crashes on this Modded Exes.
+            -- Apply once after spawn, exactly as the wandering trader does.
+            if member.online==true then error("special_companion_spawn_already_online") end
+            local data=alife_storage_manager.get_se_obj_state(member,true)
+            if type(data)~="table" or data.name~=member:name() then error("special_companion_storage_identity_mismatch") end
+            data.adb_special_companion_visual=context.options.visual:gsub("%.ogf$","")
+            data.adb_special_companion_section=section
+            if type(member.set_rank)~="function" then error("special_companion_rank_api_unavailable") end
+            member:set_rank(context.options.rank)
+            data.adb_special_companion_rank=context.options.rank
+            if context.options.icon then
+                data.icon_name=context.options.icon
+                data.adb_special_companion_icon=context.options.icon
+            end
+        end
+		repair_legacy_community_override(member)
+		if type(member.set_character_name) ~= "function" then
+			error("companion_name_api_unavailable")
+		end
+		local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(
+			context.options.donor_name)
+		if encoded_name == nil or encoded_name == "" then
+			error("companion_name_encoding_invalid")
+		end
+		member:set_character_name(encoded_name)
+		if context.options.community ~= nil then
+			local squad_faction_ok = pcall(function()
+				squad.player_id = context.options.community
+			end)
+			if not squad_faction_ok or not save_member_community(
+				member, context.options.community) then
+				error("companion_player_faction_apply_failed")
+			end
+		end
+		if type(member.force_set_goodwill) == "function" then
+			member:force_set_goodwill(5000, 0)
+		end
+		local object_name = member:name()
+		-- Mark the server object before refresh can switch it online. The stock
+		-- xr_motivator then sees the companion flag during net_spawn and installs
+		-- companion logic immediately instead of ordinary smart-terrain logic.
+		se_save_var(member.id, object_name, "companion", true)
+        se_save_var(member.id,object_name,NICK_SAVE_KEY,context.options.donor_name)
+        se_save_var(member.id,object_name,NICK_SAVE_KEY.."_default",context.options.show_3d_nick)
+        se_save_var(member.id,object_name,NICK_SAVE_KEY.."_key",context.options.nickname_key)
+        se_save_var(member.id,object_name,DAMAGE_SAVE_KEY,context.options.incoming_damage_percent)
+        companion_state.damage[member.id]={name=object_name,percent=context.options.incoming_damage_percent}
+        companion_state.nicknames[member.id]={name=object_name,donor_name=context.options.donor_name,
+            show_3d_nick=context.options.show_3d_nick,nickname_key=context.options.nickname_key}
+		axr_companions.non_task_companions[member.id] = true
+		axr_companions.companion_squads[squad.id] = squad
+		squad.scripted_target = "actor"
+		squad:set_squad_relation("friend")
+		SIMBOARD:assign_squad_to_smart(squad, nil)
+		SIMBOARD:setup_squad_and_group(member)
+		squad:refresh()
+		if context.options.community ~= nil then
+			apply_online_community(member.id, context.options.community)
+		end
+	end)
+	if not setup_ok then
+		clear_registration(squad, member)
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ squad })
+		return rolled_back and "rejected" or "uncertain",
+			(rolled_back and "companion_setup_failed_rolled_back_" or
+			"companion_setup_failed_state_unknown_") .. tostring(setup_error)
+	end
+
+	return "executed", "spawned_named_companion_" .. tostring(member_id) ..
+		(placement ~= "requested_ring" and "_" .. placement or "")
+end
+
+-- NCF-003: default PageUp nickname toggle; explicit saved/rebound keys remain unchanged.
+local nick_ui={labels={}}
+local nick_retired={}
+local function call(object,method,...)
+    if not object then return end
+    local args={...};local ok,value=pcall(function() return object[method](object,unpack(args)) end)
+    if ok then return value end
+end
+local function encoded(text) return anomaly_donation_bridge_common.game_text_cp1251_lossy(tostring(text or "")) or "?" end
+local NICK_GROUP="human"
+local function nickname_preferences(create)
+    local data=alife_storage_manager and type(alife_storage_manager.get_state)=="function" and alife_storage_manager.get_state()
+    if type(data)~="table" then return end
+    local name="adb_companion_nickname_hud_v1"
+    if type(data[name])~="table" then if not create then return end;data[name]={} end
+    local all=data[name]
+    if type(all[NICK_GROUP])~="table" then if not create then return end;all[NICK_GROUP]={} end
+    return all[NICK_GROUP]
+end
+local function nickname_visible(default,key)
+    local prefs=nickname_preferences(false);local value=prefs and prefs[key or "PRIOR"]
+    if type(value)=="boolean" then return value end
+    return default~=false
+end
+local function nickname_toggle(key,current,flags)
+    local prefs=nickname_preferences(true);if not prefs then return false end
+    local d=type(device)=="function" and device();local frame=d and d.frame or (type(time_global)=="function" and time_global() or 0)
+    if type(flags.adb_nickname_toggle)~="table" or flags.adb_nickname_toggle.frame~=frame then flags.adb_nickname_toggle={frame=frame} end
+    local token=NICK_GROUP..":"..key
+    if flags.adb_nickname_toggle[token] then return true end
+    prefs[key]=not current
+    flags.adb_nickname_toggle[token]=true;flags.ret_value=false
+    return true
+end
+local function nickname_owns_input(flags)
+    local d=type(device)=="function" and device();local frame=d and d.frame or (type(time_global)=="function" and time_global() or 0)
+    return type(flags.adb_nickname_toggle)=="table" and flags.adb_nickname_toggle.frame==frame
+end
+local function color(r,g,b) return 4278190080+r*65536+g*256+b end
+local COLORS={green=color(150,196,148)}
+local function nick_frame()
+    local d=type(device)=="function" and device()
+    return d and d.frame or (type(time_global)=="function" and time_global() or 0)
+end
+hide_nicknames=function(loading)
+    if loading then nick_ui.loading=true end
+    local window=nick_ui.window
+    nick_ui.window,nick_ui.labels=nil,{}
+    if not window then return end
+    nick_retired[#nick_retired+1]={window=window,frame=nick_frame()+4}
+    pcall(function() window:Show(false);window:Enable(false) end)
+    pcall(function() local hud=get_hud();if hud then hud:RemoveDialogToRender(window) end end)
+end
+load_nicknames=function()
+    hide_nicknames()
+    nick_ui.loading=false;nick_ui.resume_frame=nick_frame()+2
+end
+local function finite(v) return type(v)=="number" and v==v and math.abs(v)<math.huge end
+local function point_valid(p) return p and finite(p.x) and finite(p.y) and finite(p.z) end
+local function nickname_head(object)
+    local p=call(object,"position")
+    if not point_valid(p) then return end
+    local box=call(object,"bounding_box",false)
+    local center=call(object,"center",false)
+    local x,z=p.x,p.z
+    if point_valid(center) then x,z=center.x,center.z end
+    -- BoundingBox is model-local. No guessed head bone (and no missing-bone
+    -- warnings) for different monster skeletons or modded visuals.
+    if box and box.max and finite(box.max.y) and box.max.y>0 then
+        return {x=x,y=p.y+box.max.y+0.2,z=z}
+    elseif point_valid(center) then
+        return {x=x,y=center.y+math.max(0.4,center.y-p.y)+0.2,z=z}
+    end
+end
+local function nickname_project(head,d)
+    local p,dir,right,up=d.cam_pos,d.cam_dir,d.cam_right,d.cam_top
+    if not point_valid(p) or not point_valid(dir) or not point_valid(right) or not point_valid(up) then return end
+    local dx,dy,dz=head.x-p.x,head.y-p.y,head.z-p.z
+    local depth=dx*dir.x+dy*dir.y+dz*dir.z
+    if depth<=0.1 then return end
+    local fov=tonumber(d.fov)
+    if not finite(fov) or fov<=5 or fov>=180 then return end
+    local aspect=d.width>0 and d.height>0 and (d.height/d.width)/(768/1024) or 1
+    local focal=384/math.tan(fov*math.pi/360)
+    local x=512+(dx*right.x+dy*right.y+dz*right.z)/depth*focal*aspect
+    local y=384-(dx*up.x+dy*up.y+dz*up.z)/depth*focal
+    if finite(x) and finite(y) and x>=0 and x<=1024 and y>=24 and y<=768 then return x,y,aspect end
+end
+local function nickname_label(window)
+    local label={controls={}}
+    for _,offset in ipairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1},{0,0}}) do
+        local c=CUITextWnd();c:SetAutoDelete(true)
+        c:SetFont(GetFontLetterica16Russian());c:SetTextAlignment(2);c:SetTextComplexMode(false)
+        c:SetTextColor(#label.controls==8 and COLORS.green or color(0,0,0))
+        window:AttachChild(c);label.controls[#label.controls+1]={control=c,dx=offset[1],dy=offset[2]}
+    end
+    function label:Show(shown) for _,item in ipairs(self.controls) do item.control:Show(shown) end end
+    function label:Place(text,x,y,aspect)
+        if text~=self.text then
+            for _,item in ipairs(self.controls) do item.control:SetText(text) end
+            self.text=text
+        end
+        for _,item in ipairs(self.controls) do
+            item.control:SetWndSize(vector2():set(320*aspect,24))
+            item.control:SetWndPos(vector2():set(x-160*aspect+item.dx*aspect,y-24+item.dy))
+        end
+        self:Show(true)
+    end
+    return label
+end
+
+local function ensure_nick_class()
+    if adb_named_companion_nicknames then return end
+    class "adb_named_companion_nicknames" (CUIScriptWnd)
+    function adb_named_companion_nicknames:__init()
+        super();self:SetAutoDelete(false);self:SetWndRect(Frect():set(0,0,1024,768))
+    end
+    function adb_named_companion_nicknames:Update()
+        if nick_ui.window~=self then return end
+        CUIScriptWnd.Update(self);update_nicknames()
+    end
+end
+update_nicknames=function()
+    local frame=nick_frame()
+    for i=#nick_retired,1,-1 do if frame>=nick_retired[i].frame then table.remove(nick_retired,i) end end
+    if nick_ui.loading or frame<(nick_ui.resume_frame or 0) or not next(companion_state.nicknames) then hide_nicknames();return end
+    if CUITextWnd==nil or CUIScriptWnd==nil or type(device)~="function" or type(get_hud)~="function" then return end
+    local d=device()
+    if d:is_paused() or not db or not db.actor or call(db.actor,"alive")==false then hide_nicknames();return end
+    local used=0
+    for id,row in pairs(companion_state.nicknames) do
+        local object=level and type(level.object_by_id)=="function" and level.object_by_id(id)
+        if nickname_visible(row.show_3d_nick,row.nickname_key) and object and call(object,"name")==row.name and call(object,"alive")==true then
+            local head=nickname_head(object)
+            local x,y,aspect
+            if head then x,y,aspect=nickname_project(head,d) end
+            if x then
+                if not nick_ui.window then
+                    local hud=get_hud();if not hud then return end
+                    ensure_nick_class();nick_ui.window=adb_named_companion_nicknames()
+                    hud:AddDialogToRender(nick_ui.window);nick_ui.window:Show(true)
+                end
+                used=used+1
+                local label=nick_ui.labels[used]
+                if not label then label=nickname_label(nick_ui.window);nick_ui.labels[used]=label end
+                label:Place(encoded(row.donor_name),x,y,aspect)
+            end
+        end
+    end
+    for i=used+1,#nick_ui.labels do nick_ui.labels[i]:Show(false) end
+end
+local function register_nick_callbacks()
+    if companion_state.nick_callbacks or type(RegisterScriptCallback)~="function" then return end
+    companion_state.nick_callbacks=true
+    RegisterScriptCallback("on_before_load_input",function() hide_nicknames(true) end)
+    local function before_save() nick_ui.resume_frame=nick_frame()+2;hide_nicknames() end
+    RegisterScriptCallback("on_before_save_input",before_save)
+    RegisterScriptCallback("save_state",before_save)
+    RegisterScriptCallback("main_menu_on_quit",function() hide_nicknames(true) end)
+    RegisterScriptCallback("on_before_key_press",function(dik,bind,disabled,flags)
+        local keys,bindings=DIK_keys or {},key_bindings or {}
+        if keys.DIK_F9~=nil and dik==keys.DIK_F9 or bindings.kQUICK_LOAD~=nil and bind==bindings.kQUICK_LOAD then hide_nicknames(true)
+        elseif keys.DIK_F5~=nil and dik==keys.DIK_F5 or bindings.kQUICK_SAVE~=nil and bind==bindings.kQUICK_SAVE then before_save()
+        else
+            if disabled or type(flags)~="table" or flags.ret_value==false and not nickname_owns_input(flags) or nick_ui.loading then return end
+            if type(device)=="function" and device():is_paused() then return end
+            if type(Check_UI)=="function" and Check_UI() or actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return end
+            local selected,current
+            for _,row in pairs(companion_state.nicknames) do
+                local key=row.nickname_key or "PRIOR"
+                if keys["DIK_"..key]==dik then selected=key;current=current or nickname_visible(row.show_3d_nick,key) end
+            end
+            if selected then nickname_toggle(selected,not not current,flags) end
+        end
+    end)
+end
+
+function register(handler_id, special)
+    register_nick_callbacks()
+    if special then install_visual_storage_hook();install_speech_hooks() end
+    if not companion_state.damage_callback and type(RegisterScriptCallback)=="function" then
+        companion_state.damage_callback=true
+        RegisterScriptCallback("npc_on_before_hit",companion_before_hit)
+    end
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		handler_id, {
+			can_execute = function(context,params) return companion_can(context,params,special) end,
+			execute = companion_execute,
+			update = companion_update,
+			on_game_load = companion_load,
+            on_level_changing=function() if hide_nicknames then hide_nicknames(true) end end,
+			is_supported = function(context) return companion_supported(context,special) end,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] %s registration failed: %s", tostring(handler_id), tostring(reason))
+	end
+end

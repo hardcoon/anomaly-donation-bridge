@@ -1,0 +1,49 @@
+-- Same stock notification element and bottom-centre position as god mode.
+-- Parent owns the native window. Never keep a pointer across HUD destruction.
+local hud,resume_frame,last_error
+function hide()
+    local old=hud;hud=nil
+    if old then pcall(function() old.parent:DetachChild(old.window) end) end
+end
+function loaded()
+    local ok,parent=pcall(function() return get_hud():GetWindow() end)
+    if hud and ok and rawequal(hud.parent,parent) then hide() else hud=nil end
+    resume_frame=(tonumber(device().frame) or 0)+8
+end
+local function visible(value)
+    if hud and hud.visible~=value then
+        hud.window:Show(value);hud.window:Enable(false);hud.visible=value
+    end
+end
+function update(left,transitioning)
+    if not left or left<=0 then hide();return end
+    if type(get_hud)~="function" or CScriptXmlInit==nil or vector2==nil then return end
+    local ok,why=pcall(function()
+        local dev=device()
+        if transitioning or not db or not db.actor or not db.actor:alive() or not level.present() or
+            dev:is_paused() or (tonumber(dev.precache_frame) or 0)>0 or
+            (tonumber(dev.frame) or 0)<(resume_frame or 0) or
+            type(app_ready)=="function" and not app_ready() or
+            type(Check_UI)=="function" and Check_UI() or
+            actor_menu and not actor_menu.is_hud_free() then visible(false);return end
+        if not hud then
+            local parent=get_hud():GetWindow();if not parent then return end
+            local xml=CScriptXmlInit();xml:ParseFile("ui_custom_msgs.xml")
+            if not xml:NodeExist("gameplay_notification",0) then return end
+            local window=xml:InitStatic("gameplay_notification",parent)
+            hud={parent=parent,window=window}
+            window:Enable(false)
+            window:SetWndPos(vector2():set((1024-window:GetWidth())/2,768-window:GetHeight()-20))
+        end
+        local seconds=math.max(1,math.ceil(left/1000))
+        if hud.seconds~=seconds then
+            hud.window:TextControl():SetText(anomaly_donation_bridge_common.game_text_cp1251("Азазель: "..seconds.." сек."))
+            hud.seconds=seconds
+        end
+        visible(true)
+    end)
+    if not ok then
+        hide()
+        if why~=last_error and type(printf)=="function" then last_error=why;printf("[ADB] Azazel timer: %s",tostring(why)) end
+    end
+end

@@ -1,0 +1,362 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.show_squads",
+  "displayName": "Отобразить отряды",
+  "description": "Временно показывает на карте КПК отряды, одиночных NPC и мутантов текущей локации. Красные метки — враги, жёлтые — нейтральные, зелёные — друзья. В подсказке — название группировки или вида мутанта, на следующей строке — количество. Таймер хранится в памяти игры и сбрасывается после её закрытия.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"duration_seconds","displayName":"Длительность отображения, сек.","kind":"Integer","minimum":1,"maximum":99999999,"defaultValue":"30"}
+  ],
+  "parameters": {"duration_seconds":"30"},
+  "itemSpawns": [], "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local HANDLER = "hardcoon.adb.show_squads"
+local STATE_KEY = "__adb_show_squads_session_v1"
+local SESSION_ENV = "ADB_SHOW_SQUADS_SESSION_V1"
+local MAX_MS = 99999999000
+-- Stock squad icons, on squad SERVER ids instead of the commander ids used
+-- by ordinary PDA contacts. Never call show()/hide() or toggle debug flags.
+local SPOTS = { enemy="alife_presentation_squad_enemy_1",
+    neutral="alife_presentation_squad_neutral_1", friends="alife_presentation_squad_friend_1" }
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+    state = { left=0, owned={}, loading=false }
+    rawset(_G, STATE_KEY, state)
+end
+
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel
+if ffi_ok then
+    for _, declaration in ipairs({
+        "unsigned long __stdcall GetCurrentProcessId(void);",
+        "unsigned long __stdcall GetEnvironmentVariableA(const char*, char*, unsigned long);",
+        "int __stdcall SetEnvironmentVariableA(const char*, const char*);"
+    }) do pcall(ffi.cdef, declaration) end
+    local ok, value = pcall(ffi.load, "kernel32")
+    if ok then kernel = value end
+end
+local function pid()
+    if not kernel then return nil end
+    local ok, value = pcall(kernel.GetCurrentProcessId)
+    return ok and tonumber(value) or nil
+end
+local function read_session()
+    if not kernel then return nil end
+    local ok, size = pcall(kernel.GetEnvironmentVariableA, SESSION_ENV, nil, 0)
+    size = ok and tonumber(size) or 0
+    if size < 2 or size > 256 then return nil end
+    local buffer = ffi.new("char[?]", size)
+    local success, length = pcall(kernel.GetEnvironmentVariableA, SESSION_ENV, buffer, size)
+    if not success or tonumber(length) ~= size - 1 then return nil end
+    return ffi.string(buffer, length)
+end
+local function write_session(text)
+    if not kernel then return false end
+    local ok, result = pcall(kernel.SetEnvironmentVariableA, SESSION_ENV, text)
+    return ok and tonumber(result) ~= 0 and read_session() == text
+end
+local function persist()
+    if state.left <= 0 then return write_session(nil) end
+    local process = pid()
+    if not process or not state.actor_id then return false end
+    return write_session("1|"..process.."|"..state.actor_id.."|"..math.floor(state.left))
+end
+local function hydrate()
+    local text = read_session()
+    local process, actor, left
+    if text then process,actor,left=text:match("^1|(%d+)|(%d+)|(%d+)$") end
+    process, actor, left = tonumber(process), tonumber(actor), tonumber(left)
+    if process ~= pid() or not actor or actor >= 65535 or not left or left <= 0 or left > MAX_MS then
+        state.left = 0; write_session(nil); return
+    end
+    state.actor_id, state.left = actor, left
+end
+local function call(object, method, ...)
+    if object == nil then return nil end
+    local args = {...}
+    local ok, value = pcall(function() return object[method](object, unpack(args)) end)
+    return ok and value or nil
+end
+local function valid_id(value)
+    return type(value)=="number" and value==math.floor(value) and value>=0 and value<65535
+end
+local function server(id)
+    if not valid_id(id) then return nil end
+    local ok, object = pcall(function() return alife():object(id) end)
+    return ok and object or nil
+end
+local function signature(object)
+    return tostring(call(object,"name") or "").."|"..tostring(call(object,"section_name") or "")
+end
+local function has(id, spot)
+    local ok, present = pcall(level.map_has_object_spot, id, spot)
+    return ok and present ~= nil and present ~= 0 and present ~= false
+end
+local function remove_owned(id)
+    local entry = state.owned[id]
+    if not entry then return end
+    local object = server(id)
+    -- Do not erase a foreign marker after an object id has been recycled.
+    if object == nil or signature(object) == entry.signature then
+        if has(id,entry.spot) then pcall(level.map_remove_object_spot,id,entry.spot) end
+    end
+    state.owned[id] = nil
+end
+local function clean()
+    local ids = {}; for id in pairs(state.owned) do ids[#ids+1]=id end
+    for _,id in ipairs(ids) do remove_owned(id) end
+    state.job, state.next_scan, state.previous = nil, nil, nil
+end
+local function finish()
+    clean(); state.left=0; state.actor_id=nil; persist()
+end
+local function encoded(text)
+    return anomaly_donation_bridge_common.game_text_cp1251_lossy(tostring(text or "")) or "?"
+end
+local function marker_schema()
+    if state.schema then return true end
+    -- Verify against the active VFS XML before calling map_add_object_spot:
+    -- the engine asserts on an unknown spot type, outside Lua pcall protection.
+    local ok, valid = pcall(function()
+        local xml = CScriptXmlInit(); xml:ParseFile("map_spots.xml")
+        for _,spot in pairs(SPOTS) do if not xml:NodeExist(spot,0) then return false end end
+        return true
+    end)
+    state.schema = ok and valid == true
+    return state.schema
+end
+local function catalog_names()
+    local names, kinds, factions = {}, {}, {}
+    local ok, snapshot = pcall(function() return anomaly_donation_bridge_catalog.snapshot() end)
+    if ok and type(snapshot)=="table" then
+        for _,entry in ipairs(snapshot.entries or {}) do
+            if type(entry.section_id)=="string" then
+                names[entry.section_id]=encoded(entry.display_name or entry.section_id)
+                kinds[entry.section_id]=entry.kind
+                if entry.kind=="faction" then
+                    factions[tostring(entry.faction or ""):gsub("^actor_","")]=encoded(entry.display_name)
+                end
+            end
+        end
+    end
+    state.names, state.kinds, state.factions = names, kinds, factions
+end
+local function faction_name(faction)
+    faction=tostring(faction or ""):gsub("^actor_","")
+    if state.factions[faction] then return state.factions[faction] end
+    local ok, text = pcall(function() return game.translate_string(faction) end)
+    if ok and text and text~=faction then return encoded(text) end
+    ok,text=pcall(function() return game.translate_string("st_faction_"..faction) end)
+    return ok and text and text~="st_faction_"..faction and encoded(text) or faction
+end
+local function relation(object, actor)
+    -- relation() is valid for living entities, not arbitrary map objects.
+    if call(object,"is_entity_alive") ~= true or call(object,"alive") ~= true then return nil end
+    local value=tonumber(call(object,"relation",actor))
+    if not value then return nil end
+    local enemy=game_object and tonumber(game_object.enemy) or 2
+    local friend=game_object and tonumber(game_object.friend) or 0
+    return value>=enemy and "enemy" or value==friend and "friends" or "neutral"
+end
+local function same_level(object, actor_server)
+    local vertex=object and object.m_game_vertex_id
+    if not valid_id(vertex) or not valid_id(actor_server.m_game_vertex_id) then return false end
+    local ok, same = pcall(simulation_objects.is_on_the_same_level,actor_server,object)
+    return ok and same==true
+end
+local function show(id, object, color, hint, job)
+    local spot=SPOTS[color] or SPOTS.enemy
+    local entry=state.owned[id]
+    local identity=signature(object)
+    if entry and entry.signature~=identity then state.owned[id]=nil;entry=nil end
+    if entry and entry.spot~=spot then remove_owned(id);entry=nil end
+    if not entry then
+        if has(id,spot) then return end -- a stock/mod marker already owns this pair
+        local ok=pcall(level.map_add_object_spot,id,spot,hint)
+        if not ok or not has(id,spot) then return end
+        entry={spot=spot,signature=identity,hint=hint};state.owned[id]=entry
+    elseif not has(id,spot) then
+        local ok=pcall(level.map_add_object_spot,id,spot,hint)
+        if not ok or not has(id,spot) then state.owned[id]=nil;return end
+    elseif entry.hint~=hint then
+        pcall(level.map_change_spot_hint,id,spot,hint)
+    end
+    entry.hint=hint; job.seen[id]=true
+end
+-- Stock CUILines recognizes a literal backslash-n escape in PDA hints.
+local function hint(text, count) return text.."\\n"..encoded("Количество: ")..tostring(count) end
+local function group(object, job)
+    local ok,count=pcall(function() return object:npc_count() end)
+    count=ok and tonumber(count) or 0
+    if count~=count or count<1 or count>1000000 or count~=math.floor(count) then return end
+    local faction=tostring(object.player_id or "")
+    local monster=is_squad_monster and is_squad_monster[faction] or faction=="monster"
+    local types, members, online_relation={},0,nil
+    local success=pcall(function()
+        for member in object:squad_members() do
+            local id=tonumber(member.id)
+            if valid_id(id) then
+                job.members[id]=true
+                local se=server(id)
+                local section=se and call(se,"section_name")
+                if section then
+                    types[section]=true
+                    if state.kinds[section]=="mutant" then monster=true end
+                end
+                local live=db.storage and db.storage[id] and db.storage[id].object
+                local r=relation(live,job.actor)
+                if r=="enemy" or online_relation==nil or r=="neutral" and online_relation=="friends" then online_relation=r end
+            end
+            members=members+1; if members>=32 then break end
+        end
+    end)
+    if not success then return end
+    local color=call(object,"get_squad_relation")
+    if color~="enemy" and color~="friends" and color~="neutral" then color=online_relation or "enemy" end
+    if axr_companions and type(axr_companions.companion_squads)=="table" and axr_companions.companion_squads[object.id] then color="friends" end
+    local title
+    if monster then
+        local sections={};for section in pairs(types) do sections[#sections+1]=section end;table.sort(sections)
+        local labels={};for index,section in ipairs(sections) do
+            if index>4 then labels[#labels+1]="...";break end
+            labels[#labels+1]=state.names[section] or section
+        end
+        title=#labels>0 and table.concat(labels,", ") or tostring(call(object,"section_name") or faction)
+    else title=faction_name(faction) end
+    show(object.id,object,color,hint(title,count),job)
+end
+local function solo(id, job)
+    if id==state.actor_id or job.members[id] then return end
+    local record=db.storage and db.storage[id]
+    local object=record and record.object
+    if not object or call(object,"is_entity_alive")~=true or call(object,"alive")~=true then return end
+    local section=call(object,"section")
+    local ok,monster=pcall(function() return IsMonster(object) end)
+    monster=state.kinds[section]=="mutant" or ok and monster==true
+    local npc_ok,npc=pcall(function() return IsStalker(object) end)
+    npc=state.kinds[section]=="npc" or npc_ok and npc==true
+    if not monster and not npc then return end
+    local se=server(id)
+    if not se or not same_level(se,job.actor_server) then return end
+    local squad_id=tonumber(se.group_id)
+    if valid_id(squad_id) and squad_id~=id then
+        local squad=server(squad_id)
+        local count=squad and tonumber(call(squad,"npc_count"))
+        if count and count>0 then return end
+    end
+    local title
+    if monster then title=state.names[section] or section or "?"
+    else
+        local faction=tostring(call(object,"character_community") or call(se,"community") or "")
+        title=faction~="" and faction_name(faction) or "NPC"
+    end
+    show(id,se,relation(object,job.actor) or "enemy",hint(title,1),job)
+end
+local function squad_registry()
+    -- Vanilla sim_squad_scripted:on_register() stores id -> true here.
+    -- simulation_objects.object_registry contains actor/smarts, not squads.
+    -- Do not initialize another simulation board while the world is loading.
+    local board=rawget(_G,"SIMBOARD")
+    local ok,squads=pcall(function() return board and board.squads end)
+    return ok and type(squads)=="table" and squads or nil
+end
+local function begin_scan(actor, actor_server, now)
+    local squads=squad_registry()
+    if not squads then return end
+    local job={ids={},solo={},seen={},members={},index=1,solo_index=1,actor=actor,actor_server=actor_server}
+    for key in pairs(squads) do
+        local id=tonumber(key)
+        if valid_id(id) then job.ids[#job.ids+1]=id end
+    end
+    for id,record in pairs(db.storage or {}) do if valid_id(id) and type(record)=="table" and record.object then job.solo[#job.solo+1]=id end end
+    state.job=job;state.next_scan=now+1000
+end
+local function scan_step(now, actor, actor_server)
+    if not state.job and now>=(state.next_scan or 0) then begin_scan(actor,actor_server,now) end
+    local job=state.job;if not job then return end
+    -- Native server objects are reacquired by id for every bounded batch.
+    job.actor,job.actor_server=actor,actor_server
+    for _=1,64 do
+        local id=job.ids[job.index]
+        if id then
+            job.index=job.index+1
+            local object=server(id)
+            if object and same_level(object,actor_server) then group(object,job) end
+        else
+            id=job.solo[job.solo_index]
+            if id then job.solo_index=job.solo_index+1;solo(id,job)
+            else
+                local stale={};for owned in pairs(state.owned) do if not job.seen[owned] then stale[#stale+1]=owned end end
+                for _,owned in ipairs(stale) do remove_owned(owned) end
+                state.job=nil;return
+            end
+        end
+    end
+end
+local function supported()
+    return kernel~=nil and pid()~=nil and level~=nil and type(level.map_add_object_spot)=="function" and
+        type(level.map_remove_object_spot)=="function" and type(level.map_has_object_spot)=="function" and
+        type(level.map_change_spot_hint)=="function" and simulation_objects~=nil and
+        squad_registry()~=nil and type(simulation_objects.is_on_the_same_level)=="function" and
+        type(alife)=="function" and marker_schema(), "squad_map_api_unavailable"
+end
+local function can_execute(context, params)
+    local valid,reason=anomaly_donation_bridge_common.params_only(params,{duration_seconds=true})
+    if not valid then return false,"rejected",reason end
+    local seconds,error_code=anomaly_donation_bridge_common.parse_integer(params.duration_seconds,30,1,99999999,"squad_map_duration_invalid")
+    if not seconds then return false,"rejected",error_code end
+    local actor=context.actor
+    local id=tonumber(call(actor,"id"))
+    if not valid_id(id) or call(actor,"alive")~=true then return false,"deferred","actor_unavailable" end
+    if not supported() then return false,"rejected","squad_map_api_unavailable" end
+    context.options={seconds=seconds,actor_id=id};return true
+end
+local function execute(context)
+    local previous,previous_actor=state.left,state.actor_id
+    if previous_actor and previous_actor~=context.options.actor_id then clean();previous=0 end
+    state.left=math.max(previous,context.options.seconds*1000)
+    state.actor_id=context.options.actor_id;state.previous=context.now;state.loading=false;state.next_scan=0
+    if not persist() then state.left=previous;state.actor_id=previous_actor;return "rejected","squad_map_session_memory_unavailable" end
+    catalog_names();state.job=nil
+    return "executed","squad_map_active_seconds_"..context.options.seconds
+end
+local function update(now)
+    if state.loading or state.left<=0 then return end
+    local actor=db and db.actor
+    local id=tonumber(call(actor,"id"))
+    if not valid_id(id) or call(actor,"alive")~=true then state.previous=nil;return end
+    if id~=state.actor_id then finish();return end
+    local world=type(level.name)=="function" and level.name() or nil
+    if not world or world=="fake_start" then state.previous=nil;return end
+    local actor_server=server(id)
+    if not actor_server then state.previous=nil;return end
+    if not squad_registry() then state.previous=nil;state.job=nil;return end
+    if state.world~=world then clean();state.world=world;state.names=nil end
+    if state.previous and now>=state.previous then state.left=math.max(0,state.left-(now-state.previous)) end
+    state.previous=now
+    if state.left<=0 then finish();return end
+    if not persist() then finish();return end
+    if not state.schema and not marker_schema() then finish();return end
+    if not state.names then catalog_names() end
+    scan_step(now,actor,actor_server)
+end
+local function on_load()
+    -- Regular spots are not serialized. The engine has replaced the old map;
+    -- forget its ids instead of dereferencing objects from the previous save.
+    state.owned={};state.job=nil;state.names=nil;state.world=nil;state.schema=nil
+    state.previous=nil;state.next_scan=0;state.loading=false;hydrate()
+end
+local function on_travel()
+    clean();state.loading=true;state.world=nil;persist()
+end
+function on_game_start()
+    hydrate();state.previous=nil
+    anomaly_donation_bridge_registry.register(HANDLER,{
+        is_supported=supported,can_execute=can_execute,execute=execute,update=update,
+        on_game_load=on_load,on_level_changing=on_travel
+    })
+end

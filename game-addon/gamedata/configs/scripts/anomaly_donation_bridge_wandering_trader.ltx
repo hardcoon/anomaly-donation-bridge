@@ -1,0 +1,42 @@
+[logic]
+active = beh@adb_trader
+post_combat_time = 0,0
+trade = misc\trade\anomaly_donation_bridge_wandering_trader.ltx
+dont_keep_items = true
+
+[beh@adb_trader]
+behavior_state = beh_wait
+target = actor
+walk_dist = 10000
+jog_dist = 10000
+near_desired_dist = 1
+far_desired_dist = 1
+keep_distance = near
+wait_anim = guard_na
+walk_anim = patrol
+jog_anim = patrol
+run_anim = patrol
+meet = meet@adb_trader
+combat_ignore_keep_when_attacked = true
+combat_ignore_cond = true
+gather_items_enabled = false
+help_wounded_enabled = false
+corpse_detection_enabled = false
+use_camp = false
+
+[meet@adb_trader]
+abuse = false
+close_distance = 2
+close_anim = guard_na
+close_snd_hello = nil
+close_snd_bye = nil
+close_victim = actor
+far_distance = 0
+far_anim = nil
+far_snd = nil
+far_victim = nil
+use = {=adb_trader_ready =dist_to_actor_le(5)} true, false
+allow_break = true
+meet_dialog = anomaly_donation_bridge_wandering_trader_dialog
+trade_enable = {=adb_trader_ready} true, false
+

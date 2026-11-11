@@ -1,0 +1,214 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hide_hud",
+  "displayName": "Временно отключить HUD",
+  "description": "Штатной консольной командой скрывает HUD на выбранное время, затем возвращает прежнее состояние.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "duration_seconds",
+      "displayName": "Длительность, сек.",
+      "kind": "Integer",
+      "minimum": 5,
+      "maximum": 600,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "30",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "duration_seconds": "30"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_hide_hud_v1"
+local SAVE_KEY = "adb_hide_hud_v1"
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false, previous = true, expires_at = 0,
+		load_pending = false, next_persist_at = 0
+	}
+	rawset(_G, STATE_KEY, state)
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function actor_id(actor)
+	if actor == nil then return nil end
+	local ok, id = pcall(function() return tonumber(actor:id()) end)
+	return ok and id and id >= 0 and id or nil
+end
+
+local function now_ms(value)
+	return tonumber(value) or (time_global and time_global() or 0)
+end
+
+local function console_object()
+	if type(get_console) ~= "function" then return nil end
+	local ok, console = pcall(get_console)
+	return ok and console or nil
+end
+
+local function read_hud()
+	local console = console_object()
+	if console == nil then return nil end
+	local ok, value = pcall(function() return console:get_bool("hud_draw") end)
+	if not ok or type(value) ~= "boolean" then return nil end
+	return value
+end
+
+local function write_hud(value)
+	local console = console_object()
+	if console == nil then return false end
+	local ok = pcall(function()
+		console:execute(value == true and "hud_draw on" or "hud_draw off")
+	end)
+	return ok and read_hud() == (value == true)
+end
+
+local function clear_saved(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	return pcall(se_save_var, id, nil, SAVE_KEY, nil)
+end
+
+local function persist(actor, now)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	if not state.active then return clear_saved(actor) end
+	local remaining = math.max(0, math.floor(state.expires_at - now_ms(now)))
+	if remaining <= 0 then return clear_saved(actor) end
+	return pcall(se_save_var, id, nil, SAVE_KEY, {
+		version = 1, active = true, previous = state.previous == true,
+		remaining_ms = remaining
+	})
+end
+
+local function load_saved(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_load_var) ~= "function" then return nil end
+	local ok, saved = pcall(se_load_var, id, nil, SAVE_KEY)
+	if not ok or type(saved) ~= "table" or saved.active ~= true or
+		type(saved.previous) ~= "boolean" or tonumber(saved.remaining_ms) == nil or
+		tonumber(saved.remaining_ms) <= 0 then return nil end
+	return saved
+end
+
+local function clear_state()
+	state.active = false
+	state.previous = true
+	state.expires_at = 0
+	state.load_pending = false
+	state.next_persist_at = 0
+end
+
+local function restore(actor)
+	if not state.active then return true end
+	if not write_hud(state.previous == true) then return false end
+	clear_saved(actor)
+	clear_state()
+	return true
+end
+
+local function hide_hud_can(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		duration_seconds = true
+	})
+	if not valid then return false, "rejected", reason end
+	local duration, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 30, 5, 600, "hide_hud_duration_invalid")
+	if duration == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local current = read_hud()
+	if current == nil then return false, "deferred", "hud_console_api_unavailable" end
+	context.options = { duration = duration, before = current }
+	return true
+end
+
+local function hide_hud_execute(context)
+	local now = now_ms(context.now)
+	if not state.active then state.previous = context.options.before == true end
+	if not write_hud(false) then return "uncertain", "hud_hide_result_unknown" end
+	state.active = true
+	state.expires_at = math.max(state.expires_at, now + context.options.duration * 1000)
+	state.next_persist_at = now + 1000
+	persist(context.actor, now)
+	return "executed", "hud_hidden_seconds_" .. tostring(context.options.duration)
+end
+
+local function hide_hud_update(now)
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	local current = now_ms(now)
+	if state.load_pending then
+		state.load_pending = false
+		if not state.active or current >= state.expires_at then
+			local saved = load_saved(actor)
+			if saved ~= nil then
+				state.active = true
+				state.previous = saved.previous == true
+				state.expires_at = current + tonumber(saved.remaining_ms)
+				state.next_persist_at = current + 1000
+			else
+				clear_state()
+			end
+		end
+	end
+	if not state.active then return end
+	if current >= state.expires_at then
+		restore(actor)
+		return
+	end
+	write_hud(false)
+	if current >= state.next_persist_at then
+		persist(actor, current)
+		state.next_persist_at = current + 1000
+	end
+end
+
+local function hide_hud_load()
+	state.load_pending = true
+	hide_hud_update(now_ms())
+end
+
+local function hide_hud_level_changing()
+	local actor = db and db.actor or nil
+	if actor == nil or not state.active then return end
+	persist(actor, now_ms())
+	write_hud(state.previous == true)
+end
+
+local function hide_hud_supported(context)
+	local actor = actor_for_probe(context)
+	local console = console_object()
+	local supported = actor_id(actor) ~= nil and console ~= nil and
+		type(se_save_var) == "function" and type(se_load_var) == "function" and
+		read_hud() ~= nil
+	return supported, supported and nil or "hud_console_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin("hide_hud", {
+		can_execute = hide_hud_can,
+		execute = hide_hud_execute,
+		update = hide_hud_update,
+		on_game_load = hide_hud_load,
+		on_level_changing = hide_hud_level_changing,
+		is_supported = hide_hud_supported,
+		support_probe_is_hint = true
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] hide_hud registration failed: %s", tostring(reason))
+	end
+end

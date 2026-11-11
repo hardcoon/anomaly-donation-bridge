@@ -1,0 +1,196 @@
+-- Hardcoon, based on 0.2.5 (MIT). Private Bridge risk-policy integration.
+local function v(x,y)return vector2():set(x,y)end
+local function rect(x,y,w,h)return Frect():set(x,y,x+w,y+h)end
+local function text(key)return anomaly_donation_bridge_roulette.text(key)end
+local tier_colors={0xffb8b8bc,0xff087a3f,0xff223a84,0xff78316d,0xffc6972b}
+function ensure_class()
+    if adb_roulette_window then return end
+    class "adb_roulette_window" (CUIScriptWnd)
+    function adb_roulette_window:__init()super()
+        self:SetAutoDelete(false);self:SetWndRect(rect(0,0,1024,768))
+        local d=device();self.k=math.min(1,(d.height/d.width)/(768/1024))
+        self.scale=2.2;self.x=512-110*self.scale*self.k;self.y=384-112*self.scale
+        self.risk="low";self.buttons={};self.sectors={};self.last_view=""
+        local batch=anomaly_donation_bridge_roulette.batch_status();if batch then self.risk=batch.risk end
+        for i=1,4 do self.sectors[i]=self:Art(30,0,160,160,"adb_roulette_sector_0")end
+        self:Art(30,0,160,160,"adb_roulette_divisions")
+        local frame=anomaly_donation_bridge_roulette_art.frame
+        self.frame=self:Art(frame.x,frame.y,frame.w,frame.h,frame.texture)
+        self.frame:SetTextureColor(0xc8ffffff) -- smoked glass between the gold grid spokes
+        self.needle=self:HeadingArt(30,0,160,160,"adb_roulette_casino_pointer");self.needle:EnableHeading(true)
+        self.icon=self:Art(78,48,64,64,"adb_roulette_pixel");self.icon:Show(false)
+        self.unknown=self:Art(98,68,24,24,"adb_roulette_icon_shuffle")
+        self.loss=self:Art(98,68,24,24,"adb_roulette_icon_close");self.loss:SetTextureColor(0xffc85c48);self.loss:Show(false)
+        self.odds={}
+        for _,outcome in ipairs({"lower","same","higher"})do
+            self.odds[outcome]=self:Label(0,0,32,12,"",0xffffedb3)
+            if type(GetFontGraffiti22Russian)=="function" then self.odds[outcome]:SetFont(GetFontGraffiti22Russian())end
+        end
+        self:Button("low",36,170,70,18,text("risk_low"),function()self:SetRisk("low")end)
+        self:Button("high",114,170,70,18,text("risk_high"),function()self:SetRisk("high")end)
+        self:Button("action",55,198,110,30,text("upgrade"),function()self:Action()end,true)
+        self.error=self:Label(0,252,220,20,"",0xffe7bcb5);self.error:Show(false)
+        self:Sync()
+    end
+    function adb_roulette_window:Place(control,x,y,w,h)
+        control:SetWndPos(v(self.x+x*self.scale*self.k,self.y+y*self.scale))
+        control:SetWndSize(v(w*self.scale*self.k,h*self.scale));return control
+    end
+    function adb_roulette_window:Art(x,y,w,h,texture)
+        local control=CUIStatic();control:SetAutoDelete(true);self:AttachChild(control)
+        self:Place(control,x,y,w,h);control:InitTexture(texture);control:SetStretchTexture(true);return control
+    end
+    function adb_roulette_window:HeadingArt(x,y,w,h,texture)
+        local control=self:Art(x,y,w,h,texture)
+        control:SetWndPos(v(self.x+(x+w/2)*self.scale*self.k-w/2*self.scale,self.y+y*self.scale))
+        control:SetWndSize(v(w*self.scale,h*self.scale));return control
+    end
+    function adb_roulette_window:Label(x,y,w,h,value,color)
+        local control=CUITextWnd();control:SetAutoDelete(true);self:AttachChild(control)
+        self:Place(control,x,y,w,h);control:SetFont(GetFontLetterica16Russian())
+        control:SetTextComplexMode(true);control:SetTextAlignment(2);control:SetTextColor(color);control:SetText(value);return control
+    end
+    function adb_roulette_window:Button(id,x,y,w,h,value,callback,gold)
+        local control=CUIButton();control:SetAutoDelete(true);self:AttachChild(control)
+        self:Place(control,x,y,w,h);control:SetStretchTexture(true)
+        control:TextControl():SetFont(GetFontLetterica16Russian());control:TextControl():SetText(value)
+        if not gold and type(GetFontLetterica18Russian)=="function"then control:TextControl():SetFont(GetFontLetterica18Russian())end
+        if gold and type(GetFontGraffiti32Russian)=="function" then control:TextControl():SetFont(GetFontGraffiti32Russian())end
+        self:Register(control,id);self:AddCallback(id,ui_events.BUTTON_CLICKED,function()callback()end,self)
+        local button={control=control,skin=gold and "primary"or"button",enabled=true}
+        if gold then button.art=self:Art(0,0,1,1,"adb_roulette_casino_normal_rus")
+        else
+            -- Align the caption inside the same rectangle as the button skin.
+            control:TextControl():SetTextColor(0x00ffffff)
+            button.caption=self:Label(x,y,w,h,value,0xfff2eadb)
+            button.caption:SetVTextAlignment(1);button.caption:SetTextOffset(0,0)
+            if type(GetFontLetterica18Russian)=="function"then button.caption:SetFont(GetFontLetterica18Russian())end
+        end
+        self.buttons[id]=button;self:Paint(button);return control
+    end
+    function adb_roulette_window:Paint(button)
+        if button.skin=="primary"then
+            local state=button.active and"active"or button.picture_state or"normal"
+            local art=anomaly_donation_bridge_roulette_art.buttons[state]
+            if button.texture~=art.texture then
+                button.art:InitTexture(art.texture);self:Place(button.art,art.x,art.y,art.w,art.h);button.texture=art.texture
+            end
+            button.control:TextControl():SetTextColor(0x00ffffff)
+            return
+        end
+        local state=button.selected and"selected"or button.enabled and button.control:IsCursorOverWindow()and"hover"or"normal"
+        local texture="adb_roulette_casino_risk_"..state
+        if texture~=button.texture then button.control:InitTexture(texture);button.texture=texture end
+        button.control:SetTextureColor(button.enabled and 0xffffffff or 0xddffffff)
+        button.caption:SetTextColor(not button.enabled and 0xffb6a388 or 0xfff2eadb)
+    end
+    function adb_roulette_window:EnableButton(id,enabled)
+        local b=self.buttons[id];b.enabled=enabled;b.control:Enable(enabled);self:Paint(b)
+    end
+    function adb_roulette_window:SetIcon(entry)
+        self.unknown:Show(entry==nil);self.icon:Show(entry~=nil)
+        if not entry then return end
+        self.icon:InitTexture(entry.icon)
+        self.icon:SetTextureRect(rect(entry.icon_x*entry.grid,entry.icon_y*entry.grid,entry.icon_w*entry.grid,entry.icon_h*entry.grid))
+        local factor=math.min(64/entry.icon_w,64/entry.icon_h);local w,h=entry.icon_w*factor,entry.icon_h*factor
+        self:Place(self.icon,110-w/2,80-h/2,w,h)
+    end
+    function adb_roulette_window:SetRisk(risk)
+        if anomaly_donation_bridge_roulette_core.busy()then return end
+        local mode=anomaly_donation_bridge_roulette.risk_mode()
+        if mode~="both" and risk~=mode then return end
+        self.risk=risk;self.last_view="";self:Sync()
+    end
+    function adb_roulette_window:Action()
+        local t=anomaly_donation_bridge_roulette_core.current();local value,why
+        self.error:Show(false)
+        if t and t.phase=="await_claim" then
+            value,why=anomaly_donation_bridge_roulette.claim_reward()
+            if value then return end
+        elseif not anomaly_donation_bridge_roulette_core.busy()then
+            if not self.offer then anomaly_donation_bridge_roulette.dismiss_unavailable();return end
+            value,why=anomaly_donation_bridge_roulette.start_batch(anomaly_donation_bridge_roulette.default_count(),self.risk)
+        else return end
+        self.last_view="";self:Sync()
+        if not value then self.error:SetText(text(why or "unavailable"));self.error:Show(true)end
+    end
+    function adb_roulette_window:Sync()
+        local t=anomaly_donation_bridge_roulette_core.current();local batch=anomaly_donation_bridge_roulette.batch_status()
+        if batch and not batch.waiting then self.risk=batch.risk end
+        local mode=anomaly_donation_bridge_roulette.risk_mode()
+        if mode~="both" then self.risk=mode end
+        for _,risk in ipairs({"low","high"})do
+            -- Both the native hit target and its separate caption are hidden.
+            self.buttons[risk].control:Show(mode=="both")
+            self.buttons[risk].caption:Show(mode=="both")
+        end
+        local awaiting=t and t.phase=="await_claim";local busy=anomaly_donation_bridge_roulette_core.busy()
+        local view=t and(t.id..":"..t.phase)or("idle:"..self.risk)
+        if self.last_view~=view then
+            self.last_view=view
+            self.offer=t or anomaly_donation_bridge_roulette.preview(self.risk)
+            local result=awaiting and anomaly_donation_bridge_roulette_core.result()
+            local section=result and result.win and t.target or self.offer and self.offer.input.section
+            self:SetIcon(section and anomaly_donation_bridge_roulette_catalog.get(section))
+            self.loss:Show(result and result.lost or false)
+            if result and result.lost then self.icon:Show(false);self.unknown:Show(false)end
+            self.buttons.action.control:TextControl():SetText(awaiting and text(result and result.win and "claim" or result and result.lost and "sad" or "dismiss")or text("upgrade"))
+            self.buttons.action.active=busy and not awaiting
+            self.buttons.action.picture_state=awaiting and(result and result.win and"claim"or result and result.lost and"loss"or"dismiss")or"normal"
+            self:EnableButton("action",not busy or awaiting)
+            for _,risk in ipairs({"low","high"})do self.buttons[risk].selected=self.risk==risk;self:EnableButton(risk,not busy)end
+            if not self.offer then self.buttons.action.picture_state="dismiss";self.error:SetText(text("no_candidates"));self.error:Show(true)end
+            if result and not result.win then self.error:SetText(text(result.reason));self.error:Show(true)end
+        end
+        local p=self.offer and self.offer.probabilities or(self.risk=="high" and {lower=.5,same=.2,higher=.3}or{lower=.2,same=.75,higher=.05})
+        local progress=t and math.max(0,math.min(1,(anomaly_donation_bridge_roulette.animation_time()-t.started)/t.duration))or 0
+        self:DrawWheel(p,self.offer and self.offer.tiers,t and anomaly_donation_bridge_roulette_core.needle(progress,t.angle)or 0,self.offer and self.offer.display_probabilities)
+        for _,button in pairs(self.buttons)do self:Paint(button)end
+    end
+    function adb_roulette_window:DrawWheel(probabilities,tiers,angle,display)
+        local signature=string.format("%s:%.8f:%.8f:%s:%s:%s",self.risk,probabilities.lower,probabilities.same,tostring(tiers and tiers.lower),tostring(tiers and tiers.same),tostring(tiers and tiers.higher))
+        if self.last_sweep~=signature then
+            local start=0
+            local available=(probabilities.lower>0 and 4 or 0)+(probabilities.same>0 and 2 or 0)+(probabilities.higher>0 and 1 or 0)
+            local s=anomaly_donation_bridge_roulette_art.sectors
+            local frames=s.current[self.risk][math.max(1,available)]
+            for index,outcome in ipairs({"lower","same","higher","jackpot"})do
+                local sweep=(probabilities[outcome]or 0)*360;local tier=tiers and tiers[outcome]
+                local tint=outcome=="jackpot" and 0xffba101c or tier==0 and 0xff292329 or tier and tier_colors[tier]or({lower=0xff55525a,same=0xff84818a,higher=0xffb6a786})[outcome]
+                local frame=frames[index];local sector=self.sectors[index]
+                if frame then
+                    local uv=s.frames[frame+1]
+                    sector:SetTextureRect(rect(uv.x,uv.y,uv.w,uv.h))
+                end
+                sector:SetTextureColor(tint);sector:Show(sweep>0)
+                local label=self.odds[outcome]
+                if label then
+                    label:Show(sweep>0)
+                    local radians=(start+sweep/2)*math.pi/180
+                    self:Place(label,110+math.sin(radians)*54.8-16,80-math.cos(radians)*54.8-6,32,12)
+                    label:SetText(string.format("%g%%",(display and display[outcome]or probabilities[outcome])*100))
+                end
+                start=start+sweep
+            end
+            self.last_sweep=signature
+        end
+        self.needle:SetHeading(-angle*math.pi/180)
+    end
+    function adb_roulette_window:Update()
+        CUIScriptWnd.Update(self);if anomaly_donation_bridge_roulette.GUI~=self then return end
+        anomaly_donation_bridge_roulette.update()
+        if anomaly_donation_bridge_roulette.GUI==self then self:Sync()end
+    end
+    function adb_roulette_window:OnKeyboard(key,action)
+        local jump=type(dik_to_bind)=="function" and key_bindings and dik_to_bind(key)==key_bindings.kJUMP
+        if jump then
+            if action==ui_events.WINDOW_KEY_RELEASED then self.jump_held=false
+            elseif action==ui_events.WINDOW_KEY_PRESSED and not self.jump_held then
+                self.jump_held=true;self:Action()
+            end
+        end
+        -- This modal owns all keyboard input until the result is acknowledged.
+        return true
+    end
+    function adb_roulette_window:Close()return anomaly_donation_bridge_roulette.close()end
+end

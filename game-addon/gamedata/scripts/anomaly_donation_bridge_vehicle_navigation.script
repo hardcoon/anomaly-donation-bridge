@@ -1,0 +1,1352 @@
+local function v(x,y,z) return vector():set(x,y,z) end
+local function norm(x,z)
+    local n=math.sqrt(x*x+z*z)
+    if n<0.001 then return 0,1,0 end
+    return x/n,z/n,n
+end
+
+local function soft_object(obj)
+    if not obj then return false end
+    -- Use engine type predicates, never section/name guesses: a modded tree,
+    -- wreck or physics prop must not become invisible to the driver.
+    if type(obj.is_entity_alive)=="function" and obj:is_entity_alive() then
+        return not obj:alive()
+    end
+    return type(obj.is_inventory_item)=="function" and obj:is_inventory_item()
+end
+
+local function cast(x,y,z,dx,dy,dz,length,kind,ignore)
+    local skipped=0
+    local skip_object=ignore
+    for _=1,24 do
+        -- Older engines do not clear the previous dynamic object when the
+        -- next query hits static geometry. Never reuse this native result.
+        local result=rq_result()
+        if not level.ray_pick(v(x+dx*skipped,y+dy*skipped,z+dz*skipped),v(dx,dy,dz),length-skipped,kind,result,skip_object) then return end
+        -- The physics engine ignores flPassable triangles (grass, leaves).
+        -- Skip those same surfaces, but continue the ray to any wall behind.
+        local flags=not result.object and result.material_flags
+        local passable=type(flags)=="number" and math.floor(flags/128)%2==1
+        local own=result.object and ignore and result.object:id()==ignore:id()
+        if not passable and not own and not soft_object(result.object) then
+            return {range=skipped+result.range,object=result.object}
+        end
+        -- Continue beyond soft clutter; do not discard the whole ray, which
+        -- could hide a tree or wall immediately behind a dropped gun/corpse.
+        skip_object=result.object or ignore
+        skipped=skipped+math.max(0.02,result.range+0.02)
+        if skipped>=length then return end
+    end
+    return {range=skipped} -- excessive layers are unknown, never assumed clear
+end
+
+local function offset(p,dx,dz,x,z)
+    return p.x+x*dz+z*dx,p.z-x*dx+z*dz
+end
+
+local function obstacle_reason(kind,obstacle)
+    local obj=obstacle.object
+    -- A passing actor/mutant is not a permanent failed steering corridor.
+    -- Keep the immediate collision stop, but do not blacklist its old place.
+    if obj and obj:is_entity_alive() and obj:alive() then return "living_obstacle" end
+    return kind..":"..tostring(obstacle.range)..":"..tostring(obj and obj:id() or "static")
+end
+
+local gravity_sections={}
+local function gravitational(obj)
+    if type(obj.section)~="function" then return false end
+    local section=obj:section()
+    if gravity_sections[section]~=nil then return gravity_sections[section] end
+    local ini=system_ini()
+    local result=false
+    if ini:section_exist(section) and ini:line_exist(section,"hit_type") then
+        -- Electric, thermal and gravitational zones share engine classes.
+        -- The effective inherited configuration identifies physical force;
+        -- neither a section-name substring nor CMincer alone is reliable.
+        local kind=ini:r_string(section,"hit_type")
+        result=kind=="strike" or kind=="physic_strike"
+    end
+    gravity_sections[section]=result
+    return result
+end
+
+local function dynamic_clear(p,dx,dz,shape,ignore,living)
+    local reason
+    local id=ignore and ignore:id()
+    level.iterate_nearest(p,shape.radius+5,function(obj)
+        if obj:id()==id then return false end
+        local q=obj:position()
+        local x,z=q.x-p.x,q.z-p.z
+        if type(obj.is_anomaly)=="function" and obj:is_anomaly() then
+            -- Anomalies are not solid ray-pick geometry. A gravitational
+            -- zone can throw the car off an otherwise valid route. Read
+            -- its native bounds/state; never disable or modify the zone.
+            -- Heat, electricity, acid and radiation do not obstruct driving.
+            if gravitational(obj) and type(obj.inside)=="function"
+                and (type(obj.is_enabled_anomaly)~="function" or obj:is_enabled_anomaly()) then
+                -- Broad phase only. Three large spheres inflated the hull
+                -- by another metre and sealed otherwise usable passages.
+                if obj:inside(v(p.x,p.y+shape.height/2,p.z),math.sqrt(shape.radius^2+(shape.height/2)^2)) then
+                    local nx,nz,ny=math.ceil(shape.x*2),math.ceil(shape.z*2),math.ceil(shape.height)
+                    local sx,sz,sy=2*shape.x/nx,2*shape.z/nz,shape.height/ny
+                    local radius=math.sqrt(sx*sx+sz*sz+sy*sy)/2
+                    for ix=1,nx do for iz=1,nz do for iy=1,ny do
+                        local x,z=offset(p,dx,dz,-shape.x+(ix-0.5)*sx,-shape.z+(iz-0.5)*sz)
+                        if obj:inside(v(x,p.y+(iy-0.5)*sy,z),radius) then
+                            reason="active_anomaly";return true
+                        end
+                    end end end
+                end
+            end
+        elseif living and obj:is_entity_alive() and obj:alive() then
+            if math.abs(q.y-p.y)<shape.height and math.abs(x*dz-z*dx)<shape.x+0.7 and
+                math.abs(x*dx+z*dz)<shape.z+0.7 then reason="living_obstacle";return true end
+        end
+        return false
+    end)
+    return reason
+end
+
+local sample_sets={}
+local function samples(radius,spacing)
+    local key=radius..":"..spacing
+    if sample_sets[key] then return sample_sets[key] end
+    local count=math.ceil(radius*2/spacing)
+    local result={}
+    for i=0,count do result[#result+1]=-radius+2*radius*i/count end
+    sample_sets[key]=result
+    return result
+end
+
+local function valid_vertex(id)
+    return type(id)=="number" and id>=0 and id<4294967295 and
+        level.vertex_in_direction(id,v(1,0,0),0)==id
+end
+
+function footprint(box)
+    local hx=math.max(math.abs(box.min.x),math.abs(box.max.x))+0.5
+    local hz=math.max(math.abs(box.min.z),math.abs(box.max.z))+0.5
+    return {x=hx,z=hz,height=box.max.y-box.min.y+0.5,
+        bottom=box.min.y,radius=math.sqrt(hx*hx+hz*hz),margin=0.5}
+end
+
+function vertex(p, maximum)
+    local id=level.vertex_id(p)
+    if not valid_vertex(id) then return end
+    local q=level.vertex_position(id)
+    if math.abs(q.y-p.y)>2 or q:distance_to(p)>maximum then return end
+    return id,q
+end
+
+-- Sample under the full footprint, then ray-test its volume in both horizontal
+-- directions. A foot-sized AI node alone is never sufficient for a vehicle.
+function clear(p,dx,dz,shape,ignore,dynamic,driving,checkpoint)
+    if dynamic then
+        local reason=dynamic_clear(p,dx,dz,shape,ignore,true)
+        if reason then return false,nil,reason end
+    end
+    local heights,max_y={},-math.huge
+    local hit_kind=dynamic and rq_target.rqtBoth or rq_target.rqtStatic
+    local sides,ends={-shape.x,0,shape.x},{-shape.z,0,shape.z}
+    for i,x in ipairs(sides) do
+        heights[i]={}
+        for j,z in ipairs(ends) do
+            local px,pz=offset(p,dx,dz,x,z)
+            local reach=driving and math.max(3.5,shape.z*0.9+shape.x*0.8+1) or 2
+            local hit=cast(px,p.y+reach,pz,0,-1,0,reach*2,rq_target.rqtStatic,ignore)
+            if not hit then return false,nil,"ground_missing" end
+            local y=p.y+reach-hit.range
+            heights[i][j]=y
+            max_y=math.max(max_y,y)
+        end
+    end
+    local middle=heights[2][2]
+    local cross=(heights[3][2]-heights[1][2])/(2*shape.x)
+    local slope=(heights[2][3]-heights[2][1])/(2*shape.z)
+    local base=middle
+    if driving then
+        -- Fit the chassis to all nine ground samples, instead of requiring
+        -- one flat spawn pad underneath a car already rolling over a crest.
+        base,cross,slope=0,0,0
+        for i=1,3 do
+            for j=1,3 do base=base+heights[i][j]/9 end
+            cross=cross+(heights[3][i]-heights[1][i])/(6*shape.x)
+            slope=slope+(heights[i][3]-heights[i][1])/(6*shape.z)
+        end
+    end
+    if math.abs(middle-p.y)>0.9 then return false,nil,"ground_height:"..tostring(middle-p.y) end
+    -- The rolling chassis can differ slightly from a planned ground pose.
+    -- Keep a small terrain tolerance in the controller so a checked route
+    -- does not oscillate at the limit. Hull/obstacle clearance is identical.
+    if math.abs(cross)>(driving=="control" and 0.80 or driving and 0.75 or 0.22) then return false,nil,"cross_slope:"..tostring(cross) end
+    if math.abs(slope)>(driving=="control" and 0.90 or driving and 0.85 or 0.27) then return false,nil,"long_slope:"..tostring(slope) end
+    local lift=0
+    for i,x in ipairs(sides) do
+        for j,z in ipairs(ends) do
+            local residual=heights[i][j]-(base+x*cross+z*slope)
+            lift=math.max(lift,residual)
+            -- A shallow depression below a long chassis is not an obstacle
+            -- protruding into it. Allow suspension/ground clearance on the
+            -- low side, while retaining the high-side limit and the dense
+            -- centreline step checks (a cliff/vertical drop is still unsafe).
+            local depression=driving and math.max(0.55,(shape.body_floor or 0.30)+0.35) or 0.45
+            if residual>(driving and 0.55 or 0.45) or residual< -depression then
+                return false,nil,"ground_uneven:"..tostring(residual)
+            end
+        end
+    end
+    -- Three rays across a four-metre hull left metre-wide blind strips.
+    -- Low concrete blocks/tyres must be found by the planner, not the bumper.
+    if shape.probe_map then
+        local fits,reason=shape.probe_map(p,dx,dz,checkpoint)
+        return fits,max_y,reason,math.max(math.abs(cross),math.abs(slope)),math.abs(cross)
+    end
+    local across=samples(shape.x,0.55)
+    local along=samples(shape.z,0.85)
+    local body_floor=driving and shape.body_floor or 0.30
+    body_floor=body_floor or 0.30
+    local layers={body_floor,math.max(body_floor,0.75),shape.height/2,shape.height}
+    for _,h in ipairs(layers) do
+        if checkpoint then checkpoint(true) end
+        for _,x in ipairs(across) do
+            local px,pz=offset(p,dx,dz,x,-shape.z)
+            local y=driving and base+lift+x*cross-shape.z*slope+h or max_y+h
+            local dy=driving and slope or 0
+            local scale=math.sqrt(1+dy*dy)
+            local obstacle=cast(px,y,pz,dx/scale,dy/scale,dz/scale,2*shape.z*scale,hit_kind,ignore)
+            if obstacle then return false,nil,obstacle_reason("body_length",obstacle) end
+        end
+        for _,z in ipairs(along) do
+            local px,pz=offset(p,dx,dz,-shape.x,z)
+            local y=driving and base+lift-shape.x*cross+z*slope+h or max_y+h
+            local dy=driving and cross or 0
+            local scale=math.sqrt(1+dy*dy)
+            local obstacle=cast(px,y,pz,dz/scale,dy/scale,-dx/scale,2*shape.x*scale,hit_kind,ignore)
+            if obstacle then return false,nil,obstacle_reason("body_width",obstacle) end
+        end
+    end
+    -- Vertical rays reject low ceilings, overhangs and obstacles inside the box.
+    for _,x in ipairs({-shape.x,0,shape.x}) do
+        for _,z in ipairs({-shape.z,0,shape.z}) do
+            local px,pz=offset(p,dx,dz,x,z)
+            local y=driving and base+lift+x*cross+z*slope+body_floor or max_y+0.25
+            if cast(px,y,pz,0,1,0,shape.height-body_floor,hit_kind,ignore) then return false,nil,"body_ceiling" end
+        end
+    end
+    return true,max_y,nil,math.max(math.abs(cross),math.abs(slope)),math.abs(cross)
+end
+
+-- A per-search terrain/obstacle map makes overlapping chassis probes cheap.
+-- It guides the heading-aware search only. The returned route must still
+-- pass the exact, dense hull sweeps in verify_route before being committed.
+-- The cache never outlives the search or contains live actors/anomaly state.
+local function obstacle_map(shape,ignore,regions)
+    local cells,size={},0.8
+    local half=size/2
+    local function cell(ix,iz,y)
+        local key=ix..":"..iz..":"..math.floor(y/4)
+        if cells[key]~=nil then return cells[key] end
+        local x,z=ix*size,iz*size
+        local ground={}
+        for _,d in ipairs({{0,0},{-half,0},{half,0},{0,-half},{0,half}}) do
+            local hit=cast(x+d[1],y+4,z+d[2],0,-1,0,8,rq_target.rqtStatic,ignore)
+            if not hit then cells[key]=false;return false end
+            ground[#ground+1]=y+4-hit.range
+        end
+        local base=ground[1]
+        local gx,gz=(ground[3]-ground[2])/size,(ground[5]-ground[4])/size
+        -- A sharp edge/roof is not ordinary ground. Full-body ground probes
+        -- still decide whether a smooth hillside is traversable.
+        if gx*gx+gz*gz>1.2^2 then cells[key]=false;return false end
+        local floor=shape.body_floor or 0.30
+        for _,height in ipairs({floor,math.max(floor,0.75),shape.height/2,shape.height}) do
+            for _,d in ipairs({{1,0},{0,1},{0.70710678,0.70710678},{0.70710678,-0.70710678}}) do
+                local dx,dz=d[1],d[2]
+                local dy=gx*dx+gz*dz
+                local scale=math.sqrt(1+dy*dy)
+                local reach=half*1.4142135624
+                if cast(x-dx*reach,base-dy*reach+height,z-dz*reach,dx/scale,dy/scale,dz/scale,
+                    2*reach*scale,rq_target.rqtStatic,ignore) then cells[key]=false;return false end
+            end
+        end
+        if cast(x,base+floor,z,0,1,0,shape.height-floor,rq_target.rqtStatic,ignore) then cells[key]=false;return false end
+        cells[key]={y=base}
+        return cells[key]
+    end
+    return function(p,dx,dz,checkpoint)
+        for _,region in ipairs(regions) do
+            if (p.x-region.x)^2+(p.z-region.z)^2<4 then
+                local fits,_,reason=clear(p,dx,dz,shape,ignore,true,true,checkpoint)
+                return fits,reason
+            end
+        end
+        local rx,rz=math.abs(dz)*shape.x+math.abs(dx)*shape.z,math.abs(dx)*shape.x+math.abs(dz)*shape.z
+        for ix=math.ceil((p.x-rx)/size),math.floor((p.x+rx)/size) do
+            if checkpoint then checkpoint(true) end
+            for iz=math.ceil((p.z-rz)/size),math.floor((p.z+rz)/size) do
+                local ox,oz=ix*size-p.x,iz*size-p.z
+                if math.abs(ox*dz-oz*dx)<=shape.x and math.abs(ox*dx+oz*dz)<=shape.z then
+                    local sample=cell(ix,iz,p.y)
+                    if not sample then return false,"mapped_obstacle" end
+                    if math.abs(sample.y-p.y)>shape.z*0.85+shape.x*0.75+0.6 then return false,"mapped_ground" end
+                end
+            end
+        end
+        return true
+    end
+end
+
+local function outside_camera(p,dx,dz,shape)
+    local camera=device()
+    local pos,dir=camera.cam_pos,camera.cam_dir
+    if not pos or not dir then return false end
+    local right,up=camera.cam_right,camera.cam_top
+    local fov,aspect=camera.fov,camera.aspect_ratio
+    local lens=right and up and type(fov)=="number" and fov>0 and fov<160
+        and type(aspect)=="number" and aspect>0
+    local vertical=lens and math.tan(math.rad(fov)*0.5) or 0
+    local horizontal=lens and vertical/aspect or 0
+    local behind,left,right_of,below,above=true,lens,lens,lens,lens
+    -- Require all corners to lie beyond the same frustum plane. Checking
+    -- each corner independently could accept a hull crossing the viewport.
+    for _,x in ipairs({-shape.x,shape.x}) do
+        for _,z in ipairs({-shape.z,shape.z}) do
+            local px,pz=offset(p,dx,dz,x,z)
+            for _,y in ipairs({p.y,p.y+shape.height}) do
+                local ox,oy,oz=px-pos.x,y-pos.y,pz-pos.z
+                local depth=ox*dir.x+oy*dir.y+oz*dir.z
+                behind=behind and depth< -0.6
+                if lens then
+                    local h=ox*right.x+oy*right.y+oz*right.z
+                    local v=ox*up.x+oy*up.y+oz*up.z
+                    left=left and -h>depth*horizontal+0.7
+                    right_of=right_of and h>depth*horizontal+0.7
+                    below=below and -v>depth*vertical+0.7
+                    above=above and v>depth*vertical+0.7
+                end
+            end
+        end
+    end
+    return behind or left or right_of or below or above
+end
+
+function spawn_candidate(actor,shape,radius,sample)
+    local origin=actor:position()
+    local minimum=shape.x+0.8
+    if radius<=minimum then return end
+    local camera=device().cam_dir
+    local rear=camera and math.atan2(-camera.x,-camera.z) or 0
+    local index=(sample or 1)-1
+    -- Spend the first samples behind the camera, at the roomy end of the
+    -- radius. Every fourth sample also checks side lanes outside the frustum.
+    local theta=rear+(index%4==3 and index*2.3999632297 or ((index*0.61803398875)%1-0.5)*2.6)
+    local start=math.min(radius-0.1,math.max(minimum,shape.radius+0.8,radius*0.45))
+    local length=start+(0.85+index*0.61803398875)%1*(radius-start)
+    local dx,dz=math.sin(theta),math.cos(theta)
+    local guess=v(origin.x+dx*length,origin.y,origin.z+dz*length)
+    local id,p=vertex(guess,2.2)
+    if not id or p:distance_to(origin)>radius or p:distance_to(origin)<=minimum then return end
+    local toward=theta+math.pi
+    for _,turn in ipairs({0,math.pi/4,-math.pi/4,math.pi/2}) do
+        local heading=toward+turn
+        local hx,hz=math.sin(heading),math.cos(heading)
+        -- Use extra headroom before checking the ground height.
+        if outside_camera(v(p.x,p.y+0.9,p.z),hx,hz,shape) then
+            local fits,ground=clear(p,hx,hz,shape,nil,true)
+            if fits and outside_camera(v(p.x,ground+0.12,p.z),hx,hz,shape) then
+                return {position=v(p.x,ground-shape.bottom+0.12,p.z),ground_y=p.y,id=id,heading=heading,dx=hx,dz=hz}
+            end
+        end
+    end
+end
+
+function recheck_spawn(site,actor,shape,radius)
+    local p=site.position
+    local ground=v(p.x,p.y+shape.bottom-0.12,p.z)
+    local d=ground:distance_to(actor:position())
+    if d<=shape.x+0.8 or d>radius or not outside_camera(v(p.x,ground.y+0.12,p.z),site.dx,site.dz,shape) then return false end
+    local fits,y=clear(v(p.x,site.ground_y,p.z),site.dx,site.dz,shape,nil,true)
+    return fits and math.abs(y-ground.y)<0.1
+end
+
+local function push(heap, node)
+    local i=#heap+1
+    while i>1 do
+        local parent=math.floor(i/2)
+        if heap[parent].score<=node.score then break end
+        heap[i],i=heap[parent],parent
+    end
+    heap[i]=node
+end
+
+local function pop(heap)
+    local first,last=heap[1],table.remove(heap)
+    if #heap==0 then return first end
+    local i=1
+    while i*2<=#heap do
+        local child=i*2
+        if heap[child+1] and heap[child+1].score<heap[child].score then child=child+1 end
+        if last.score<=heap[child].score then break end
+        heap[i],i=heap[child],child
+    end
+    heap[i]=last
+    return first
+end
+
+local ground_near
+local function route_key(p,angle,fine,reverse)
+    -- Refine only short parking manoeuvres, not every pose on the map.
+    local size=fine and 0.75 or 1.5
+    local bins=fine and 48 or 24
+    return (reverse and "r:" or "d:")..(fine and "f:" or "c:")..math.floor(p.x/size+0.5)..":"..math.floor(p.y+0.5)..":"..math.floor(p.z/size+0.5)..":"..(math.floor((angle%(2*math.pi))/(2*math.pi/bins)+0.5)%bins)
+end
+
+-- Vehicle navigation uses physical ground and swept hulls. Pedestrian AI
+-- vertices are only used by spawn/exit callers, never as drivable boundaries.
+
+local function arc_point(origin,heading,curvature,distance,shape)
+    local yaw=heading+curvature*distance
+    local x,z
+    if math.abs(curvature)<0.0001 then x,z=math.sin(heading)*distance,math.cos(heading)*distance
+    else x,z=(math.cos(heading)-math.cos(yaw))/curvature,(math.sin(yaw)-math.sin(heading))/curvature end
+    local offset=shape and shape.rear_offset or 0
+    x=x+offset*(math.sin(yaw)-math.sin(heading))
+    z=z+offset*(math.cos(yaw)-math.cos(heading))
+    return v(origin.x+x,origin.y,origin.z+z),yaw
+end
+
+local function arc(origin,heading,curvature,distance,shape,ignore,dynamic,avoid,checkpoint,control)
+    -- Bound displacement of the outer corner as well as the chassis centre.
+    -- Preserve a checked prefix when a full step hits something: the short
+    -- manoeuvre can help us leave a confined pose without crossing it.
+    local edge_key
+    if shape.blocked_arcs then
+        edge_key=string.format("%.3f:%.3f:%.3f:%.5f:%.6f:%.3f",origin.x,origin.y,origin.z,heading,curvature,distance)
+        if shape.blocked_arcs[edge_key] then return nil,nil,"rejected_connection",{} end
+    end
+    local steps=math.max(1,math.ceil(math.abs(distance)*(1+math.abs(curvature)*(shape.radius+(shape.rear_offset or 0)))/0.4))
+    local p,yaw,trace,grade,cross_grade=origin,heading,{},0,0
+    for i=1,steps do
+        if checkpoint then checkpoint() end
+        local d=distance*i/steps
+        local guess
+        guess,yaw=arc_point(origin,heading,curvature,d,shape)
+        guess.y=p.y
+        local q=ground_near(guess,ignore)
+        if not q then return nil,nil,"ground_missing",trace end
+        for _,area in ipairs(avoid or {}) do
+            local dx,dz=q.x-area.x,q.z-area.z
+            if dx*dx+dz*dz<area.radius*area.radius then return nil,nil,"recent_failed_approach",trace end
+        end
+        if math.abs(q.y-p.y)>0.66*math.max(0.1,q:distance_to(p)) then return nil,nil,"ground_step:"..tostring(q.y-p.y),trace end
+        local fits,_,reason,local_grade,local_cross=clear(q,math.sin(yaw),math.cos(yaw),shape,ignore,dynamic,control and "control" or true,checkpoint)
+        if not fits then return nil,nil,reason,trace,nil,q end
+        grade=math.max(grade,local_grade or 0)
+        cross_grade=math.max(cross_grade,local_cross or 0)
+        p=q
+        trace[#trace+1]={position=q,yaw=yaw,reverse=distance<0,curvature=curvature,travel=d,edge_key=edge_key}
+    end
+    return p,yaw,nil,trace,grade,nil,cross_grade
+end
+
+-- Search with a cached terrain/obstacle map, then validate the selected
+-- continuous curve at the controller's dense spacing before it can be driven.
+-- Failed connections are remembered across retries; no unverified prefix is
+-- ever sent to the controller. This is lazy collision validation, not reduced
+-- physical clearance or a weaker emergency collision check.
+local function verify_route(path,shape,ignore,checkpoint)
+    local verified={start=path.start}
+    local previous=path.start
+    for _,pose in ipairs(path) do
+        local curvature=pose.curvature or 0
+        local distance
+        if math.abs(curvature)>0.0001 then
+            local delta=math.atan2(math.sin(pose.yaw-previous.yaw),math.cos(pose.yaw-previous.yaw))
+            distance=delta/curvature
+        else
+            local dx,dz=pose.position.x-previous.position.x,pose.position.z-previous.position.z
+            distance=math.sqrt(dx*dx+dz*dz)*(pose.reverse and -1 or 1)
+        end
+        local point,_,reason,trace,_,failed_position=arc(previous.position,previous.yaw,curvature,distance,shape,ignore,true,nil,checkpoint)
+        if not point then return nil,pose.edge_key,reason,failed_position or pose.position end
+        for _,checked in ipairs(trace) do verified[#verified+1]=checked end
+        previous=pose
+    end
+    verified.escape=path.escape
+    return verified
+end
+
+function turn_radius(shape) return shape.turn_radius or math.max(6.5,shape.z*3) end
+
+local function goal_arc(node,goal,stop,shape,ignore,avoid,checkpoint)
+    local dx,dz=goal.x-node.position.x,goal.z-node.position.z
+    local distance=math.sqrt(dx*dx+dz*dz)
+    if distance<0.5 or distance>90 then return end
+    local scale=math.max(0.1,(distance-stop*0.8)/distance)
+    dx,dz=dx*scale,dz*scale
+    -- The final connection may be a reverse arc too. For reverse travel the
+    -- virtual forward axis and rolling-reference offset both change sign;
+    -- the actual body keeps its heading and uses a negative travel distance.
+    for _,sign in ipairs({1,-1}) do
+        local heading=node.yaw+(sign<0 and math.pi or 0)
+        local c,s=math.cos(heading),math.sin(heading)
+        local x,z=dx*c-dz*s,dx*s+dz*c
+        if z>0 then
+            local offset=(shape.rear_offset or 0)*sign
+            local curvature,travel=0,z
+            if math.abs(x)>0.01 then
+                local radius=(x*x+z*z+2*offset*z)/(2*x)
+                curvature=1/radius
+                local angle=math.atan2(offset*(x-radius)+radius*(z+offset),
+                    -radius*(x-radius)+offset*(z+offset))
+                travel=math.abs(angle)<=1.4 and angle/curvature or -1
+            end
+            if math.abs(curvature)<=1/turn_radius(shape) and travel>0 and travel<=distance*1.8 then
+                local p,yaw,_,trace=arc(node.position,node.yaw,curvature*sign,travel*sign,shape,ignore,true,avoid,checkpoint)
+                if p and p:distance_to(goal)<=stop then
+                    return {position=p,yaw=yaw,parent=node,trace=trace}
+                end
+            end
+        end
+    end
+end
+
+local function tangent_goal(node,goal,stop,shape,ignore,avoid,checkpoint)
+    -- A checked turn followed by a straight can reach clear destinations
+    -- which cannot lie on one circle from the current vehicle pose.
+    local radius=turn_radius(shape)
+    for _,sign in ipairs({1,-1}) do
+        local virtual=node.yaw+(sign<0 and math.pi or 0)
+        local offset=(shape.rear_offset or 0)*sign
+        local rear_x=node.position.x-math.sin(virtual)*offset
+        local rear_z=node.position.z-math.cos(virtual)*offset
+        for _,side in ipairs({-1,1}) do
+            local r=radius*side
+            local cx,cz=rear_x+math.cos(virtual)*r,rear_z-math.sin(virtual)*r
+            local dx,dz=goal.x-cx,goal.z-cz
+            local squared=dx*dx+dz*dz-r*r
+            if squared>0 then
+                local length=math.sqrt(squared)-offset
+                local yaw=math.atan2(dx,dz)+math.atan2(r,math.sqrt(squared))
+                local delta=side>0 and ((yaw-virtual)%(2*math.pi)) or -((virtual-yaw)%(2*math.pi))
+                local travel=delta*r
+                if length>=0 and math.abs(delta)<=math.pi and travel+length<=node.position:distance_to(goal)*2+20 then
+                    local p,h,_,trace=arc(node.position,node.yaw,sign/r,sign*travel,shape,ignore,true,avoid,checkpoint)
+                    if p then
+                        local endp,endy,_,tail=arc(p,h,0,sign*math.max(0,length-stop*0.8),shape,ignore,true,avoid,checkpoint)
+                        if endp and endp:distance_to(goal)<=stop then
+                            for _,pose in ipairs(tail) do trace[#trace+1]=pose end
+                            return {position=endp,yaw=endy,parent=node,trace=trace}
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function wide_goal(node,goal,stop,shape,ignore,avoid,checkpoint,max_cost,max_candidates)
+    -- Analytic circle/tangent/circle connections give the lattice a way to
+    -- drive around a block in one gear instead of making many short shunts.
+    -- Rank them by driving time, then sweep the complete chassis as usual.
+    local distance=node.position:distance_to(goal)
+    if distance<3 or distance>110 then return end
+    local radius,offset=turn_radius(shape),shape.rear_offset or 0
+    local candidates={}
+    local bearing=math.atan2(goal.x-node.position.x,goal.z-node.position.z)
+    local endpoint=v(goal.x-math.sin(bearing)*stop*0.65,goal.y,goal.z-math.cos(bearing)*stop*0.65)
+    for _,sign in ipairs({1,-1}) do
+        local start=node.yaw+(sign<0 and math.pi or 0)
+        local rear=v(node.position.x-math.sin(node.yaw)*offset,node.position.y,node.position.z-math.cos(node.yaw)*offset)
+        for i=0,7 do
+            local target=bearing+i*math.pi/4
+            local tail=v(endpoint.x-math.sin(target)*offset,endpoint.y,endpoint.z-math.cos(target)*offset)
+            target=target+(sign<0 and math.pi or 0)
+            for _,first in ipairs({-1,1}) do
+                for _,last in ipairs({-1,1}) do
+                    local r0,r1=first*radius,last*radius
+                    local x=tail.x+math.cos(target)*r1-rear.x-math.cos(start)*r0
+                    local z=tail.z-math.sin(target)*r1-rear.z+math.sin(start)*r0
+                    local squared=x*x+z*z
+                    local difference=r1-r0
+                    if squared>difference*difference+0.01 then
+                        local heading=math.atan2(x,z)-math.asin(difference/math.sqrt(squared))
+                        local a=first>0 and (heading-start)%(2*math.pi) or (start-heading)%(2*math.pi)
+                        local b=last>0 and (target-heading)%(2*math.pi) or (heading-target)%(2*math.pi)
+                        local straight=math.sqrt(squared-difference*difference)
+                        local turn=(a+b)*radius
+                        if turn+straight<=distance*2.5+50 then
+                            candidates[#candidates+1]={sign=sign,first=first,last=last,a=a*radius,b=b*radius,straight=straight,
+                                cost=sign<0 and (turn+straight)/2.2 or turn/2.2+straight/5}
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(candidates,function(a,b) return a.cost<b.cost end)
+    for index,candidate in ipairs(candidates) do
+        if max_candidates and index>max_candidates then break end
+        if max_cost and candidate.cost>max_cost then break end
+        checkpoint()
+        local p,yaw,trace=node.position,node.yaw,{}
+        for _,segment in ipairs({{candidate.first,candidate.a},{0,candidate.straight},{candidate.last,candidate.b}}) do
+            if segment[2]>0.01 then
+                local tail,reason
+                p,yaw,reason,tail=arc(p,yaw,candidate.sign*segment[1]/radius,candidate.sign*segment[2],shape,ignore,true,avoid,checkpoint)
+                if not p then break end
+                for _,pose in ipairs(tail) do trace[#trace+1]=pose end
+            end
+        end
+        if p and p:distance_to(goal)<=stop then
+            return {position=p,yaw=yaw,parent=node,trace=trace}
+        end
+    end
+end
+
+function swept_drive(origin,heading,steer,distance,shape,ignore)
+    -- The planner reserves 50 cm for tracking error. Requiring that whole
+    -- reserve again around the actual rolling pose leaves zero tolerance
+    -- for tyre slip and repeatedly discards otherwise safe manoeuvres.
+    -- Keep a live 15 cm emergency envelope outside the real chassis.
+    local rolling=shape
+    local reserve=math.max(0,(shape.margin or 0)-0.15)
+    if reserve>0 then
+        rolling={}
+        for key,value in pairs(shape) do rolling[key]=value end
+        rolling.x,rolling.z=shape.x-reserve,shape.z-reserve
+        rolling.radius=math.sqrt(rolling.x^2+rolling.z^2)
+    end
+    return arc(origin,heading,steer/(shape.steer_radius or turn_radius(shape)),distance,rolling,ignore,true,nil,nil,true)
+end
+
+function control_speed(origin,heading,steer,requested,velocity,shape,ignore,limit)
+    -- Try a slow manoeuvre before discarding a route. Always include actual
+    -- velocity in the stopping envelope; a lower target is not an instant brake.
+    local sign=requested<0 and -1 or 1
+    local last,reason
+    for _,candidate in ipairs({math.abs(requested),math.min(2,math.abs(requested)),math.min(1,math.abs(requested)),math.min(0.5,math.abs(requested))}) do
+        if candidate~=last then
+            last=candidate
+            local speed=math.max(math.abs(velocity),candidate)
+            local travel=speed*speed/5+speed*0.4+0.6
+            if limit then
+                -- Close to a checked endpoint, do not demand clearance
+                -- beyond it merely for the minimum look-ahead padding.
+                -- Actual braking distance still wins: a nearby endpoint
+                -- cannot make an already fast vehicle stop instantly.
+                local actual=math.abs(velocity)
+                travel=math.max(actual*actual/5+actual*0.4+0.15,math.min(travel,math.max(0.15,limit)))
+            end
+            local safe,_,why,_,_,_,cross_grade=swept_drive(origin,heading,steer,sign*travel,shape,ignore)
+            if safe then
+                -- Only lateral tilt needs this rollover speed limit. Using
+                -- the absolute longitudinal grade as well made a clear
+                -- uphill/downhill crawl even with full engine throttle.
+                -- Turns, steps and the live braking envelope still constrain
+                -- speed independently, including when driving in reverse.
+                local cap=(cross_grade or 0)>0.5 and 1.6 or (cross_grade or 0)>0.28 and 2.5 or math.huge
+                return math.min(candidate,cap)*sign
+            end
+            reason=why
+        end
+    end
+    return 0,reason
+end
+
+-- Local controller fallback: select a safe correction towards the already
+-- committed path, never choose a new destination or side of a global detour.
+function correct_steering(origin,heading,desired,track,requested,velocity,shape,ignore,limit)
+    local radius=shape.steer_radius or turn_radius(shape)
+    local planned=math.max(-1,math.min(1,(track.curvature or 0)*radius))
+    local best,best_angle,best_score,seen
+    seen={}
+    local crawl=math.min(1.2,math.abs(requested))*(requested<0 and -1 or 1)
+    for _,candidate in ipairs({planned,desired*0.5,0,desired-0.3,desired+0.3,-1,1}) do
+        candidate=math.max(-1,math.min(1,candidate))
+        local key=math.floor(candidate*100)
+        if not seen[key] then
+            seen[key]=true
+            local speed=control_speed(origin,heading,candidate,crawl,velocity,shape,ignore,limit)
+            if speed~=0 then
+                local point,yaw=arc_point(origin,heading,candidate/radius,(requested<0 and -1 or 1)*1.2,shape)
+                local offset=shape.rear_offset or 0
+                local dx,dz=point.x-math.sin(yaw)*offset-track.goal.x,point.z-math.cos(yaw)*offset-track.goal.z
+                local score=dx*dx+dz*dz+0.5*math.abs(candidate-desired)
+                if not best_score or score<best_score then best,best_angle,best_score=speed,candidate,score end
+            end
+        end
+    end
+    return best,best_angle
+end
+
+function retreat(origin,heading,steer,shape,ignore)
+    -- Reverse is a controller recovery, not a replacement route. Prefer
+    -- straight retreat before swinging an end of the chassis into a wall.
+    for _,candidate in ipairs({0,-steer,steer,-0.6,0.6}) do
+        local p=swept_drive(origin,heading,candidate,-2.5,shape,ignore)
+        if p then return candidate end
+    end
+end
+
+function route_clear_ahead(path,index,shape,ignore)
+    local length=0
+    local previous=path[index-1] or path.start
+    for i=index,#path do
+        local point=path[i]
+        if previous then length=length+point.position:distance_to(previous.position) end
+        if length>12 then break end
+        local fits,_,reason=clear(point.position,math.sin(point.yaw or 0),math.cos(point.yaw or 0),shape,ignore,true,true)
+        if not fits then return false,reason end
+        previous=point
+    end
+    return true
+end
+
+function start_route(origin, goal, stop_distance, heading, arrival_limit)
+    local yaw=heading or math.atan2(goal.x-origin.x,goal.z-origin.z)
+    local key=route_key(origin,yaw)
+    local start={key=key,position=origin,yaw=yaw,length=0,score=origin:distance_to(goal)}
+    return {frontier={start},best={},goal=goal,stop=math.max(stop_distance,arrival_limit or stop_distance),
+        preferred_stop=stop_distance,
+        expanded=0,origin=origin,heading=yaw,closest=start,closest_distance=start.score,started=time_global()}
+end
+
+local function finish(node)
+    local segments,route={},{}
+    while node.parent do
+        segments[#segments+1]=node.trace
+        node=node.parent
+    end
+    -- Keep the checked curve, including orientation and direction changes.
+    -- Connecting only its end points lets the driver cut inside obstacles.
+    route.start={position=node.position,yaw=node.yaw}
+    for i=#segments,1,-1 do
+        for _,point in ipairs(segments[i]) do route[#route+1]=point end
+    end
+    return route
+end
+
+-- A cheap ground corridor guides the expensive, heading-aware hull search.
+-- It is a heuristic only: no cell or straight line from this map is ever
+-- handed to the driver without the complete swept-body validation below.
+local function corridor(search,shape,ignore,checkpoint)
+    local size=3
+    local function coordinate(n) return math.floor(n/size+0.5) end
+    local sx,sz=coordinate(search.origin.x),coordinate(search.origin.z)
+    local gx,gz=coordinate(search.goal.x),coordinate(search.goal.z)
+    -- Detours may leave the source/goal rectangle by any distance. Bound
+    -- CPU/memory with the search budget below, not a spatial fence or the
+    -- final arrival radius; a bridge may be far from the straight line.
+    local cells,distances,frontier,penalties,closed={},{},{},{},{}
+    local function key(x,z) return x..":"..z end
+    local function cell(x,z,y)
+        local k=key(x,z)
+        if cells[k]~=nil then return cells[k] or nil end
+        checkpoint()
+        local hit=cast(x*size,y+3.5,z*size,0,-1,0,7,rq_target.rqtStatic,ignore)
+        if not hit then cells[k]=false;return end
+        local p=v(x*size,y+3.5-hit.range,z*size)
+        local radius=math.max(0.8,shape.x-0.25)
+        if dynamic_clear(p,0,1,{x=radius,z=radius,height=shape.height,radius=radius},ignore,false) then
+            cells[k]=false;return
+        end
+        local ground={}
+        for _,d in ipairs({{-radius,0},{radius,0},{0,-radius},{0,radius}}) do
+            local h=cast(p.x+d[1],p.y+2.5,p.z+d[2],0,-1,0,5,rq_target.rqtStatic,ignore)
+            if not h then cells[k]=false;return end
+            ground[#ground+1]=p.y+2.5-h.range
+        end
+        local gx,gz=(ground[2]-ground[1])/(2*radius),(ground[4]-ground[3])/(2*radius)
+        if gx*gx+gz*gz>0.9^2 then cells[k]=false;return end
+        -- A point-sized shortest corridor can lead an eight-metre chassis
+        -- into repeated impossible turns. Prefer room to manoeuvre while
+        -- keeping tight corridors available. This only changes the search
+        -- priority; the full swept hull still validates the final route.
+        local reach=shape.radius+1
+        local clearance=reach
+        for _,height in ipairs({0.3,0.9,shape.height*0.65}) do
+            for i=0,7 do
+                local angle=i*math.pi/4
+                local dx,dz=math.sin(angle),math.cos(angle)
+                local dy=gx*dx+gz*dz
+                local scale=math.sqrt(1+dy*dy)
+                local obstruction=cast(p.x,p.y+height,p.z,dx/scale,dy/scale,dz/scale,reach*scale,rq_target.rqtStatic,ignore)
+                if obstruction then
+                    local distance=obstruction.range/scale
+                    if distance<radius then cells[k]=false;return end
+                    clearance=math.min(clearance,distance)
+                end
+            end
+        end
+        cells[k]=p
+        penalties[k]=1+3*(reach-clearance)/(reach-radius)+2*(gx*gx+gz*gz)
+        return p
+    end
+    -- The snapped centre can touch a wall or the lip of an embankment even
+    -- when the real parked hull fits. In that case connect the heuristic
+    -- corridor to a neighbouring cell; the precise steering pass must still
+    -- check the complete connection from the actual pose.
+    local exact_start=cell(sx,sz,search.origin.y)~=nil
+    local start_neighbour=math.max(size*1.5,shape.x+size)
+    -- Seed all usable goal cells inside the requested stopping area. The
+    -- player's exact foot position need not accommodate the vehicle.
+    local reach=math.max(1,math.ceil(search.stop/size))
+    for x=gx-reach,gx+reach do
+        for z=gz-reach,gz+reach do
+            if (x*size-search.goal.x)^2+(z*size-search.goal.z)^2<=(search.stop+size*0.5)^2 then
+                local p=cell(x,z,search.goal.y)
+                if p then
+                    local k=key(x,z)
+                    distances[k]=0
+                    push(frontier,{x=x,z=z,position=p,distance=0,
+                        score=size*math.sqrt((x-sx)^2+(z-sz)^2),key=k})
+                end
+            end
+        end
+    end
+    local expanded=0
+    local reached
+    local directions={{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}}
+    while #frontier>0 and expanded<12000 do
+        checkpoint()
+        local node=pop(frontier)
+        if node.distance==distances[node.key] and not closed[node.key] then
+            closed[node.key]=true
+            expanded=expanded+1
+            -- A* reaches the vehicle before flooding unrelated parts of the
+            -- map. Keep the explored field as a reusable routing heuristic.
+            if (node.x==sx and node.z==sz) or (not exact_start and
+                node.position:distance_to(search.origin)<=start_neighbour) then reached=node;break end
+            for _,dir in ipairs(directions) do
+                local x,z=node.x+dir[1],node.z+dir[2]
+                local k=key(x,z)
+                local p=cell(x,z,node.position.y)
+                local cost=((penalties[k] or 1)+(penalties[node.key] or 1))/2
+                local length=node.distance+size*(dir[1]~=0 and dir[2]~=0 and 1.4142135624 or 1)*cost
+                if not closed[k] and length<(distances[k] or math.huge) then
+                    if p and math.abs(p.y-node.position.y)<size*0.85*(dir[1]~=0 and dir[2]~=0 and 1.4142135624 or 1) then
+                        local diagonal=dir[1]~=0 and dir[2]~=0
+                        if not diagonal or (cell(x,node.z,node.position.y) and cell(node.x,z,node.position.y)) then
+                            distances[k]=length
+                            push(frontier,{x=x,z=z,position=p,distance=length,parent=node,
+                                score=length+3*size*math.sqrt((x-sx)^2+(z-sz)^2),key=k})
+                        end
+                    end
+                end
+            end
+        end
+    end
+    search.corridor_cells=expanded
+    if reached then
+        local spine={search.origin}
+        while reached do
+            spine[#spine+1]=reached.position
+            reached=reached.parent
+        end
+        search.spine=spine
+    end
+    local final_goal,final_stop=search.goal,search.stop
+    local extra=math.max(0,(distances[key(sx,sz)] or 0)-search.origin:distance_to(final_goal))
+    return function(p)
+        local x,z=coordinate(p.x),coordinate(p.z)
+        local d=distances[key(x,z)]
+        if d then return d end
+        local nearest
+        for dx=-1,1 do
+            for dz=-1,1 do
+                local n=distances[key(x+dx,z+dz)]
+                if n then nearest=math.min(nearest or math.huge,n+size*math.sqrt(dx*dx+dz*dz)) end
+            end
+        end
+        return nearest or math.max(0,p:distance_to(final_goal)-final_stop)+extra
+    end
+end
+
+local function find_route(search,shape,ignore,checkpoint)
+    if not search.origin_checked then
+        search.origin_checked=true
+        local yaw=search.frontier[1].yaw
+        -- A coarse occupied cell at the edge of the reserve is not proof
+        -- that the current hull overlaps something. Check the one actual
+        -- starting pose exactly before deciding it needs an escape manoeuvre.
+        local origin_shape={}
+        for key,value in pairs(shape) do if key~="probe_map" then origin_shape[key]=value end end
+        local origin_ok,_,origin_reason=clear(search.origin,math.sin(yaw),math.cos(yaw),origin_shape,ignore,true,true,checkpoint)
+        search.origin_reason=origin_reason
+        if not origin_ok then
+            -- An old driver may have stopped with its 0.5 m safety margin
+            -- overlapping a wall. No full-margin route can then even start.
+            -- Escape only if the actual hull (still with 5 cm clearance)
+            -- fits, and only along a checked low-speed curve ending outside.
+            local reserve=math.max(0,(shape.margin or 0.5)-0.05)
+            local actual={x=math.max(0.3,shape.x-reserve),z=math.max(0.6,shape.z-reserve),margin=0.05,
+                height=shape.height,bottom=shape.bottom,turn_radius=turn_radius(shape),
+                steer_radius=shape.steer_radius,rear_offset=shape.rear_offset,body_floor=shape.body_floor}
+            actual.radius=math.sqrt(actual.x^2+actual.z^2)
+            if clear(search.origin,math.sin(yaw),math.cos(yaw),actual,ignore,true,true) then
+                search.escape={shape=actual,clearance=origin_shape,index=0,yaw=yaw}
+            end
+        end
+    end
+    if search.escape then
+        local escape=search.escape
+        while escape.index<30 do
+            local index=escape.index
+            escape.index=escape.index+1
+            local distances={-1.5,-2.7,-3.6,1.5,2.7,3.6}
+            local turns={0,-0.5,0.5,-1,1}
+            local length=distances[math.floor(index/5)+1]
+            local turn=turns[index%5+1]
+            local point,yaw,_,trace=arc(search.origin,escape.yaw,turn/turn_radius(shape),length,escape.shape,ignore,true,nil,checkpoint)
+            local released=point~=nil
+            if released then
+                -- The escape must finish outside the full tracking reserve,
+                -- including the final approach/braking tolerance. A coarse
+                -- cached cell at just the endpoint used to approve 1.5 m
+                -- shunts which ended still overlapping the reserve; the next
+                -- search then chose the opposite shunt forever.
+                for _,pose in ipairs(trace) do
+                    if math.abs(length)-math.abs(pose.travel)<=0.8 and
+                        not clear(pose.position,math.sin(pose.yaw),math.cos(pose.yaw),escape.clearance,ignore,true,true,checkpoint) then
+                        released=false;break
+                    end
+                end
+            end
+            if released then
+                trace.start={position=search.origin,yaw=escape.yaw}
+                trace.escape_shape=escape.shape
+                trace.endpoint_tolerance=0.25
+                return "partial",trace
+            end
+            coroutine.yield("searching")
+        end
+        search.escape=nil
+    end
+    -- Open roads should not first flood thousands of coarse cells.
+    local start=search.frontier[1]
+    local preferred=math.min(search.stop,search.preferred_stop or search.stop)
+    local connected=goal_arc(start,search.goal,preferred,shape,ignore,search.avoid,checkpoint)
+        or tangent_goal(start,search.goal,preferred,shape,ignore,search.avoid,checkpoint)
+    if not connected and search.origin:distance_to(search.goal)<=search.stop then
+        return "done",finish(start)
+    end
+    if not connected and preferred<search.stop then
+        -- The order names an arrival area, not an exact parking pose. Try
+        -- the preferred radius first, then the allowed outer area before
+        -- spending a global search on an inaccessible centre point.
+        connected=goal_arc(start,search.goal,search.stop,shape,ignore,search.avoid,checkpoint)
+            or tangent_goal(start,search.goal,search.stop,shape,ignore,search.avoid,checkpoint)
+    end
+    connected=connected or wide_goal(start,search.goal,search.stop,shape,ignore,search.avoid,checkpoint,nil,6)
+    if connected then return "done",finish(connected) end
+    local estimate=search.corridor_hint or corridor(search,shape,ignore,checkpoint)
+    search.corridor_hint=estimate
+    -- Choose the entire ground corridor first. Refine a useful length of
+    -- that same corridor into a drivable trajectory, while the controller
+    -- consumes the previous checked section. Searching all steering states
+    -- across a distant level before moving exhausted the frontier in place.
+    -- This is not a greedy fragment towards the player: the target band is
+    -- on a corridor already connected to the final destination. A single
+    -- arbitrary anchor can sit at an awkward bend; accept a checked pose
+    -- anywhere along the next useful band instead of parking to reach it.
+    if search.spine and not search.final_goal and search.origin:distance_to(search.goal)>70 then
+        local closest,index=math.huge,1
+        for i,p in ipairs(search.spine) do
+            local d=p:distance_to(search.origin)
+            if d<closest then closest,index=d,i end
+        end
+        local travelled,target=0,index
+        local anchors,next_anchor={},30
+        for i=index+1,#search.spine do
+            travelled=travelled+search.spine[i]:distance_to(search.spine[i-1])
+            if travelled>=next_anchor and i<#search.spine then
+                -- A bend can put a distant-along-path cell back beside the
+                -- origin. Never accept an empty section already inside its
+                -- radius; it would cause endless zero-progress replanning.
+                if search.spine[i]:distance_to(search.origin)>25 then
+                    anchors[#anchors+1]=search.spine[i]
+                    target=i
+                end
+                next_anchor=next_anchor+10
+            end
+            if travelled>=65 then break end
+        end
+        if #anchors>0 and target<#search.spine then
+            -- A steering manoeuvre can end beside the coarse centreline.
+            -- Keep its connected corridor and join the next area from the
+            -- real pose; requiring <10 m here silently fell back to a huge
+            -- full-distance heading search after a perfectly valid section.
+            search.final_goal,search.final_stop=search.goal,search.stop
+            search.anchors=anchors
+            -- This is a connection to the next corridor section, not final
+            -- arrival. A 20 m final-destination tolerance here could accept
+            -- a pose on the wrong side of a wall and skip the actual detour.
+            -- Several anchors allow a workable join without stopping at one
+            -- exact coarse centre; the driver's live steering may deviate.
+            search.goal,search.stop=anchors[1],6
+        end
+    end
+    local targets=search.anchors or {search.goal}
+    if search.anchors then
+        for _,target in ipairs(targets) do
+            local connected=goal_arc(start,target,search.stop,shape,ignore,search.avoid,checkpoint)
+                or tangent_goal(start,target,search.stop,shape,ignore,search.avoid,checkpoint)
+                or wide_goal(start,target,search.stop,shape,ignore,search.avoid,checkpoint,nil,2)
+            if connected then return "done",finish(connected) end
+        end
+    end
+    if search.final_goal then
+        -- Keep obstacle guidance when refining a section. Euclidean distance
+        -- alone repeatedly explored the blocked inside of the same bend.
+        -- Subtract the anchor's remaining corridor cost; retain Euclidean
+        -- distance as a lower bound so passing the anchor is not free.
+        local corridor_estimate,anchor_cost=estimate,{}
+        for i,target in ipairs(targets) do anchor_cost[i]=estimate(target) end
+        estimate=function(p)
+            local best,remaining=math.huge,corridor_estimate(p)
+            for i,target in ipairs(targets) do
+                best=math.min(best,math.max(0,p:distance_to(target)-search.stop,remaining-anchor_cost[i]))
+            end
+            return best
+        end
+    end
+    -- Keep the frontier while yielding. A wide detour may initially move
+    -- away from the goal; wall-clock timeout used to discard that work and
+    -- drive the same closest short fragment over and over.
+    while true do
+        checkpoint()
+        local node=pop(search.frontier)
+        search.examined=(search.examined or 0)+1
+        if not node or search.expanded>=6000 or search.examined>36000 then return "blocked" end
+        if node.length<(search.best[node.key] or math.huge) then
+            local valid=true
+            if node.parent then
+                -- Rank manoeuvres cheaply; sweep only a promising edge when
+                -- expanding it. Failed edges never close their destination.
+                local point,heading,reason,trace=arc(node.parent.position,node.parent.yaw,node.curvature,node.distance,
+                    shape,ignore,true,search.avoid,checkpoint)
+                if not point then search.last_reject=reason end
+                local shortened=false
+                if not point and trace and #trace>0 then
+                    local chosen
+                    for i=#trace,1,-1 do
+                        if math.abs(trace[i].travel)<=1.2 then chosen=i;break end
+                    end
+                    if chosen and math.abs(trace[chosen].travel)>=0.7 then
+                        while #trace>chosen do table.remove(trace) end
+                        local pose=trace[chosen]
+                        point,heading=pose.position,pose.yaw
+                        shortened=true
+                        node.length=node.parent.length+math.abs(pose.travel)*(node.reverse and 1.65 or 1)+
+                            math.abs(node.turn)*0.4+(node.parent.reverse~=nil and node.parent.reverse~=node.reverse and 10 or 0)
+                    end
+                end
+                valid=point~=nil
+                if valid then
+                    node.position,node.yaw,node.trace=point,heading,trace
+                    node.key=route_key(point,heading,shortened,node.reverse)
+                    valid=node.length<(search.best[node.key] or math.huge)
+                end
+            end
+            if valid then
+            search.best[node.key]=node.length
+            search.expanded=search.expanded+1
+            local p=node.position
+            for _,target in ipairs(targets) do
+                if p:distance_to(target)<=search.stop then return "done",finish(node) end
+            end
+            -- Commit only a route reaching the requested stopping area.
+            -- A short prefix which merely reduces the heuristic can end in
+            -- a cul-de-sac. Steering must not become a new route search at
+            -- every such prefix endpoint.
+            -- The corridor estimate includes clearance cost, not just metres.
+            -- Do not use it to forbid an otherwise reachable final arc.
+            if search.expanded%10==1 then
+                for _,target in ipairs(targets) do
+                    local connected=goal_arc(node,target,search.stop,shape,ignore,search.avoid,checkpoint)
+                        or tangent_goal(node,target,search.stop,shape,ignore,search.avoid,checkpoint)
+                    if connected then return "done",finish(connected) end
+                end
+            end
+            local turns={0,-1,1}
+            for _,distance in ipairs({3,-2.4}) do
+                for _,turn in ipairs(turns) do
+                    local reverse=distance<0
+                    local length=node.length+math.abs(distance)*(reverse and 1.65 or 1)+math.abs(turn)*0.4+
+                        (node.reverse~=nil and node.reverse~=reverse and 10 or 0)
+                    local guess,yaw=arc_point(p,node.yaw,turn/turn_radius(shape),distance,shape)
+                    local floor=ground_near(guess,ignore)
+                    -- A gradual slope can put the endpoint beyond the short
+                    -- height probe. Validate it by walking the full curve.
+                    local point=floor or guess
+                    local key=route_key(point,yaw,nil,reverse)
+                    if length<(search.best[key] or math.huge) then
+                        push(search.frontier,{key=key,position=point,yaw=yaw,length=length,parent=node,
+                            distance=distance,curvature=turn/turn_radius(shape),turn=turn,
+                            reverse=reverse,score=length+3.5*estimate(point)})
+                    end
+                end
+            end
+            end
+        end
+    end
+end
+
+function route_step(search,shape,ignore,budget)
+    local clock=os and os.clock
+    search.slice_end=clock and clock()+0.005
+    -- The clock is the frame budget. A tiny secondary probe counter used
+    -- to yield long before that budget on cheap/rejected edges, stretching
+    -- a modest search over hundreds of otherwise idle frames.
+    search.slice_left=math.max(1,budget or 1)*32
+    if not search.worker then
+        local function checkpoint(probe_only)
+            if search.slice_left<=0 or (clock and clock()>=search.slice_end) then
+                coroutine.yield("searching")
+            end
+            if not probe_only then search.slice_left=search.slice_left-1 end
+        end
+        search.worker=coroutine.create(function()
+            local function solve(current,envelope)
+                local probing={}
+                for k,value in pairs(envelope) do probing[k]=value end
+                probing.blocked_arcs={}
+                local regions={}
+                local mapped=obstacle_map(envelope,ignore,regions)
+                local attempt=1
+                while attempt<=4 do
+                    probing.probe_map=attempt<4 and mapped or nil
+                    local result,path=find_route(current,probing,ignore,checkpoint)
+                    if result=="partial" then return result,path end -- dense, checked escape from an old overlapping margin
+                    if result=="done" then
+                        local verified,failed,reason,position=verify_route(path,envelope,ignore,checkpoint)
+                        if verified then current.verified=true;return "done",verified end
+                        current.verification_retries=(current.verification_retries or 0)+1
+                        current.last_reject=reason
+                        if failed then probing.blocked_arcs[failed]=true end
+                        regions[#regions+1]=position
+                    elseif attempt<4 then
+                        -- A conservative map cell must not erase a usable
+                        -- narrow passage. Fall back to exact hull queries.
+                        attempt=3
+                    end
+                    attempt=attempt+1
+                    if attempt<=4 then
+                        local fresh=start_route(current.origin,current.goal,current.stop,current.heading)
+                        current.frontier,current.best=fresh.frontier,{}
+                        current.expanded,current.examined=0,0
+                        current.origin_checked,current.escape=nil,nil
+                    end
+                end
+                return "blocked"
+            end
+            local result,path=solve(search,shape)
+            if result=="blocked" and (shape.margin or 0.5)>0.15 then
+                -- Prefer a generous tracking reserve, but do not mistake
+                -- it for metal. A narrow passage may use 15 cm outside the
+                -- unchanged physical chassis. Validate the entire route
+                -- again and retain that envelope for its controller.
+                local precise={}
+                for k,value in pairs(shape) do precise[k]=value end
+                local shrink=(shape.margin or 0.5)-0.15
+                precise.x,precise.z,precise.margin=shape.x-shrink,shape.z-shrink,0.15
+                precise.radius=math.sqrt(precise.x^2+precise.z^2)
+                -- A budget-limited frontier may still contain a distant
+                -- pose. Retrying from the origin must retain its own yaw.
+                local retry=start_route(search.origin,search.goal,search.stop,search.heading)
+                retry.preferred_stop=search.preferred_stop
+                retry.corridor_hint=search.corridor_hint
+                retry.spine=search.spine
+                retry.final_goal,retry.final_stop,retry.anchors=search.final_goal,search.final_stop,search.anchors
+                search.precise=retry
+                result,path=solve(retry,precise)
+                search.expanded,search.last_reject=retry.expanded,retry.last_reject
+                if path then path.navigation_shape=precise end
+            end
+            return result,path
+        end)
+    end
+    local ok,result,path=coroutine.resume(search.worker)
+    if not ok then
+        if printf then printf("[ADB BTR] route search failed: "..tostring(result)) end
+        if search.final_goal then search.goal,search.stop=search.final_goal,search.final_stop end
+        return "blocked"
+    end
+    if result~="searching" and search.final_goal then
+        search.goal,search.stop=search.final_goal,search.final_stop
+        if path then path.continue=true end
+    end
+    if path and result=="done" and not path.continue then
+        -- Record the actual accepted arrival area for the driver. Otherwise
+        -- it would ignore a successful broad-radius plan and keep creeping
+        -- towards a sub-metre trajectory endpoint or the original marker.
+        local last=path[#path] or path.start
+        local distance=last.position:distance_to(search.goal)
+        path.arrival_radius=math.min(search.stop,math.max(search.preferred_stop or search.stop,
+            distance+0.75))
+        -- The tracker can finish half a metre before its last pose. Its
+        -- former 15 cm arrival allowance was smaller than that tolerance:
+        -- the driver discarded a completed route while still outside the
+        -- accepted area, then searched and escaped the same spot again.
+        -- Reserve room for stopping error without widening the user's area.
+        path.endpoint_tolerance=math.min(0.55,math.max(0.05,path.arrival_radius-distance-0.20))
+        -- Already inside the accepted area with no room to approach closer:
+        -- return an explicit stationary arrival, not an empty failed route.
+        if #path==0 then path[1]=last end
+    end
+    return result,path
+end
+
+function segment_clear(a,b,shape,ignore,dynamic)
+    local dx,dz,len=norm(b.x-a.x,b.z-a.z)
+    if len<0.01 or math.abs(a.y-b.y)>len*0.4 then return false end
+    local steps=math.max(1,math.ceil(len/1.5))
+    for i=1,steps do
+        local t=i/steps
+        local p=v(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t)
+        if not clear(p,dx,dz,shape,ignore,dynamic,true) then return false end
+    end
+    return true
+end
+
+ground_near=function(p,ignore)
+    local hit=cast(p.x,p.y+1.5,p.z,0,-1,0,3,rq_target.rqtStatic,ignore)
+    if hit then return v(p.x,p.y+1.5-hit.range,p.z) end
+end
+
+function ground_position(p,shape,ignore)
+    local floor=v(p.x,p.y+shape.bottom,p.z)
+    return ground_near(floor,ignore) or floor
+end
+
+function direct_leg(origin,target,stop,shape,ignore)
+    local dx,dz,distance=norm(target.x-origin.x,target.z-origin.z)
+    local reach=distance-stop
+    if reach<0.7 then return end
+    -- Short, swept segments can use asphalt even where pedestrian nodes
+    -- are missing or split by a guardrail.
+    local previous
+    for _,limit in ipairs({10,6,3,1.25}) do
+        local length=math.min(reach,limit)
+        if length~=previous then
+            local p=ground_near(v(origin.x+dx*length,origin.y,origin.z+dz*length),ignore)
+            if p and segment_clear(origin,p,shape,ignore,true) then return p end
+            previous=length
+        end
+    end
+end
+
+function direct_route(origin,target,stop,shape,ignore,heading)
+    local dx,dz,distance=norm(target.x-origin.x,target.z-origin.z)
+    local reach=distance-stop
+    -- Longer routes belong to the budgeted planner, never a synchronous
+    -- twelve-metre fragment masquerading as the complete destination.
+    if reach>12 then return end
+    if reach<0.7 then return end
+    local delta=math.atan2(math.cos(heading)*dx-math.sin(heading)*dz,
+        math.sin(heading)*dx+math.cos(heading)*dz)
+    if math.abs(delta)>0.18 then return end
+    local curvature=2*math.sin(delta)/reach
+    if math.abs(curvature)>1/turn_radius(shape) then return end
+    local point,_,_,trace=arc(origin,heading,curvature,reach,shape,ignore,true)
+    if not point then return end
+    trace.start={position=origin,yaw=heading}
+    return trace
+end
+
+local function angle_delta(a,b) return math.atan2(math.sin(a-b),math.cos(a-b)) end
+
+-- Project onto a short, monotonic window of the checked trajectory. Look
+-- ahead along it, never along a straight chord to an arbitrary later node.
+function track_route(path,index,position,heading,speed,rear_offset)
+    local offset=rear_offset or 0
+    local function reference(point)
+        local p,yaw=point.position,point.yaw or heading
+        return v(p.x-math.sin(yaw)*offset,p.y,p.z-math.cos(yaw)*offset)
+    end
+    position=v(position.x-math.sin(heading)*offset,position.y,position.z-math.cos(heading)*offset)
+    index=index or 1
+    if not path[index] then return {done=true,index=index} end
+    local reverse=path[index].reverse==true
+    local last=index
+    while path[last+1] and (path[last+1].reverse==true)==reverse do last=last+1 end
+    local nearest,best,tbest
+    for i=index,math.min(last,index+8) do
+        local before=path[i-1] or path.start or {position=position,yaw=heading}
+        local a,b=reference(before),reference(path[i])
+        local x,z=b.x-a.x,b.z-a.z
+        local t=math.max(0,math.min(1,((position.x-a.x)*x+(position.z-a.z)*z)/math.max(0.0001,x*x+z*z)))
+        local error=(position.x-a.x-x*t)^2+(position.z-a.z-z*t)^2
+        if not best or error<best then nearest,best,tbest=i,error,t end
+    end
+    local final=path[last]
+    local final_position=reference(final)
+    -- Route progress is horizontal. Suspension height and the rear axle's
+    -- height on a slope must not prevent reaching a gear-change point.
+    local final_gap=math.sqrt((position.x-final_position.x)^2+(position.z-final_position.z)^2)
+    -- Braking/tyre slip can carry the axle slightly beyond a cusp. Once
+    -- projected past that endpoint, do not chase it in the old gear forever
+    -- at minimum speed. Accept a small overrun, brake, then let the live hull
+    -- controller join the next leg from the real pose.
+    local cusp_overrun=last<#path and tbest>=0.99 and final_gap<=1.5
+    local endpoint_tolerance=last==#path and (path.endpoint_tolerance or 0.55) or 0.55
+    if nearest==last and tbest>0.4 and (final_gap<endpoint_tolerance or cusp_overrun) then
+        if last<#path then
+            -- A reverse/forward cusp is a real stop, not a rolling gear flip.
+            if math.abs(speed)>0.15 then return {stop=true,index=last,reverse=reverse} end
+            if final.yaw and math.abs(angle_delta(final.yaw,heading))>0.55 then
+                return {blocked="route_heading",index=last,reverse=reverse}
+            end
+            return track_route(path,last+1,v(position.x+math.sin(heading)*offset,position.y,
+                position.z+math.cos(heading)*offset),heading,speed,offset)
+        end
+        return {done=true,index=last+1}
+    end
+    -- Cross-track error belongs to steering. Losing a metre through tyre
+    -- slip is not evidence that the global route has become impassable.
+    -- Look farther along the same line to rejoin it smoothly; live swept
+    -- collision checking still limits every commanded movement.
+    local lookahead=math.max(1.6,math.min(5,1.6+math.abs(speed)*0.5+math.sqrt(best)))
+    local before=path[nearest-1] or path.start or {position=position,yaw=heading}
+    local a,b=reference(before),reference(path[nearest])
+    local projection=v(a.x+(b.x-a.x)*tbest,a.y+(b.y-a.y)*tbest,a.z+(b.z-a.z)*tbest)
+    local goal,yaw=final_position,final.yaw
+    local remaining,end_distance=0,0
+    local previous=projection
+    local found_goal=false
+    for i=nearest,last do
+        local point=path[i]
+        local point_position=reference(point)
+        local length=previous:distance_to(point_position)
+        end_distance=end_distance+length
+        if not found_goal and remaining+length>=lookahead then
+            local t=(lookahead-remaining)/math.max(0.0001,length)
+            goal=v(previous.x+(point_position.x-previous.x)*t,previous.y+(point_position.y-previous.y)*t,
+                previous.z+(point_position.z-previous.z)*t)
+            yaw=point.yaw
+            found_goal=true
+        end
+        remaining=remaining+length
+        previous=point_position
+    end
+    return {goal=goal,yaw=yaw,index=nearest,reverse=reverse,
+        curvature=path[nearest].curvature or 0,end_gap=final_gap,end_distance=end_distance,cusp=last<#path,
+        deviation=math.sqrt(best),projection=projection}
+end
+
+function drive_probe(origin,dx,dz,distance,shape,ignore)
+    local p=ground_near(v(origin.x+dx*distance,origin.y,origin.z+dz*distance),ignore)
+    return p and segment_clear(origin,p,shape,ignore,true)
+end
+
+function crosshair_ground(actor)
+    local camera=device()
+    local p,d=camera.cam_pos,camera.cam_dir
+    if not p or not d then return end
+    local hit=cast(p.x,p.y,p.z,d.x,d.y,d.z,150,rq_target.rqtBoth,actor)
+    if not hit or hit.object then return end
+    local point=v(p.x+d.x*hit.range,p.y+d.y*hit.range,p.z+d.z*hit.range)
+    local ground=ground_near(point,actor)
+    if ground and math.abs(ground.y-point.y)<0.5 then return ground end
+end

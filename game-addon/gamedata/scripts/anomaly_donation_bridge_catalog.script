@@ -1,0 +1,1186 @@
+local STATE_KEY = "__anomaly_donation_bridge_catalog_v1"
+local state = rawget(_G, STATE_KEY)
+local MONSTER_FACTIONS = {
+	monster = true, monster_predatory_day = true, monster_predatory_night = true,
+	monster_vegetarian = true, monster_zombied_day = true, monster_zombied_night = true
+}
+local MUTANT_CLASS_EXCLUDE = {
+	AI_STL_S = true, AI_TRD_S = true, AI_CROW = true, AI_PHANT = true,
+	AI_GRAPH = true, AI_SPGRP = true
+}
+local SAFE_ANOMALY_CLASSES = {
+	ZS_MBALD = true, ZS_MINCE = true, ZS_GALAN = true, ZS_BFUZZ = true,
+	ZS_ELECT = true, ZS_ACID = true
+}
+local HAND_GRENADE_CLASSES = {
+	G_F1 = true, G_RGD5 = true, G_F1_S = true, G_RGD5_S = true
+}
+-- Native equipment factories, including Anomaly's scripted server bindings.
+-- LTX slots are zero-based (PDA=7, backpack=12), and modpacks can move them.
+-- A slot, kind tag, registry entry or section name cannot prove a wearable type.
+local OUTFIT_CLASSES = {
+	EQU_SCIE = true, EQU_STLK = true, EQU_MLTR = true, EQU_EXO = true,
+	E_STLK = true
+}
+local HELMET_CLASSES = { EQ_HLMET = true, E_HLMET = true }
+
+local function equipment_item_category(class_name)
+	if OUTFIT_CLASSES[class_name] then return "outfits" end
+	if HELMET_CLASSES[class_name] then return "helmets" end
+	return nil
+end
+local UNSAFE_ITEM_CLASSES = {
+	S_EXPLO = true, O_PHYS_S = true, O_PHYSIC = true, O_INVBOX = true,
+	SCRPTZONE = true, SPACE_RESTRICTOR = true, LVL_CHNG = true,
+	SMRTTRRN = true, AI_GRAPH = true, AI_SPGRP = true
+}
+local BUILTIN_BLACKLIST = {
+	"^mp_", "_test", "test_", "_debug", "debug_", "_tutorial",
+	"campfire", "teleport", "nogravity", "minefield", "field_", "_field"
+}
+local spawner_blacklist = nil
+local spawner_blacklist_loaded = false
+local command_exclusions = nil
+
+if type(state) ~= "table" then
+	state = { entries = {}, by_section = {}, revision = "", content_hash = string.rep("0", 64),
+		generation = 0, initialized = false }
+	rawset(_G, STATE_KEY, state)
+end
+
+local function ini_value(ini, section, key)
+	return anomaly_donation_bridge_common.ini_string(ini, section, key)
+end
+
+-- X-Ray returns quoted LTX values verbatim on the stock 1.5.3 engine.  In
+-- particular every ordinary NPC and mutant uses `$spawn = "..."`.  Comparing
+-- that raw value with respawn\ / monsters\ quarantines the entire live spawn
+-- catalog.  Normalize only for structural path checks; keep ini_string itself
+-- unchanged because quotes may be meaningful in display/config values.
+local function normalized_spawn_path(value)
+	value = anomaly_donation_bridge_common.trim(value)
+	if #value >= 2 then
+		local first, last = value:sub(1, 1), value:sub(-1)
+		if (first == "\"" and last == "\"") or
+			(first == "'" and last == "'") then
+			value = anomaly_donation_bridge_common.trim(value:sub(2, -2))
+		end
+	end
+	return value:lower():gsub("/", "\\")
+end
+
+local function spawn_path_starts_with(value, prefix)
+	return value ~= nil and normalized_spawn_path(value):find(prefix, 1, true) == 1
+end
+
+local function load_spawner_blacklist()
+	if spawner_blacklist_loaded then return spawner_blacklist end
+	spawner_blacklist_loaded = true
+	if type(ini_file) ~= "function" then return nil end
+	local ok, value = pcall(ini_file, "plugins\\spawner_blacklist.ltx")
+	if ok and value ~= nil then spawner_blacklist = value end
+	return spawner_blacklist
+end
+
+function refresh_command_exclusions()
+	command_exclusions = nil
+	if type(ini_file) ~= "function" then return end
+	local ok, value = pcall(ini_file,
+		"plugins\\anomaly_donation_bridge_exclusions.ltx")
+	if ok and value ~= nil then command_exclusions = value end
+end
+
+local function is_user_excluded(section)
+	if command_exclusions == nil then return false end
+	local ok, excluded = pcall(function()
+		return command_exclusions:line_exist("excluded_sections", section)
+	end)
+	return ok and excluded == true
+end
+
+local function is_blacklisted(section)
+	local lower = section:lower()
+	-- These are the same structural exclusions used by Anomaly's stock debug
+	-- spawner.  They matter even when a modpack replaces or omits the plugin
+	-- blacklist file.
+	if lower:find("tch_", 1, true) or lower:find("mp_", 1, true) or
+		lower:find("_base", 1, true) then return true end
+	for _, pattern in ipairs(BUILTIN_BLACKLIST) do
+		if lower:find(pattern) ~= nil then return true end
+	end
+	local blacklist = load_spawner_blacklist()
+	if blacklist ~= nil then
+		local ok, ignored = pcall(function()
+			return blacklist:line_exist("ignore_sections", section)
+		end)
+		if ok and ignored == true then return true end
+	end
+	return false
+end
+
+local function strength_for(section, ini)
+	local lower = section:lower()
+	if lower:find("_weak") or lower:find("_novice") or lower:match("_[01]$") then
+		return "lite"
+	end
+	if lower:find("_strong") or lower:find("_expert") or lower:find("_master") or
+		lower:match("_[4-9]$") then return "strong" end
+	if lower:find("_normal") or lower:find("_experienced") or lower:find("_veteran") or
+		lower:match("_[23]$") then return "normal" end
+	local rank = tonumber(ini_value(ini, section, "rank"))
+	if rank ~= nil then
+		if rank < 300 then return "lite" end
+		if rank >= 700 then return "strong" end
+		return "normal"
+	end
+	return "unclassified"
+end
+
+local function truncate_utf8(value, maximum_bytes)
+	if #value <= maximum_bytes then return value end
+	local sequence_start = maximum_bytes
+	while sequence_start > 0 do
+		local byte = value:byte(sequence_start)
+		if byte == nil or byte < 128 or byte >= 192 then break end
+		sequence_start = sequence_start - 1
+	end
+	if sequence_start <= 0 then return "" end
+	local lead = value:byte(sequence_start)
+	local sequence_length = lead < 128 and 1 or lead < 224 and 2 or
+		lead < 240 and 3 or lead < 248 and 4 or 1
+	if sequence_start + sequence_length - 1 > maximum_bytes then
+		return value:sub(1, sequence_start - 1)
+	end
+	return value:sub(1, maximum_bytes)
+end
+
+local function safe_text(value, fallback, maximum_bytes)
+	local safe_fallback = anomaly_donation_bridge_common.game_text_utf8(fallback) or ""
+	value = anomaly_donation_bridge_common.game_text_utf8(value)
+	if value == nil then value = safe_fallback end
+	value = value:gsub("[%z\1-\31\127]", " ")
+	value = anomaly_donation_bridge_common.trim(value)
+	if value == "" then value = safe_fallback end
+	return truncate_utf8(value, maximum_bytes)
+end
+
+local function localize(token, fallback)
+	token = anomaly_donation_bridge_common.trim(token)
+	if token == "" then return fallback end
+	local ok, translated = pcall(function() return game.translate_string(token) end)
+	translated = ok and anomaly_donation_bridge_common.game_text_utf8(translated) or nil
+	translated = translated and anomaly_donation_bridge_common.trim(translated) or ""
+	if translated == "" or translated == token then translated = fallback end
+	return safe_text(translated, fallback, 512)
+end
+
+local function common_quarantine(ini, section)
+	if is_blacklisted(section) then return "blacklisted" end
+	if anomaly_donation_bridge_common.meaningful_story_id(
+		ini_value(ini, section, "story_id")) or section:lower():find("story") then
+		return "story_unique"
+	end
+	if anomaly_donation_bridge_common.ini_bool(ini, section, "quest_item") == true then
+		return "story_unique"
+	end
+	return nil
+end
+
+local SIMULATION_RANKS = {
+	novice = true, experienced = true, veteran = true,
+	expert = true, master = true
+}
+
+local function ordinary_simulation_profile(profile)
+	local lower = profile:lower()
+	if not lower:match("^sim_default_[%w_]+$") then return false end
+	-- The sim_default prefix alone is not a safety guarantee. Trader and
+	-- location-specific profiles can instantiate native story/AI state when
+	-- spawned outside their normal smart terrain. Require an ordinary rank.
+	if lower:find("trader", 1, true) or lower:find("guide", 1, true) or
+		lower:find("technician", 1, true) or lower:find("mechanic", 1, true) or
+		lower:find("medic", 1, true) then return false end
+	local rank = lower:match("_([^_]+)$")
+	if SIMULATION_RANKS[rank] then return true end
+	local number = tonumber(rank)
+	return number ~= nil and number == math.floor(number) and
+		number >= 0 and number <= 4
+end
+
+local function classify_actor(ini, section, class_name)
+    -- Private inherited sections are implementation details, not new catalog entries.
+    if section:find("^adb_mc2_") then return nil end
+	if class_name == "AI_STL_S" then
+		local profile = ini_value(ini, section, "character_profile")
+		local faction = ini_value(ini, section, "community") or
+			ini_value(ini, section, "character_community") or "unclassified"
+		local reason = common_quarantine(ini, section)
+		if reason == nil and profile == nil then reason = "missing_required_fields" end
+		-- CCharacterInfo resolves the profile after the server object is created.
+		-- An invalid/story profile asserts in native code and cannot be caught by
+		-- Lua pcall.  Only ordinary simulation ranks are candidates for direct
+		-- spawning; the sim_default prefix alone also covers scripted roles.
+		if reason == nil and not ordinary_simulation_profile(profile) then
+			reason = "scripted"
+		end
+		local lower = section:lower()
+		local profile_lower = profile and profile:lower() or ""
+		-- The section name is also authoritative: a scripted role can inherit a
+		-- generic rank profile, yet still run location-specific spawn callbacks.
+		if reason == nil and lower:find("sim_default_", 1, true) == 1 and
+			not ordinary_simulation_profile(section) then
+			reason = "scripted"
+		end
+		if reason == nil and (lower:find("_dead", 1, true) or
+			profile_lower:find("_dead", 1, true) or
+			ini_value(ini, section, "specific_character") ~= nil) then
+			reason = "scripted"
+		end
+		local custom_data = ini_value(ini, section, "custom_data")
+		if reason == nil and custom_data ~= nil and
+			custom_data:lower() ~= "default_custom_data.ltx" then
+			reason = "scripted"
+		end
+		local spawn_path = ini_value(ini, section, "$spawn")
+		if reason == nil and not spawn_path_starts_with(spawn_path, "respawn\\") then
+			reason = "invalid_structure"
+		end
+		return {
+			section_id = section, kind = "npc",
+			display_name = localize(ini_value(ini, section, "name"), section),
+			category = faction, strength = strength_for(section, ini), faction = faction,
+			available = reason == nil, quarantine_reason = reason or "none"
+		}
+	end
+	-- Vanilla Anomaly mutant server entities use SM_* classes (SM_DOG_S,
+	-- SM_BOARW, SM_BLOOD, and so on).  Some modified engines expose additional
+	-- AI_* mutant classes, so accept both families while keeping known NPC/meta
+	-- classes excluded.
+	if (class_name:find("^SM_") or class_name:find("^AI_")) and
+		not MUTANT_CLASS_EXCLUDE[class_name] then
+		local species = ini_value(ini, section, "species")
+		local visual = ini_value(ini, section, "visual")
+		if species == nil and visual == nil and not class_name:find("^SM_") then return nil end
+		local reason = common_quarantine(ini, section)
+		if reason == nil and (species == nil or visual == nil) then
+			reason = "missing_required_fields"
+		end
+		local lower = section:lower()
+		local species_lower = species and species:lower() or ""
+		local spawn_path = ini_value(ini, section, "$spawn")
+		-- Arena/corpse/script aliases often inherit an otherwise valid mutant
+		-- class, species and visual. Creating them through ALife can enter native
+		-- story logic which Lua cannot catch. Admit only ordinary monster spawn
+		-- descriptors; modded mutants remain supported when they follow the same
+		-- stock structural contract.
+		if reason == nil and not spawn_path_starts_with(spawn_path, "monsters\\") then
+			reason = "invalid_structure"
+		end
+		if reason == nil and (lower:find("_dead", 1, true) or
+			lower:find("corpse", 1, true) or lower:find("_arena", 1, true) or
+			lower:find("arena_", 1, true) or lower:find("_fake", 1, true)) then
+			reason = "scripted"
+		end
+		local generic = lower:find("_weak") or lower:find("_normal") or
+			lower:find("_strong") or lower:find("^sim_") or
+			(species_lower ~= "" and lower:find(species_lower, 1, true) == 1)
+		if reason == nil and not generic then reason = "scripted" end
+		return {
+			section_id = section, kind = "mutant",
+			display_name = localize(ini_value(ini, section, "name"), section),
+			category = species or class_name, strength = strength_for(section, ini),
+			faction = "monster", available = reason == nil,
+			native_class = class_name,
+			quarantine_reason = reason or "none"
+		}
+	end
+	return nil
+end
+
+local function squad_members_are_safe(ini, npc_list, expected_kind)
+	local count = 0
+	for token in (tostring(npc_list or "") .. ","):gmatch("(.-),") do
+		token = anomaly_donation_bridge_common.trim(token)
+		count = count + 1
+		if count > 256 or not anomaly_donation_bridge_common.valid_section_id(token) then
+			return false
+		end
+		local class_name = (ini_value(ini, token, "class") or ""):upper()
+		local member = classify_actor(ini, token, class_name)
+		if member == nil or member.kind ~= expected_kind or not member.available then
+			return false
+		end
+	end
+	return count > 0, count
+end
+
+local function valid_squad_count(value, fixed_count, has_random)
+	fixed_count = tonumber(fixed_count) or 0
+	if fixed_count > 10 then return false end
+	if not has_random then return fixed_count > 0 end
+	if value == nil then return fixed_count <= 2 end
+	local first, second = tostring(value):match("^%s*(%d+)%s*,?%s*(%d*)%s*$")
+	first = tonumber(first)
+	second = second ~= "" and tonumber(second) or first
+	return first ~= nil and second ~= nil and first >= 1 and first <= second and
+		second <= 10 and fixed_count <= second
+end
+
+local function classify_squad(ini, section, class_name, faction, npc_list, random_list)
+	if faction == nil or (npc_list == nil and random_list == nil) then return nil end
+	local lower = section:lower()
+	local relevant = lower:find("squad") or lower:find("simulation_") == 1
+	if not relevant then return nil end
+	local kind = MONSTER_FACTIONS[faction:lower()] and "mutant_squad" or "stalker_squad"
+	local reason = common_quarantine(ini, section)
+	local uses_random_profiles = random_list ~= nil
+	if reason == nil and class_name ~= "ON_OFF_S" then reason = "invalid_structure" end
+	if reason == nil and anomaly_donation_bridge_common.ini_bool(
+		ini, section, "common") ~= true then reason = "scripted" end
+	if reason == nil and not (uses_random_profiles or lower:find("sim_squad") or
+		lower:find("simulation_") == 1 or lower:find("random")) then reason = "scripted" end
+	if reason == nil and (ini_value(ini, section, "target_smart") ~= nil or
+		ini_value(ini, section, "spawn_vid") ~= nil or
+		ini_value(ini, section, "spawn_point") ~= nil) then reason = "scripted" end
+	local expected_kind = kind == "mutant_squad" and "mutant" or "npc"
+	local fixed_count = 0
+	if reason == nil and npc_list ~= nil then
+		local safe, count = squad_members_are_safe(ini, npc_list, expected_kind)
+		if not safe then reason = "invalid_structure" else fixed_count = count end
+	end
+	if reason == nil and random_list ~= nil and
+		not squad_members_are_safe(ini, random_list, expected_kind) then
+		reason = "invalid_structure"
+	end
+	if reason == nil and not valid_squad_count(
+		ini_value(ini, section, "npc_in_squad"), fixed_count, random_list ~= nil) then
+		reason = "invalid_structure"
+	end
+	return {
+		section_id = section, kind = kind,
+		display_name = localize(ini_value(ini, section, "name"), section),
+		category = faction, strength = strength_for(section, ini), faction = faction,
+		available = reason == nil, quarantine_reason = reason or "none"
+	}
+end
+
+local function classify_anomaly(ini, section, class_name)
+	if not class_name:find("^ZS_") and not class_name:find("^Z_") then return nil end
+	local lower = section:lower()
+	if not (lower:find("zone") or lower:find("anom")) then return nil end
+	local reason = common_quarantine(ini, section)
+	-- Torrid zones need an editor-authored CSE_Motion. ALife's fresh
+	-- CSE_ALifeTorridZone() has no motion, and its native net_Spawn calls
+	-- CObjectAnimator::Play with a null cycle. Lua pcall cannot catch that fatal.
+	if reason == nil and class_name == "ZS_TORRD" then
+		reason = "missing_required_fields"
+	end
+	if reason == nil and not SAFE_ANOMALY_CLASSES[class_name] then
+		reason = "unsupported_class"
+	end
+	if reason == nil and (ini_value(ini, section, "custom_data") ~= nil or
+		ini_value(ini, section, "known_info") ~= nil) then reason = "scripted" end
+	return {
+		section_id = section, kind = "anomaly",
+		display_name = localize(ini_value(ini, section, "name"), section),
+		category = class_name, strength = "unclassified", faction = "",
+		available = reason == nil, quarantine_reason = reason or "none"
+	}
+end
+
+local function inventory_category(ini, section)
+	return anomaly_donation_bridge_common.ini_string(
+		ini, "inventory_sort_registry", section)
+end
+
+local function inferred_item_category(ini, section, class_name, registered)
+	local lower, slot = section:lower(), tonumber(ini_value(ini, section, "slot"))
+	local equipment = equipment_item_category(class_name)
+	if equipment ~= nil then return equipment end
+	if HAND_GRENADE_CLASSES[class_name] then return "grenades" end
+	if class_name:find("ARTEFACT", 1, true) or class_name == "SCRPTART" or
+		lower:find("^af_") then return "artefacts" end
+	if class_name:find("AMMO", 1, true) or lower:find("^ammo_") then return "ammunition" end
+	if class_name:find("WP_", 1, true) == 1 or class_name:find("W_", 1, true) == 1 or
+		slot == 2 or slot == 3 then return "weapons" end
+	if class_name:find("DET_", 1, true) == 1 or lower:find("detector", 1, true) then
+		return "devices"
+	end
+	if registered ~= nil and registered ~= "outfits" and registered ~= "helmets" then return registered end
+	if ini_value(ini, section, "eat_health") ~= nil or
+		ini_value(ini, section, "eat_satiety") ~= nil or
+		ini_value(ini, section, "boost_time") ~= nil or
+		ini_value(ini, section, "use1_functor") ~= nil then return "consumables" end
+	return "unclassified"
+end
+
+local function explicitly_unsafe_item_class(section, class_name)
+	return UNSAFE_ITEM_CLASSES[class_name] == true or
+		class_name:find("^AI_") or class_name:find("^ZS?_") or
+		class_name:find("SCRIPT", 1, true) or class_name:find("PHYS", 1, true) or
+		section:lower():find("^veh_")
+end
+
+local function classify_item(ini, section, class_name)
+	local inv_name = ini_value(ini, section, "inv_name")
+	local registered_category = inventory_category(ini, section)
+	if inv_name == nil and registered_category == nil then return nil end
+	local valid_name = inv_name ~= nil and inv_name:lower() ~= "default"
+	local cost = tonumber(ini_value(ini, section, "cost")) or 0
+	local can_trade = anomaly_donation_bridge_common.ini_bool(ini, section, "can_trade")
+	local explicitly_unsafe = explicitly_unsafe_item_class(section, class_name)
+	local safe_class = class_name ~= "" and not explicitly_unsafe
+	local spawn_value = ini_value(ini, section, "$spawn")
+	local spawnable = spawn_value ~= nil and spawn_value:lower() ~= "off" and
+		spawn_value:lower() ~= "false" and spawn_value:lower() ~= "nil"
+	local structural_fields = 0
+	for _, key in ipairs({ "inv_weight", "visual", "slot", "use1_functor",
+		"eat_health", "eat_satiety", "boost_time", "artefact_activation_seq" }) do
+		if ini_value(ini, section, key) ~= nil then structural_fields = structural_fields + 1 end
+	end
+	if cost > 0 then structural_fields = structural_fields + 1 end
+	local stock_safe = valid_name and can_trade == true and
+		anomaly_donation_bridge_common.ini_bool(ini, section, "quest_item") == false and
+		not section:lower():find("^mp_") and cost > 0
+	local structurally_safe = stock_safe or (safe_class and
+		((spawnable and structural_fields >= 1) or structural_fields >= 2))
+	local reason = common_quarantine(ini, section)
+	if reason == nil and can_trade == false then
+		reason = "non_tradeable"
+	end
+	if reason == nil and anomaly_donation_bridge_common.ini_bool(ini, section, "can_take") == false then
+		reason = "non_tradeable"
+	end
+	if reason == nil and explicitly_unsafe then
+		reason = "unsupported_class"
+	end
+	if reason == nil and not valid_name then reason = "missing_required_fields" end
+	if reason == nil and not structurally_safe then reason = "invalid_structure" end
+	return {
+		section_id = section, kind = "item", display_name = localize(inv_name, section),
+		category = inferred_item_category(ini, section, class_name, registered_category),
+		strength = "unclassified", faction = "",
+		available = reason == nil, quarantine_reason = reason or "none"
+	}
+end
+
+local function classify(ini, section)
+	if not anomaly_donation_bridge_common.valid_section_id(section) then return nil end
+    if section:find("^adb_mc2_") or section:find("^adb_stationary_mgun_r%d+$") then return nil end
+    if section=="adb_wandering_trader" or section=="adb_btr_companion" or section=="adb_helicopter_boss" or section=="adb_helicopter_companion" or section=="adb_guitar_double" or
+        section=="adb_stationary_mgun" or section=="adb_stationary_mgun_blast" then return nil end
+	local class_name = (ini_value(ini, section, "class") or ""):upper()
+	if class_name=="SCRPTCAR" then
+		local vehicles=anomaly_donation_bridge_vehicle_catalog
+		local model=vehicles and vehicles.profile(ini,section)
+		if not model then return nil end
+		local reason=common_quarantine(ini,section)
+		local name=model.visual:gsub("/","\\"):match("([^\\]+)$") or section
+		return {section_id=section,kind="armed_vehicle",native_class=class_name,
+			display_name=localize(ini_value(ini,section,"name"),name),category="armed_vehicles",
+			strength="unclassified",faction="",available=reason==nil,quarantine_reason=reason or "none"}
+	end
+	if class_name=="C_HLCP_S" then
+		-- Model choices only: source sections are never spawned or attached to
+		-- the boss's AI. Do not confuse missiles/placed wrecks with helicopters.
+		local visual=ini_value(ini,section,"visual")
+		local reason=common_quarantine(ini,section)
+		if not reason and (not visual or visual=="") then reason="missing_required_fields" end
+		local model=visual and visual:gsub("/","\\"):match("([^\\]+)$") or section
+		return {section_id=section,kind="helicopter",native_class=class_name,
+			display_name=localize(ini_value(ini,section,"name"),model),category="helicopters",
+			strength=strength_for(section,ini),faction=ini_value(ini,section,"faction") or "",
+			available=reason==nil,quarantine_reason=reason or "none"}
+	end
+	local faction = ini_value(ini, section, "faction")
+	local npc_list = ini_value(ini, section, "npc")
+	local random_list = ini_value(ini, section, "npc_random")
+	local squad = classify_squad(
+		ini, section, class_name, faction, npc_list, random_list)
+	if squad ~= nil then return squad end
+	local actor_entry = classify_actor(ini, section, class_name)
+	if actor_entry ~= nil then return actor_entry end
+	local anomaly_entry = classify_anomaly(ini, section, class_name)
+	if anomaly_entry ~= nil then return anomaly_entry end
+	return classify_item(ini, section, class_name)
+end
+
+local function append_player_factions(ini, entries)
+	local added = {}
+	local function append(community, base)
+		community = anomaly_donation_bridge_common.trim(community)
+		base = anomaly_donation_bridge_common.trim(base)
+		if community == "" or community == "actor" or base == "" or
+			#community > 100 or #base > 100 or added[community] or
+			not community:match("^[A-Za-z0-9_%.%-]+$") or
+			not base:match("^[A-Za-z0-9_%.%-]+$") then return end
+		added[community] = true
+		entries[#entries + 1] = {
+			section_id = "adb_faction_" .. community,
+			kind = "faction",
+			display_name = localize("st_faction_" .. base, base),
+			category = "factions", strength = "unclassified",
+			faction = community, available = true,
+			quarantine_reason = "none"
+		}
+	end
+
+	-- Stock Anomaly exposes the playable faction set through game_relations;
+	-- this also follows modpacks which extend that table.  factions_table_all
+	-- is used, when present, to avoid inventing an actor community.
+	local relations = rawget(_G, "game_relations")
+	if type(relations) == "table" and type(relations.factions_table) == "table" then
+		local known = nil
+		if type(relations.factions_table_all) == "table" then
+			known = {}
+			for _, value in ipairs(relations.factions_table_all) do
+				known[tostring(value)] = true
+			end
+		end
+		for _, value in ipairs(relations.factions_table) do
+			local base = anomaly_donation_bridge_common.trim(value)
+			local community = "actor_" .. base
+			if known == nil or known[community] then append(community, base) end
+		end
+	end
+
+	-- Compatibility fallback for builds which expose the same mapping through
+	-- the merged system.ltx instead of the game_relations script table.
+	local raw = ini_value(ini, "game_relations", "communities")
+	if raw == nil then return end
+	local tokens = {}
+	for token in (raw .. ","):gmatch("(.-),") do
+		tokens[#tokens + 1] = anomaly_donation_bridge_common.trim(token)
+	end
+	for index = 1, #tokens, 2 do
+		local community = tokens[index]
+		local actor_mapping = community and
+			ini_value(ini, "actor_communities", community) or nil
+		if actor_mapping ~= nil then
+			local base = actor_mapping:match("^%s*([^,%s]+)") or
+				community:gsub("^actor_", "")
+			append(community, base)
+		end
+	end
+end
+
+-- Resolve songs from the RUNNING build's VFS (loose files, archives and MO2),
+-- not from a copied list of 28 vanilla filenames. Synthetic IDs are catalog
+-- tokens only: never inventory/NPC spawn sections or user-supplied sound paths.
+local function sound_exists(path)
+    if type(path)~="string" or type(getFS)~="function" then return false end
+    local ok,exists=pcall(function() return getFS():exist("$game_sounds$",path..".ogg") end)
+    return ok and not not exists
+end
+local function append_guitar_music(entries)
+    local paths,seen={},{}
+    if type(getFS)~="function" or not FS then return paths end
+    local prefixes={[[music\guitar_]]} -- stock actor's usable guitar, too
+    local theme=sound_theme and sound_theme.theme and sound_theme.theme.play_guitar
+    if theme and type(theme.path)=="string" and theme.prefix==false then
+        prefixes[#prefixes+1]=[[characters_voice\]]..theme.path
+    elseif type(ini_file)=="function" then
+        -- Sound themes may not have been instantiated yet on an empty level.
+        local ok,snd=pcall(ini_file,[[misc\sound\script_sound.ltx]])
+        if ok and snd then
+            local path=ini_value(snd,"play_guitar","path")
+            if path and anomaly_donation_bridge_common.ini_bool(snd,"play_guitar","npc_prefix")~=true then
+                local kind=ini_value(snd,"play_guitar","type")
+                prefixes[#prefixes+1]=(kind=="npc" and [[characters_voice\]] or "")..path
+            end
+        end
+    end
+    for _,prefix in ipairs(prefixes) do
+        prefix=prefix:lower():gsub("/","\\")
+        if #prefix<=220 and not prefix:find("..",1,true) and not prefix:find("[%z\1-\31]") then
+            local directory,stem=prefix:match("^(.*\\)([^\\]+)$")
+            if directory and stem then
+                local ok,list=pcall(function()
+                    return getFS():file_list_open("$game_sounds$",directory,bit_or(FS.FS_ListFiles,FS.FS_RootOnly))
+                end)
+                if ok and list then
+                    local scanned,why=pcall(function()
+                        if list:Size()>10000 then error("guitar_directory_limit") end
+                        for index=0,list:Size()-1 do
+                            local name=list:GetAt(index):lower()
+                            if #name<=180 and name:sub(-4)==".ogg" and name:sub(1,#stem)==stem and
+                                not name:find("[\\/%z\1-\31]") and not name:find("..",1,true) then
+                                local path=directory..name:sub(1,-5)
+                                if not seen[path] and sound_exists(path) then
+                                    if #entries>=100000 then error("catalog_entry_limit_exceeded") end
+                                    seen[path]=true
+                                    local id="adb_guitar_"..anomaly_donation_bridge_sha256.digest(path)
+                                    paths[id]=path
+                                    entries[#entries+1]={section_id=id,kind="guitar_music",display_name=safe_text(name:sub(1,-5),id,512),
+                                        category="guitar_music",strength="unclassified",faction="",available=true,quarantine_reason="none"}
+                                end
+                            end
+                        end
+                    end)
+                    list:Free()
+                    if not scanned then error(why) end
+                end
+            end
+        end
+    end
+    return paths
+end
+
+function guitar_sound(section)
+    local entry=state.by_section[tostring(section or "")]
+    local path=state.guitar_paths and state.guitar_paths[section]
+    if entry and entry.kind=="guitar_music" and entry.available and not is_user_excluded(section) and sound_exists(path) then return path end
+end
+
+local function game_graph_levels()
+	if type(game_graph) ~= "function" or type(alife) ~= "function" then return nil end
+	local ok, graph, simulator = pcall(function() return game_graph(), alife() end)
+	if not ok or graph == nil or simulator == nil then return nil end
+	return graph, simulator
+end
+
+local function graph_level_name(simulator, vertex)
+	local ok, name = pcall(function()
+		return simulator:level_name(vertex:level_id())
+	end)
+	if not ok or type(name) ~= "string" or name == "" or
+		#name > 100 or not name:match("^[A-Za-z0-9_%.%-]+$") then
+		return nil
+	end
+	return name
+end
+
+local function each_graph_vertex(callback)
+	local graph, simulator = game_graph_levels()
+	if graph == nil then return false end
+	for id = 0, 65534 do
+		local valid_ok, valid = pcall(function() return graph:valid_vertex_id(id) end)
+		if not valid_ok then return false end
+		if not valid then return true end
+		local vertex_ok, vertex = pcall(function() return graph:vertex(id) end)
+		if vertex_ok and vertex ~= nil then
+			local name = graph_level_name(simulator, vertex)
+			if name ~= nil and callback(id, name, vertex, graph) == true then return true end
+		end
+	end
+	return true
+end
+
+local function level_is_available(name)
+    if type(name) ~= "string" or name == "" then return false end
+    local found = false
+    local scanned = each_graph_vertex(function(id, vertex_name, vertex, graph)
+        if vertex_name == name then
+            local point_ok, point, level_id = pcall(function()
+                return vertex:level_point(), vertex:level_vertex_id()
+            end)
+            if point_ok and point ~= nil and type(level_id) == "number" then
+                found = true; return true
+            end
+        end
+        return false
+    end)
+	return scanned and found
+end
+
+local function append_levels(entries)
+    local seen = {}
+    each_graph_vertex(function(id, name, vertex, graph)
+        if not seen[name] then
+            local point_ok, point, level_id = pcall(function()
+                return vertex:level_point(), vertex:level_vertex_id()
+            end)
+            if point_ok and point ~= nil and type(level_id) == "number" then
+                seen[name] = true
+				entries[#entries + 1] = {
+					section_id = "adb_level_" .. name, kind = "level",
+					display_name = localize("st_level_" .. name, name),
+					category = "locations", strength = "unclassified",
+					faction = name, available = true, quarantine_reason = "none"
+				}
+			end
+		end
+		return false
+	end)
+end
+
+local COMPANION_SPECIES = "adb_mc2_companion"
+local function csv(value)
+	local result = {}
+	for token in (tostring(value or "") .. ","):gmatch("(.-),") do
+		result[#result + 1] = anomaly_donation_bridge_common.trim(token)
+	end
+	return result
+end
+
+-- Export the actual merged species order, team and attitude towards the actor.
+-- No vanilla species names/matrix are copied into the addon. Missing/invalid
+-- metadata disables V2 preparation only, not the ordinary spawn catalog.
+local function monster_communities(ini, entries)
+	local human_species={}
+	for _,entry in ipairs(entries or {}) do
+		if entry.kind=="npc" then
+			local species=ini_value(ini,entry.section_id,"species")
+			if species then human_species[species]=true end
+		end
+	end
+	local tokens = csv(ini_value(ini,"monster_communities","communities"))
+	if #tokens < 4 or #tokens > 258 or #tokens % 2 ~= 0 then return "" end
+	local names, teams, seen, actor_index, private_index = {}, {}, {}
+	for i=1,#tokens,2 do
+		local name, team = tokens[i], tonumber(tokens[i+1])
+		if #name>63 or not name:match("^[a-z0-9_]+$") or seen[name] or
+			not team or team<0 or team>255 or team~=math.floor(team) then return "" end
+		names[#names+1], teams[#teams+1], seen[name] = name, team, true
+		if name=="actor" then actor_index=#names end
+		if name==COMPANION_SPECIES then private_index=#names end
+	end
+	if not actor_index then return "" end
+	local profile=ini_value(ini,"adb_mc2_relations","profile")
+	if private_index and (private_index~=#names or (profile~="3" and profile~="5")) then return "" end
+	local rows, metadata, members = {}, {}, {}
+	local complete=true
+	for i,name in ipairs(names) do
+		local row=csv(ini_value(ini,"monster_relations",name))
+		-- A changed modpack may add a species before our final column. Its new
+		-- row (and our old generated row) can be short. Still export the valid
+		-- baseline to REPAIR the addon; never claim that this patch is ready.
+		if #row~=#names then
+			complete=false
+			if i~=private_index and not (private_index and #row==#names-1) then return "" end
+		end
+		for j,value in ipairs(row) do
+			local n=tonumber(value)
+			if not n or n~=math.floor(n) or n< -2 or n>1 then
+				if i~=private_index then return "" end
+				complete=false;n=0
+			end
+			row[j]=n
+		end
+		rows[i]=row
+		if i~=private_index then
+			if row[actor_index]==nil then return "" end
+			metadata[#metadata+1]=name..","..tostring(teams[i])..","..tostring(row[actor_index])..","..
+				(human_species[name] and "1" or "0")
+			members[#members+1]=name
+		end
+	end
+	-- The baseline remains exportable when OUR patch is stale, so the installer
+	-- can regenerate it. An unrelated colliding community was rejected above.
+	local ready=private_index~=nil and complete and profile=="5"
+	if private_index then
+		if ini_value(ini,"adb_mc2_relations","members")~=table.concat(members,",") then ready=false end
+		for i in ipairs(names) do
+			if rows[private_index][i]~=(i==private_index and 1 or i==actor_index and 0 or -1) or
+				(i~=private_index and rows[i][private_index]~=(human_species[names[i]] and -1 or rows[i][actor_index])) then ready=false end
+		end
+	end
+	local result=table.concat(metadata,";")
+	if #members<2 or #members>128 or #result>8192 then return "" end
+	return result, ready
+end
+
+function companion_relations_ready()
+	return ensure() and state.companion_relations_ready==true
+end
+
+local function content_hash(entries, communities)
+	local canonical = {}
+	for index, entry in ipairs(entries) do
+		canonical[index] = table.concat({
+			tostring(index - 1),
+			anomaly_donation_bridge_protocol.percent_encode(entry.section_id),
+			entry.kind,
+			anomaly_donation_bridge_protocol.percent_encode(entry.display_name),
+			anomaly_donation_bridge_protocol.percent_encode(entry.category),
+			entry.strength,
+			anomaly_donation_bridge_protocol.percent_encode(entry.faction),
+			entry.available and "1" or "0",
+			entry.quarantine_reason
+		}, "\t") .. (entry.native_class and entry.native_class ~= "" and
+            "\t" .. anomaly_donation_bridge_protocol.percent_encode(entry.native_class) or "") .. "\n"
+	end
+	if communities and communities~="" then
+		canonical[#canonical+1]="monster_communities\t" ..
+			anomaly_donation_bridge_protocol.percent_encode(communities).."\n"
+	end
+	return anomaly_donation_bridge_sha256.digest(table.concat(canonical))
+end
+
+function capable()
+	if type(system_ini) ~= "function" then return false end
+	local ok, ini = pcall(system_ini)
+	if not ok or ini == nil then return false end
+	for _, method_name in ipairs({ "section_for_each", "section_exist", "line_exist",
+		"r_string", "r_bool" }) do
+		local method_ok, method = pcall(function() return ini[method_name] end)
+		if not method_ok or type(method) ~= "function" then return false end
+	end
+	local hash_ok, empty_hash = pcall(function()
+		return anomaly_donation_bridge_sha256.digest("")
+	end)
+	return hash_ok and empty_hash ==
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+end
+
+function rebuild()
+	if not capable() then return false, "catalog_api_unavailable" end
+	-- Re-read the game's own spawner blacklist on every explicit catalog refresh,
+	-- so changing the modpack cannot leave a stale safety decision in memory.
+	spawner_blacklist, spawner_blacklist_loaded = nil, false
+	local ini = system_ini and system_ini() or nil
+	if ini == nil or type(ini.section_for_each) ~= "function" then
+		return false, "section_enumeration_unavailable"
+	end
+	local entries, seen, overflow = {}, {}, false
+	local ok = pcall(function()
+		ini:section_for_each(function(section)
+			section = tostring(section or "")
+			if not seen[section] then
+				seen[section] = true
+				local classified_ok, entry = pcall(classify, ini, section)
+				if classified_ok and entry ~= nil then
+					entry.display_name = safe_text(entry.display_name, section, 512)
+					entry.category = safe_text(entry.category, "unclassified", 256)
+					entry.faction = safe_text(entry.faction, "", 128)
+					if #entries >= 100000 then overflow = true
+					else entries[#entries + 1] = entry end
+				end
+			end
+			-- The native X-Ray binding exposes a bool functor: true stops the
+			-- iteration, false continues it. Returning nil raises a luabind cast
+			-- error on the real engine even though permissive Lua mocks accept it.
+			return false
+		end)
+	end)
+	if not ok then return false, "section_enumeration_failed" end
+	local factions_ok = pcall(append_player_factions, ini, entries)
+	if not factions_ok then return false, "faction_enumeration_failed" end
+	local levels_ok = pcall(append_levels, entries)
+	if not levels_ok then return false, "level_enumeration_failed" end
+	local music_ok,music_paths=pcall(append_guitar_music,entries)
+	if not music_ok then return false,"guitar_enumeration_failed" end
+    -- Profile/mesh inspection runs only on explicit catalogue rebuild. An
+    -- unsupported optional visual catalogue must not disable normal templates.
+    if anomaly_donation_bridge_npc_visuals and anomaly_donation_bridge_npc_visuals.append_special then
+        anomaly_donation_bridge_npc_visuals.append_special(entries,ini)
+    end
+	if overflow or #entries > 100000 then return false, "catalog_entry_limit_exceeded" end
+	table.sort(entries, function(left, right)
+		if left.kind ~= right.kind then return left.kind < right.kind end
+		if left.category ~= right.category then return left.category < right.category end
+		if left.display_name ~= right.display_name then return left.display_name < right.display_name end
+		return left.section_id < right.section_id
+	end)
+	local relations_ok, communities, installed_relations=pcall(monster_communities,ini,entries)
+	if not relations_ok then communities="" end
+	local hash, hash_error = content_hash(entries, communities)
+	if hash == nil then return false, hash_error end
+	state.generation = (state.generation or 0) + 1
+	state.entries, state.by_section, state.content_hash = entries, {}, hash
+	state.guitar_paths=music_paths
+	state.monster_communities=communities
+	state.companion_relations_ready=relations_ok and installed_relations==true
+	local pid = anomaly_donation_bridge_transport.process_id()
+	state.revision = hash .. "-" .. tostring(pid) .. "-" .. tostring(state.generation)
+	for _, entry in ipairs(entries) do state.by_section[entry.section_id] = entry end
+	state.initialized = true
+	return true
+end
+
+function ensure()
+	if state.initialized then return true end
+	return rebuild()
+end
+
+function invalidate()
+	state.entries, state.by_section, state.revision = {}, {}, ""
+	state.guitar_paths={}
+	state.content_hash, state.initialized = string.rep("0", 64), false
+end
+
+function snapshot()
+	local ok, error_code = ensure()
+	if not ok then return nil, error_code end
+	return { entries = state.entries, revision = state.revision,
+		content_hash = state.content_hash, count = #state.entries,
+		monster_communities=state.monster_communities or "" }
+end
+
+function is_spawn_safe(section, kind)
+	section = tostring(section or "")
+	if not anomaly_donation_bridge_common.valid_section_id(section) or
+		type(system_ini) ~= "function" then return false end
+	local ini_ok, ini = pcall(system_ini)
+	if not ini_ok or ini == nil then return false end
+	local exists_ok, exists = pcall(function() return ini:section_exist(section) end)
+	if not exists_ok or exists ~= true then return false end
+	local classified_ok, entry = pcall(classify, ini, section)
+	return classified_ok and entry ~= nil and entry.kind == kind and
+		entry.available == true
+end
+
+local function resolved_member_list(value)
+	local result = {}
+	if value == nil then return result end
+	for token in (tostring(value) .. ","):gmatch("(.-),") do
+		token = anomaly_donation_bridge_common.trim(token)
+		if #result >= 10 or not anomaly_donation_bridge_common.valid_section_id(token) then
+			return nil
+		end
+		result[#result + 1] = token
+	end
+	return result
+end
+
+-- Resolve a safe squad descriptor into ordinary actor sections before entering
+-- the native spawn API. The bridge deliberately does not create a persistent
+-- sim_squad_scripted object: a group created at a smart terrain and then moved
+-- next to the actor retains stale smart/simulation state and may crash the
+-- engine during a later save. The returned members have already passed the
+-- exact same structural classifier used by the direct NPC/mutant presets.
+function resolve_squad_members(section, kind)
+	section = tostring(section or "")
+	if kind ~= "stalker_squad" and kind ~= "mutant_squad" then
+		return nil, "squad_kind_invalid"
+	end
+	if not is_spawn_safe(section, kind) then
+		return nil, "spawn_section_unsafe"
+	end
+	local ini_ok, ini = pcall(system_ini)
+	if not ini_ok or ini == nil then return nil, "catalog_unavailable" end
+	local fixed = resolved_member_list(ini_value(ini, section, "npc"))
+	local random = resolved_member_list(ini_value(ini, section, "npc_random"))
+	if fixed == nil or random == nil then return nil, "squad_members_invalid" end
+	local expected_kind = kind == "mutant_squad" and "mutant" or "npc"
+	for _, member in ipairs(fixed) do
+		if not is_spawn_safe(member, expected_kind) then
+			return nil, "squad_member_unsafe"
+		end
+	end
+	for _, member in ipairs(random) do
+		if not is_spawn_safe(member, expected_kind) then
+			return nil, "squad_member_unsafe"
+		end
+	end
+
+	local result = {}
+	for _, member in ipairs(fixed) do result[#result + 1] = member end
+	if #random > 0 then
+		local count_value = ini_value(ini, section, "npc_in_squad")
+		local first, second = tostring(count_value or ""):match(
+			"^%s*(%d+)%s*,?%s*(%d*)%s*$")
+		first = tonumber(first)
+		second = second ~= "" and tonumber(second) or first
+		if first == nil or second == nil or first < 1 or first > second or second > 10 then
+			return nil, "squad_count_invalid"
+		end
+		local total = math.max(#result, math.random(first, second))
+		while #result < total do
+			result[#result + 1] = random[math.random(1, #random)]
+		end
+	end
+	if #result < 1 or #result > 10 then return nil, "squad_count_invalid" end
+	return result, nil, expected_kind
+end
+
+function validate_revision(params)
+	if not ensure() then return false, "catalog_unavailable" end
+	if type(params) ~= "table" or tostring(params.catalog_revision or "") ~= state.revision then
+		return false, "catalog_revision_mismatch"
+	end
+	return true
+end
+
+function validate_section(params, key, kind)
+	local revision_ok, revision_error = validate_revision(params)
+	if not revision_ok then return nil, revision_error end
+	local section = tostring(params[key] or "")
+	if not anomaly_donation_bridge_common.valid_section_id(section) then
+		return nil, "section_id_invalid"
+	end
+	local entry = state.by_section[section]
+	if entry == nil or entry.kind ~= kind then return nil, "catalog_section_missing" end
+	if is_user_excluded(section) then return nil, "catalog_section_user_excluded" end
+	if not entry.available then return nil, "catalog_section_quarantined_" .. entry.quarantine_reason end
+	if kind=="guitar_music" then
+		if not guitar_sound(section) then return nil,"catalog_sound_unavailable" end
+	elseif kind == "npc_visual" then
+        if not anomaly_donation_bridge_npc_visuals.resolve(section) then return nil,"catalog_model_unavailable" end
+	elseif kind == "level" then
+		if not level_is_available(entry.faction) then
+			return nil, "catalog_level_unavailable"
+		end
+	elseif not anomaly_donation_bridge_common.section_exists(section) then
+		return nil, "catalog_section_stale"
+	end
+	if (kind == "npc" or kind == "mutant" or kind == "stalker_squad" or
+		kind == "mutant_squad" or kind == "anomaly" or kind == "helicopter" or kind == "armed_vehicle") and not is_spawn_safe(section, kind) then
+		return nil, "catalog_section_safety_changed"
+	end
+	return entry
+end
+
+function validate_sections(params, key, kind)
+	local revision_ok, revision_error = validate_revision(params)
+	if not revision_ok then return nil, revision_error end
+	local sections, parse_error = anomaly_donation_bridge_common.split_csv(params[key])
+	if sections == nil then return nil, parse_error end
+	local entries = {}
+	for _, section in ipairs(sections) do
+		local entry = state.by_section[section]
+		local still_exists = entry ~= nil and (kind == "faction" or kind == "level" or kind=="guitar_music" or kind=="npc_visual" or
+			anomaly_donation_bridge_common.section_exists(section))
+		local safe_now = kind == "faction" or kind == "item" or
+			(kind=="guitar_music" and guitar_sound(section)~=nil) or
+            (kind=="npc_visual" and anomaly_donation_bridge_npc_visuals.resolve(section)~=nil) or
+			(kind == "level" and entry ~= nil and level_is_available(entry.faction)) or
+			is_spawn_safe(section, kind)
+		if entry == nil or entry.kind ~= kind or is_user_excluded(section) or
+			not entry.available or not still_exists or
+			not safe_now then
+			return nil, "catalog_selection_stale_or_quarantined"
+		end
+		entries[#entries + 1] = entry
+	end
+	return entries
+end
+
+function is_available(section, kind)
+	if not ensure() then return false end
+	local entry = state.by_section[tostring(section or "")]
+	return entry ~= nil and entry.kind == kind and entry.available == true and
+		not is_user_excluded(entry.section_id) and
+		(kind=="guitar_music" and guitar_sound(entry.section_id)~=nil or
+        kind=="npc_visual" and anomaly_donation_bridge_npc_visuals.resolve(entry.section_id)~=nil or
+		kind == "level" and level_is_available(entry.faction) or
+		anomaly_donation_bridge_common.section_exists(entry.section_id) and
+		((kind == "item" or kind == "faction") or is_spawn_safe(entry.section_id, kind)))
+end
+
+function is_weapon(section)
+	if not ensure() then return false end
+	local entry = state.by_section[tostring(section or "")]
+	if entry == nil or entry.kind ~= "item" or not entry.available or
+		is_user_excluded(entry.section_id) or
+		not anomaly_donation_bridge_common.section_exists(entry.section_id) then return false end
+	local ini = system_ini and system_ini() or nil
+	if ini == nil then return false end
+	local class_name = (ini_value(ini, entry.section_id, "class") or ""):upper()
+	local slot = tonumber(ini_value(ini, entry.section_id, "slot"))
+	return class_name:find("WP_", 1, true) == 1 or
+		class_name:find("W_", 1, true) == 1 or slot == 2 or slot == 3
+end
+
+function is_outfit(section)
+	if not ensure() then return false end
+	local entry = state.by_section[tostring(section or "")]
+	if entry == nil or entry.kind ~= "item" or not entry.available or
+		is_user_excluded(entry.section_id) or
+		not anomaly_donation_bridge_common.section_exists(entry.section_id) then return false end
+	local ini = system_ini and system_ini() or nil
+	if ini == nil then return false end
+	local class_name = (ini_value(ini, entry.section_id, "class") or ""):upper()
+	return equipment_item_category(class_name) == "outfits"
+end
+
+function is_helmet(section)
+	if not ensure() then return false end
+	local entry = state.by_section[tostring(section or "")]
+	if entry == nil or entry.kind ~= "item" or not entry.available or
+		is_user_excluded(entry.section_id) or
+		not anomaly_donation_bridge_common.section_exists(entry.section_id) then return false end
+	local ini = system_ini and system_ini() or nil
+	if ini == nil then return false end
+	local class_name = (ini_value(ini, entry.section_id, "class") or ""):upper()
+	return equipment_item_category(class_name) == "helmets"
+end
+
+function is_artifact(section)
+	if not ensure() then return false end
+	local entry = state.by_section[tostring(section or "")]
+	if entry == nil or entry.kind ~= "item" or not entry.available or
+		is_user_excluded(entry.section_id) or
+		not anomaly_donation_bridge_common.section_exists(entry.section_id) then return false end
+	local ini = system_ini and system_ini() or nil
+	if ini == nil then return false end
+	local class_name = (ini_value(ini, entry.section_id, "class") or ""):upper()
+	return class_name:find("ARTEFACT", 1, true) ~= nil or class_name == "SCRPTART" or
+		entry.section_id:lower():find("^af_") ~= nil
+end
+
+local function random_available_item(predicate, empty_error)
+	if not ensure() then return nil, "catalog_unavailable" end
+	local candidates = {}
+	for _, entry in ipairs(state.entries) do
+		if entry.kind == "item" and entry.available and predicate(entry.section_id) then
+			candidates[#candidates + 1] = entry
+		end
+	end
+	if #candidates == 0 then return nil, empty_error end
+	return candidates[math.random(#candidates)]
+end
+
+function random_available_weapon()
+	return random_available_item(is_weapon, "random_weapon_pool_empty")
+end
+
+function random_available_outfit()
+	return random_available_item(is_outfit, "random_outfit_pool_empty")
+end
+
+function random_available_helmet()
+	return random_available_item(is_helmet, "random_helmet_pool_empty")
+end
+
+function random_available_artifact()
+	return random_available_item(is_artifact, "random_artifact_pool_empty")
+end
+
+function compatible_ammo(section)
+	section = tostring(section or "")
+	if not is_weapon(section) then return nil, "weapon_section_invalid" end
+	local ini = system_ini and system_ini() or nil
+	if ini == nil then return nil, "catalog_unavailable" end
+	local raw = ini_value(ini, section, "ammo_class")
+	if raw == nil or raw == "" then return nil, "weapon_has_no_ammo" end
+	for candidate in tostring(raw):gmatch("[^,]+") do
+		candidate = anomaly_donation_bridge_common.trim(candidate)
+		if anomaly_donation_bridge_common.valid_section_id(candidate) and
+			is_available(candidate, "item") then return candidate end
+	end
+	return nil, "compatible_ammo_unavailable"
+end
+
+function random_available_anomaly()
+	if not ensure() then return nil, "catalog_unavailable" end
+	local candidates = {}
+	for _, entry in ipairs(state.entries) do
+		if entry.kind == "anomaly" and entry.available and
+			not is_user_excluded(entry.section_id) and
+			is_spawn_safe(entry.section_id, "anomaly") then
+			candidates[#candidates + 1] = entry
+		end
+	end
+	if #candidates == 0 then return nil, "random_anomaly_pool_empty" end
+	return candidates[math.random(#candidates)]
+end
+
+function random_available(kind)
+	if kind ~= "npc" and kind ~= "mutant" and kind ~= "npc_visual" then
+		return nil, "random_catalog_kind_invalid"
+	end
+	if not ensure() then return nil, "catalog_unavailable" end
+	local candidates = {}
+	for _, entry in ipairs(state.entries) do
+		if entry.kind == kind and entry.available and
+			not is_user_excluded(entry.section_id) and
+			(kind=="npc_visual" and anomaly_donation_bridge_npc_visuals.resolve(entry.section_id)~=nil or
+            kind~="npc_visual" and anomaly_donation_bridge_common.section_exists(entry.section_id) and
+            is_spawn_safe(entry.section_id, kind)) then
+			candidates[#candidates + 1] = entry
+		end
+	end
+	if #candidates == 0 then return nil, "random_" .. kind .. "_pool_empty" end
+	return candidates[math.random(#candidates)]
+end

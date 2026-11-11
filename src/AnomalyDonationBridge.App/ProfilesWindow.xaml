@@ -1,0 +1,106 @@
+<Window x:Class="AnomalyDonationBridge.App.ProfilesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Профили — Anomaly Donation Bridge"
+        Width="700" Height="530" MinWidth="600" MinHeight="430"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
+    <Grid Margin="20,16,20,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="ПРОФИЛИ" Style="{StaticResource EyebrowTextStyle}"
+                       Foreground="{DynamicResource AccentBrush}" />
+            <TextBlock Text="Наборы шаблонов для разных стилей игры" FontSize="21" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextBrush}" Margin="0,2,0,0" />
+            <TextBlock Text="В профиль входят пользовательские шаблоны, активные варианты с назначенными суммами и голосования. Подключения, очередь, история и общие настройки остаются общими."
+                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,7,0,0" />
+        </StackPanel>
+
+        <Border Grid.Row="1" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="8">
+            <ListBox x:Name="ProfilesList" SelectionChanged="ProfilesList_SelectionChanged"
+                     MouseDoubleClick="ProfilesList_MouseDoubleClick"
+                     Background="Transparent" BorderThickness="0"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="Margin" Value="0,0,0,6" />
+                        <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <Border x:Name="Card" Background="{DynamicResource PanelBrush}"
+                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                            CornerRadius="6" Padding="13,11">
+                                        <ContentPresenter />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Card" Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+                                        </Trigger>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter TargetName="Card" Property="Background" Value="{DynamicResource SelectionSurfaceBrush}" />
+                                            <Setter TargetName="Card" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                            <Setter Property="Foreground" Value="{DynamicResource SelectionTextBrush}" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold"
+                                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" />
+                                <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,0">
+                                    <Run Text="Пользовательских: " /><Run Text="{Binding UserPresetCount}" />
+                                    <Run Text="  ·  Активных: " /><Run Text="{Binding ActiveActionCount}" />
+                                </TextBlock>
+                            </StackPanel>
+                            <Border Grid.Column="1" Background="{DynamicResource GoodDarkBrush}" CornerRadius="4"
+                                    Padding="9,4" VerticalAlignment="Center" Visibility="{Binding ActiveVisibility}">
+                                <TextBlock Text="ИСПОЛЬЗУЕТСЯ" Foreground="{DynamicResource GoodBrush}" FontSize="10" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal">
+                <Button Content="+ Создать" Click="Create_Click" Padding="13,7"
+                        Style="{StaticResource AccentOutlineButtonStyle}" />
+                <Button x:Name="RenameButton" Content="Переименовать" Click="Rename_Click" Margin="8,0,0,0" Padding="13,7" />
+                <Button x:Name="DeleteButton" Content="Удалить" Click="Delete_Click" Margin="8,0,0,0" Padding="13,7"
+                        Style="{StaticResource DangerButtonStyle}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button x:Name="UseButton" Content="Использовать" Click="Use_Click" Padding="15,7"
+                        Style="{StaticResource AccentOutlineButtonStyle}" />
+                <Button Content="Закрыть" IsCancel="True" Margin="8,0,0,0" Padding="15,7" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

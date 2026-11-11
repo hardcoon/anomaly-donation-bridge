@@ -1,0 +1,136 @@
+{
+  "revision": "vanilla-153-session-1",
+  "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "entries": [
+    {
+      "sectionId": "dog_normal",
+      "kind": "Mutant",
+      "displayName": "Слепой пёс",
+      "category": "Собаки",
+      "strength": "Lite",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "chimera_strong",
+      "kind": "Mutant",
+      "displayName": "Химера",
+      "category": "Химеры",
+      "strength": "Strong",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "sim_default_stalker_1",
+      "kind": "Npc",
+      "displayName": "Одиночка-новичок",
+      "category": "Одиночки",
+      "strength": "Lite",
+      "faction": "stalker",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "sim_default_bandit_3",
+      "kind": "Npc",
+      "displayName": "Бандит-ветеран",
+      "category": "Бандиты",
+      "strength": "Strong",
+      "faction": "bandit",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "bandit_sim_squad_novice",
+      "kind": "StalkerSquad",
+      "displayName": "Отряд бандитов",
+      "category": "Бандиты",
+      "strength": "Lite",
+      "faction": "bandit",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "merc_sim_squad_veteran",
+      "kind": "StalkerSquad",
+      "displayName": "Отряд наёмников",
+      "category": "Наёмники",
+      "strength": "Strong",
+      "faction": "killer",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "simulation_dog",
+      "kind": "MutantSquad",
+      "displayName": "Стая слепых псов",
+      "category": "Собаки",
+      "strength": "Lite",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "simulation_chimera",
+      "kind": "MutantSquad",
+      "displayName": "Стая химер",
+      "category": "Химеры",
+      "strength": "Strong",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "medkit",
+      "kind": "Item",
+      "displayName": "Аптечка",
+      "category": "Медицина",
+      "strength": "Unclassified",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "bread",
+      "kind": "Item",
+      "displayName": "Хлеб",
+      "category": "Еда",
+      "strength": "Unclassified",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "zone_mine_electric_weak",
+      "kind": "Anomaly",
+      "displayName": "Электра",
+      "category": "Электрические",
+      "strength": "Lite",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "adb_faction_actor_bandit",
+      "kind": "Faction",
+      "displayName": "Бандиты",
+      "category": "Группировки",
+      "strength": "Unclassified",
+      "faction": "actor_bandit",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "adb_faction_actor_stalker",
+      "kind": "Faction",
+      "displayName": "Одиночки",
+      "category": "Группировки",
+      "strength": "Unclassified",
+      "faction": "actor_stalker",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    }
+  ]
+}

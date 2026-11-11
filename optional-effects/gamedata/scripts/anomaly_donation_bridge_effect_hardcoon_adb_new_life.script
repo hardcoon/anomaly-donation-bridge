@@ -1,0 +1,26 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.new_life",
+  "displayName":"Новая жизнь",
+  "description":"Переселяет в случайного живого обычного сталкера. Задания, деньги и прогресс сохраняются. По умолчанию человеческие напарники остаются с прошлым телом; настройку можно отключить. Квестовые сопровождаемые остаются у игрока. Если инвентарь не сохраняется, передаёт настоящее оружие и вещи NPC и надевает соответствующие костюм и шлем. Квестовые и служебные вещи игрока остаются всегда. Сюжетные NPC, участники заданий и напарники не выбираются.",
+  "category":"player_state",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"keep_inventory","displayName":"Сохранять инвентарь игрока","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"keep_faction","displayName":"Сохранять группировку игрока","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"hostile_previous_body","displayName":"Делать враждебным прошлое тело","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"any_location","displayName":"Выбирать NPC на любой локации","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"quest_previous_body","displayName":"Вешать квест на прошлое тело","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"leave_companions","displayName":"Оставлять напарников прошлому телу","kind":"Choice","options":["false","true"],"defaultValue":"true"}
+  ],
+  "parameters":{"keep_inventory":"false","keep_faction":"true","hostile_previous_body":"true","any_location":"false","quest_previous_body":"true","leave_companions":"true"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+-- Shared transaction service is installed with the addon; no other preset is required.
+function sleep_midpoint() return anomaly_donation_bridge_reincarnation.sleep_midpoint() end
+function sleep_finish() return anomaly_donation_bridge_reincarnation.sleep_finish() end
+function relife_complete(id) return anomaly_donation_bridge_reincarnation.relife_complete(id) end
+function relife_fail(id) return anomaly_donation_bridge_reincarnation.relife_fail(id) end
+function on_game_start() anomaly_donation_bridge_reincarnation.register_new_life() end

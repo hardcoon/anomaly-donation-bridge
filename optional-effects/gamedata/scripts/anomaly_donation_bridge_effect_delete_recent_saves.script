@@ -1,0 +1,174 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"delete_recent_saves",
+  "displayName":"Удалить последние N сохранений",
+  "description":"Убирает последние N сохранений из списка загрузки; 999 означает все. Комплект файлов переносится в savedgames\\ADB_Removed и может быть восстановлен.",
+  "category":"world",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"count","displayName":"Количество последних сохранений","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"1"}
+  ],
+  "parameters":{"count":"1"}
+}
+ADB_PRESET_END]]
+
+local function safe_save_name(name)
+	return type(name) == "string" and #name > 5 and #name <= 120 and
+		name:lower():match("%.scop$") ~= nil and
+		name:find("[/\\:%z\1-\31]") == nil and
+		name:sub(1, 1) ~= "."
+end
+
+local function filesystem()
+	if type(getFS) ~= "function" or FS == nil or io == nil or
+		type(io.open) ~= "function" then return nil end
+	local ok, fs = pcall(getFS)
+	if not ok or fs == nil then return nil end
+	return fs
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params,
+		{ count = true })
+	if not valid then return false, "rejected", reason end
+	local count, count_error = anomaly_donation_bridge_common.parse_integer(
+		params.count, 1, 1, 999, "save_count_invalid")
+	if count == nil then return false, "rejected", count_error end
+	if filesystem() == nil then return false, "rejected", "save_fs_unavailable" end
+	context.options = { count = count }
+	return true
+end
+
+local function physically_exists(path)
+	local ok, handle = pcall(io.open, path, "rb")
+	if ok and handle ~= nil then handle:close(); return true end
+	return false
+end
+
+local function move_checked(fs, source_relative, destination_relative)
+	local source = fs:update_path("$game_saves$", source_relative)
+	local destination = fs:update_path("$game_saves$", destination_relative)
+	if type(source) ~= "string" or type(destination) ~= "string" or
+		#source > 250 or #destination > 250 or
+		not physically_exists(source) or physically_exists(destination) then
+		return false
+	end
+	local rename_ok = pcall(function()
+		fs:file_rename(source, destination, false)
+	end)
+	local old_ok, old = pcall(function()
+		return fs:exist("$game_saves$", source_relative)
+	end)
+	local new_ok, new = pcall(function()
+		return fs:exist("$game_saves$", destination_relative)
+	end)
+	return rename_ok and old_ok and not old and new_ok and new and
+		not physically_exists(source) and physically_exists(destination)
+end
+
+local function archive_save(fs, main_name)
+	local root_ok, save_root = pcall(function()
+		return fs:update_path("$game_saves$", "")
+	end)
+	if not root_ok or type(save_root) ~= "string" or
+		#save_root + #main_name + #"ADB_Removed\\1000\\" > 245 then
+		return false, "save_archive_path_too_long"
+	end
+	local base = main_name:sub(1, -6)
+	local companions = { base .. ".scoc", base .. ".dds" }
+	local parts = {}
+	for _, name in ipairs(companions) do
+		local exists_ok, exists = pcall(function()
+			return fs:exist("$game_saves$", name)
+		end)
+		if not exists_ok then return false, "save_companion_probe_failed" end
+		if exists then parts[#parts + 1] = name end
+	end
+	parts[#parts + 1] = main_name -- Make the load-menu entry disappear last.
+	local archive_root = nil
+	for suffix = 1, 1000 do
+		local candidate = "ADB_Removed\\" .. suffix .. "\\"
+		local free = true
+		for _, name in ipairs(parts) do
+			local probe_ok, exists = pcall(function()
+				return fs:exist("$game_saves$", candidate .. name)
+			end)
+			if not probe_ok or exists then free = false; break end
+		end
+		if free then archive_root = candidate; break end
+	end
+	if archive_root == nil then return false, "save_archive_slot_unavailable" end
+	local moved = {}
+	for _, name in ipairs(parts) do
+		local destination = archive_root .. name
+		if not move_checked(fs, name, destination) then
+			local rolled_back = true
+			local source_path = fs:update_path("$game_saves$", name)
+			local archive_path = fs:update_path("$game_saves$", destination)
+			if not physically_exists(source_path) and
+				physically_exists(archive_path) and
+				not move_checked(fs, destination, name) then
+				rolled_back = false
+			end
+			for index = #moved, 1, -1 do
+				local previous = moved[index]
+				if not move_checked(fs, archive_root .. previous, previous) then
+					rolled_back = false
+				end
+			end
+			return false, rolled_back and "save_archive_failed_rolled_back" or
+				"save_archive_failed_partial"
+		end
+		moved[#moved + 1] = name
+	end
+	return true
+end
+
+local function execute(context)
+	local fs = filesystem()
+	if fs == nil then return "rejected", "save_fs_unavailable" end
+	local flags = FS.FS_ListFiles + FS.FS_RootOnly
+	local ok, listing = pcall(function()
+		return fs:file_list_open_ex("$game_saves$", flags, "*.scop")
+	end)
+	if not ok or listing == nil then return "rejected", "save_list_unavailable" end
+	local sorted = pcall(function() listing:Sort(FS.FS_sort_by_modif_down) end)
+	if not sorted then return "rejected", "save_sort_unavailable" end
+	local moved = 0
+	local count_ok, available = pcall(function() return listing:Size() end)
+	if not count_ok or tonumber(available) == nil or available > 100000 then
+		return "rejected", "save_list_invalid"
+	end
+	for index = 0, available - 1 do
+		if context.options.count ~= 999 and moved >= context.options.count then break end
+		local name_ok, name = pcall(function() return listing:GetAt(index):NameShort() end)
+		if name_ok and safe_save_name(name) then
+			local archived, archive_error = archive_save(fs, name)
+			if not archived then
+				return "uncertain", archive_error .. "_after_" .. moved
+			end
+			moved = moved + 1
+		end
+	end
+	return "executed", "recent_saves_archived_" .. moved ..
+		"_requested_" .. context.options.count .. "_recoverable"
+end
+
+local function supported()
+	local fs = filesystem()
+	return fs ~= nil and type(fs.file_list_open_ex) == "function" and
+		type(fs.file_rename) == "function" and type(fs.update_path) == "function",
+		"save_fs_unavailable"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"delete_recent_saves", {
+			can_execute = can_execute, execute = execute,
+			is_supported = supported
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] delete_recent_saves registration failed: %s", tostring(reason))
+	end
+end

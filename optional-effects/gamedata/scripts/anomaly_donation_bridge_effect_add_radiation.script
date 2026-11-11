@@ -1,0 +1,746 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "add_radiation",
+  "displayName": "Добавить радиацию",
+  "description": "Изменяет уровень радиационного заражения актёра.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "percent",
+      "displayName": "Изменение, %",
+      "kind": "Percent",
+      "minimum": -100,
+      "maximum": 100,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "25",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "percent": "25"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_actor_effects_v1"
+local state = rawget(_G, STATE_KEY)
+local DRUNK_EFFECT_ID = 29781
+local TOLERANCE = 0.005
+-- Anomaly's in-game UI consumes legacy Windows-1251 bytes.  Keep the source
+-- itself ASCII/UTF-8-safe and build every Russian PDA fragment explicitly in
+-- CP1251 so it cannot turn into UTF-8 mojibake ("Рџ...") after packaging.
+local PDA_TEXT = {
+	received = string.char(207, 238, 235, 243, 247, 229, 237, 238, 58, 32),
+	lost = string.char(207, 238, 242, 229, 240, 255, 237, 238, 58, 32),
+	rubles = string.char(32, 240, 243, 225, 235, 229, 233),
+	faction_changed = string.char(195, 240, 243, 239, 239, 232, 240, 238, 226,
+		234, 224, 32, 232, 231, 236, 229, 237, 229, 237, 224),
+	god_started = string.char(195, 238, 228, 45, 236, 238, 228, 32, 226, 234,
+		235, 254, 247, 184, 237, 32, 237, 224, 32),
+	god_seconds = string.char(32, 241, 229, 234, 46),
+	god_finished = string.char(195, 238, 228, 45, 236, 238, 228, 32, 226, 251,
+		234, 235, 254, 247, 229, 237, 46)
+}
+
+if type(state) ~= "table" then
+	state = {
+		drunk_expires_at = 0,
+		drunk_cleanup_pending = false,
+		god_expires_at = 0,
+		god_previous = false,
+		god_active = false,
+		weapon_waits = {}
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.drunk_cleanup_pending) ~= "boolean" then
+	state.drunk_cleanup_pending = false
+end
+if type(state.weapon_waits) ~= "table" then state.weapon_waits = {} end
+if type(state.god_expires_at) ~= "number" then state.god_expires_at = 0 end
+if type(state.god_active) ~= "boolean" then state.god_active = false end
+
+local function register(action_id, can_execute, execute, update, on_game_load,
+	on_level_changing, is_supported)
+	return anomaly_donation_bridge_registry.register_builtin(action_id, {
+		can_execute = can_execute, execute = execute, update = update,
+		on_game_load = on_game_load, on_level_changing = on_level_changing,
+		is_supported = is_supported
+	})
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function actor_api_supported(context, methods, numeric_property, reason)
+	local actor = actor_for_probe(context)
+	if actor == nil then return false, reason end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return actor[method_name] end)
+		if not ok or type(method) ~= "function" then return false, reason end
+	end
+	if numeric_property ~= nil then
+		local ok, value = pcall(function() return actor[numeric_property] end)
+		value = tonumber(value)
+		if not ok or value == nil or value ~= value or value < 0 or value > 1 then
+			return false, reason
+		end
+	end
+	return true
+end
+
+local function actor_required(context)
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	return true
+end
+
+local function pda_tip(actor, text)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function format_rubles(value)
+	local digits = tostring(math.floor(math.abs(tonumber(value) or 0)))
+	local grouped = digits:reverse():gsub("(%d%d%d)", "%1 "):reverse()
+	return grouped:gsub("^%s+", "")
+end
+
+local function percent_param(params, key, default_value, error_code)
+	return anomaly_donation_bridge_common.parse_number(
+		params[key], default_value, -100, 100, error_code)
+end
+
+local function change_radiation_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, { percent = true })
+	if not valid then return false, "rejected", error_code end
+	local percent, parse_error = percent_param(params, "percent", 25, "radiation_percent_invalid")
+	if percent == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local ok, current = pcall(function() return context.actor.radiation end)
+	current = tonumber(current)
+	if not ok or current == nil then return false, "deferred", "radiation_state_unavailable" end
+	if current ~= current or current < 0 or current > 1 then
+		return false, "rejected", "radiation_state_scale_unsupported"
+	end
+	context.options = { percent = percent, before = current }
+	return true
+end
+
+local function change_radiation_execute(context)
+	local options = context.options
+	local ok = pcall(function() context.actor:change_radiation(options.percent / 100) end)
+	if not ok then return "uncertain", "radiation_change_failed" end
+	local read_ok, after = pcall(function() return context.actor.radiation end)
+	after = tonumber(after)
+	if not read_ok or after == nil then return "uncertain", "radiation_confirmation_unavailable" end
+	local expected = math.max(0, math.min(1, context.options.before + options.percent / 100))
+	if math.abs(after - expected) > TOLERANCE then
+		return "uncertain", "radiation_confirmation_mismatch"
+	end
+	return "executed", "radiation_changed_percent_" .. tostring(options.percent)
+end
+
+local function drop_weapon_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		wait_seconds = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local wait_seconds, wait_error = anomaly_donation_bridge_common.parse_integer(
+		params.wait_seconds, 30, 0, 300, "weapon_wait_seconds_invalid")
+	if wait_seconds == nil then return false, "rejected", wait_error end
+	local actor_ok, status, reason = actor_required(context)
+	if not actor_ok then return false, status, reason end
+	local ok, slot, item = pcall(function()
+		return tonumber(context.actor:active_slot()), context.actor:active_item()
+	end)
+	local command = context.command or {}
+	local wait_key = tostring(command.donation_id or command.command_id or "")
+	local now = tonumber(context.now) or (time_global and time_global() or 0)
+	for key, pending in pairs(state.weapon_waits) do
+		if type(pending) ~= "table" or now > tonumber(pending.expires_at or 0) + 60000 then
+			state.weapon_waits[key] = nil
+		end
+	end
+	if not ok or (slot ~= 2 and slot ~= 3) or item == nil then
+		local pending = wait_key ~= "" and state.weapon_waits[wait_key] or nil
+		if pending == nil then
+			pending = { expires_at = now + wait_seconds * 1000 }
+			if wait_key ~= "" then state.weapon_waits[wait_key] = pending end
+		end
+		if now < pending.expires_at then
+			return false, "deferred", "waiting_for_active_weapon"
+		end
+		if wait_key ~= "" then state.weapon_waits[wait_key] = nil end
+		return false, "rejected", "active_weapon_wait_expired"
+	end
+	if wait_key ~= "" then state.weapon_waits[wait_key] = nil end
+	if anomaly_donation_bridge_common.protected_object(item) then
+		return false, "rejected", "weapon_is_protected"
+	end
+	context.options = { item = item, section = item:section() }
+	return true
+end
+
+local function drop_weapon_execute(context)
+	local ok = pcall(function() context.actor:drop_item(context.options.item) end)
+	if not ok then return "uncertain", "weapon_drop_failed" end
+	return "executed", "weapon_dropped_" .. context.options.section
+end
+
+local function change_health_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, { percent = true })
+	if not valid then return false, "rejected", error_code end
+	local percent, parse_error = percent_param(params, "percent", 25, "health_percent_invalid")
+	if percent == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local ok, before = pcall(function() return context.actor.health end)
+	before = tonumber(before)
+	if not ok or before == nil then return false, "deferred", "health_state_unavailable" end
+	if before ~= before or before < 0 or before > 1 then
+		return false, "rejected", "health_state_scale_unsupported"
+	end
+	context.options = { percent = percent, before = before }
+	return true
+end
+
+local function change_health_execute(context)
+	local options = context.options
+	local ok = pcall(function() context.actor:change_health(options.percent / 100) end)
+	if not ok then return "uncertain", "health_change_failed" end
+	local read_ok, after = pcall(function() return context.actor.health end)
+	after = tonumber(after)
+	if not read_ok or after == nil then return "uncertain", "health_confirmation_unavailable" end
+	local expected = math.max(0, math.min(1, options.before + options.percent / 100))
+	if math.abs(after - expected) > TOLERANCE then return "uncertain", "health_confirmation_mismatch" end
+	return "executed", "health_changed_percent_" .. tostring(options.percent)
+end
+
+local function thirst_binding()
+	local module = rawget(_G, "actor_status_thirst")
+	local getter = module and module.get_water_deprivation or nil
+	if type(getter) ~= "function" or type(debug) ~= "table" or
+		type(debug.getupvalue) ~= "function" or type(debug.setupvalue) ~= "function" then
+		return nil
+	end
+	for index = 1, 32 do
+		local name, value = debug.getupvalue(getter, index)
+		if name == nil then break end
+		if name == "last_drink" and type(value) == "number" and value == value and
+			value >= 0 and value <= 10000 then
+			return { getter = getter, index = index, value = value }
+		end
+	end
+	return nil
+end
+
+function thirst_capable()
+	return thirst_binding() ~= nil
+end
+
+local function set_thirst(binding, value)
+	value = math.max(0, math.min(10000, value))
+	local original = binding.value
+	local ok, name = pcall(debug.setupvalue, binding.getter, binding.index, value)
+	if not ok or name ~= "last_drink" then
+		pcall(debug.setupvalue, binding.getter, binding.index, original)
+		return false
+	end
+	local read_ok, normalized = pcall(binding.getter, false)
+	if not read_ok or tonumber(normalized) == nil or
+		math.abs(tonumber(normalized) - value / 10000) > TOLERANCE then
+		pcall(debug.setupvalue, binding.getter, binding.index, original)
+		return false
+	end
+	binding.value = value
+	return true
+end
+
+local function change_needs_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		hunger_percent = true, thirst_percent = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local hunger, hunger_error = percent_param(params, "hunger_percent", 25, "hunger_percent_invalid")
+	if hunger == nil then return false, "rejected", hunger_error end
+	local thirst, thirst_error = percent_param(params, "thirst_percent", 25, "thirst_percent_invalid")
+	if thirst == nil then return false, "rejected", thirst_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local hunger_ok, before_hunger = pcall(function() return context.actor.satiety end)
+	before_hunger = tonumber(before_hunger)
+	if not hunger_ok or before_hunger == nil or before_hunger ~= before_hunger or
+		before_hunger < 0 or before_hunger > 1 then
+		return false, "deferred", "hunger_state_unavailable"
+	end
+	local binding = thirst_binding()
+	if thirst ~= 0 and binding == nil then
+		return false, "rejected", "thirst_adapter_unsupported"
+	end
+	context.options = { hunger = hunger, thirst = thirst,
+		before_hunger = before_hunger, thirst_binding = binding }
+	return true
+end
+
+local function change_needs_execute(context)
+	local options = context.options
+	local thirst_before = options.thirst_binding and options.thirst_binding.value or nil
+	local thirst_after = thirst_before
+	if options.thirst ~= 0 then
+		-- Positive values quench thirst, while Anomaly stores deprivation (0..10000).
+		thirst_after = math.max(0, math.min(10000, thirst_before - options.thirst * 100))
+		if not set_thirst(options.thirst_binding, thirst_after) then
+			return "uncertain", "thirst_change_failed"
+		end
+	end
+	local hunger_ok = pcall(function()
+		context.actor:change_satiety(options.hunger / 100)
+	end)
+	if not hunger_ok then
+		if options.thirst ~= 0 then set_thirst(options.thirst_binding, thirst_before) end
+		return "uncertain", "hunger_change_failed"
+	end
+	local read_ok, hunger_after = pcall(function() return context.actor.satiety end)
+	hunger_after = tonumber(hunger_after)
+	local expected = math.max(0, math.min(1, options.before_hunger + options.hunger / 100))
+	if not read_ok or hunger_after == nil or hunger_after ~= hunger_after or
+		math.abs(hunger_after - expected) > TOLERANCE then
+		return "uncertain", "needs_confirmation_mismatch"
+	end
+	return "executed", "needs_changed"
+end
+
+local function change_money_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, { amount = true })
+	if not valid then return false, "rejected", error_code end
+	local amount, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.amount, 1000, -1000000, 1000000, "money_delta_invalid")
+	if amount == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local ok, balance = pcall(function() return context.actor:money() end)
+	balance = tonumber(balance)
+	if not ok or balance == nil then return false, "deferred", "actor_money_unavailable" end
+	if balance ~= balance or balance ~= math.floor(balance) or balance < 0 or
+		balance > 2000000000 then
+		return false, "rejected", "actor_money_scale_unsupported"
+	end
+	local target = math.max(0, math.min(2000000000, balance + amount))
+	local applied = target - balance
+	if applied == 0 and amount ~= 0 then return false, "rejected", "money_balance_limit_reached" end
+	context.options = { target = target, applied = applied }
+	return true
+end
+
+local function change_money_execute(context)
+	local ok = pcall(function() context.actor:give_money(context.options.applied) end)
+	if not ok then return "uncertain", "money_change_failed" end
+	local read_ok, balance = pcall(function() return context.actor:money() end)
+	if not read_ok or tonumber(balance) ~= context.options.target then
+		return "uncertain", "money_change_not_confirmed"
+	end
+	local applied = context.options.applied
+	local message = applied >= 0 and
+		(PDA_TEXT.received .. format_rubles(applied) .. PDA_TEXT.rubles) or
+		(PDA_TEXT.lost .. format_rubles(applied) .. PDA_TEXT.rubles)
+	local notified = pda_tip(context.actor, message)
+	return "executed", "money_changed_" .. tostring(applied) ..
+		(notified and "" or "_notification_unavailable")
+end
+
+local function remove_drunk()
+	if level == nil or
+		type(level.remove_complex_effector) ~= "function" then return false end
+	return pcall(level.remove_complex_effector, DRUNK_EFFECT_ID)
+end
+
+local function god_console()
+	if type(get_console) ~= "function" then return nil end
+	local ok, console = pcall(get_console)
+	if not ok or console == nil then return nil end
+	return console
+end
+
+local function read_invulnerable()
+	local console = god_console()
+	if console == nil then return nil end
+	local ok, value = pcall(function() return console:get_bool("g_god") end)
+	if ok and type(value) == "boolean" then return value end
+	return nil
+end
+
+local function write_invulnerable(value)
+	local console = god_console()
+	if console == nil then return false end
+	local ok = pcall(function()
+		console:execute(value == true and "g_god on" or "g_god off")
+	end)
+	return ok and read_invulnerable() == (value == true)
+end
+
+local function god_mode_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		duration_seconds = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local duration, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 30, 5, 600, "god_mode_duration_invalid")
+	if duration == nil then return false, "rejected", parse_error end
+	local actor_ok, status, reason = actor_required(context)
+	if not actor_ok then return false, status, reason end
+	local current = read_invulnerable()
+	if current == nil then return false, "deferred", "god_mode_api_unavailable" end
+	context.options = { duration = duration, before = current }
+	return true
+end
+
+local function god_mode_execute(context)
+	local now = tonumber(context.now) or (time_global and time_global() or 0)
+	if not state.god_active then state.god_previous = context.options.before == true end
+	if not write_invulnerable(true) then
+		return "uncertain", "god_mode_result_unknown"
+	end
+	state.god_active = true
+	state.god_expires_at = math.max(state.god_expires_at,
+		now + context.options.duration * 1000)
+	local notified = pda_tip(context.actor, PDA_TEXT.god_started ..
+		tostring(context.options.duration) .. PDA_TEXT.god_seconds)
+	return "executed", "god_mode_seconds_" .. tostring(context.options.duration) ..
+		(notified and "" or "_notification_unavailable")
+end
+
+local function drunk_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		duration_seconds = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local duration, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 30, 5, 300, "drunk_duration_invalid")
+	if duration == nil then return false, "rejected", parse_error end
+	if level == nil or type(level.add_complex_effector) ~= "function" or
+		type(level.remove_complex_effector) ~= "function" then
+		return false, "rejected", "drunk_effector_unavailable"
+	end
+	if not anomaly_donation_bridge_common.section_exists("effector_alcohol") then
+		return false, "rejected", "drunk_effector_section_missing"
+	end
+	context.options = { duration = duration }
+	return true
+end
+
+local function drunk_execute(context)
+	if not remove_drunk() then
+		state.drunk_cleanup_pending = true
+		return "uncertain", "drunk_previous_effect_cleanup_failed"
+	end
+	local ok = pcall(level.add_complex_effector, "effector_alcohol", DRUNK_EFFECT_ID)
+	if not ok then return "uncertain", "drunk_effector_result_unknown" end
+	state.drunk_expires_at = (context.now or time_global()) + context.options.duration * 1000
+	state.drunk_cleanup_pending = false
+	return "executed", "drunk_effect_seconds_" .. tostring(context.options.duration)
+end
+
+local function effects_update(now)
+	if state.drunk_cleanup_pending or
+		(state.drunk_expires_at > 0 and now >= state.drunk_expires_at) then
+		if remove_drunk() then
+			state.drunk_expires_at = 0
+			state.drunk_cleanup_pending = false
+		else
+			state.drunk_cleanup_pending = true
+		end
+	end
+	if state.god_active and now >= state.god_expires_at then
+		if write_invulnerable(state.god_previous == true) then
+			if db ~= nil and db.actor ~= nil then
+				pda_tip(db.actor, PDA_TEXT.god_finished)
+			end
+			state.god_active = false
+			state.god_expires_at = 0
+		end
+	end
+end
+
+local function effects_load()
+	if remove_drunk() then
+		state.drunk_expires_at = 0
+		state.drunk_cleanup_pending = false
+	else
+		state.drunk_cleanup_pending = true
+	end
+	if state.god_active then
+		write_invulnerable(state.god_previous == true)
+	end
+	state.god_active = false
+	state.god_expires_at = 0
+end
+
+local function emission_can(context, params)
+	if next(params) ~= nil then return false, "rejected", "parameter_not_supported" end
+	if surge_manager == nil or type(surge_manager.start_surge) ~= "function" or
+		type(surge_manager.is_started) ~= "function" or
+		type(surge_manager.get_surge_manager) ~= "function" then
+		return false, "rejected", "surge_manager_unavailable"
+	end
+	local manager_ok, manager = pcall(surge_manager.get_surge_manager)
+	if not manager_ok or manager == nil or type(manager.started) ~= "boolean" or
+		type(manager.condlist) ~= "table" then
+		return false, "deferred", "surge_manager_not_ready"
+	end
+	if manager._state_loaded ~= nil and manager._state_loaded ~= true then
+		return false, "deferred", "surge_manager_state_loading"
+	end
+	local ok, started = pcall(surge_manager.is_started)
+	if not ok then return false, "deferred", "surge_state_unavailable" end
+	if started then return false, "rejected", "surge_already_active" end
+	local level_ok, level_name = pcall(function() return level.name() end)
+	if not level_ok or level_name == nil then return false, "deferred", "level_unavailable" end
+	if level_weathers == nil or type(level_weathers.valid_levels) ~= "table" then
+		return false, "rejected", "stock_weather_registry_unavailable"
+	end
+	if level_weathers.valid_levels[level_name] ~= true then
+		return false, "rejected", "surge_level_unsupported"
+	end
+	if ui_options == nil or type(ui_options.get) ~= "function" then
+		return false, "rejected", "emission_option_api_unavailable"
+	end
+	local option_ok, emission_enabled = pcall(ui_options.get, "alife/event/emission_state")
+	if not option_ok then return false, "deferred", "emission_option_unavailable" end
+	if emission_enabled ~= true then return false, "rejected", "emissions_disabled" end
+	if level_name == "l13_generators" or level_name == "l11_hospital" then
+		return false, "rejected", "surge_level_unsupported"
+	end
+	if type(has_alife_info) ~= "function" then
+		return false, "rejected", "alife_info_api_unavailable"
+	end
+	local arena_ok, arena_active = pcall(has_alife_info, "bar_arena_fight")
+	if not arena_ok then return false, "deferred", "arena_state_unavailable" end
+	if arena_active == true then return false, "rejected", "surge_blocked_by_arena" end
+	if xr_logic == nil or type(xr_logic.pick_section_from_condlist) ~= "function" then
+		return false, "deferred", "surge_conditions_unavailable"
+	end
+	local condition_ok, condition = pcall(function()
+		return xr_logic.pick_section_from_condlist(
+			context.actor, nil, manager.condlist)
+	end)
+	if not condition_ok then return false, "deferred", "surge_conditions_unavailable" end
+	if condition ~= "true" then return false, "rejected", "surge_conditions_blocked" end
+	if type(manager.get_nearest_cover) == "function" then
+		local cover_ok, cover_id = pcall(function() return manager:get_nearest_cover() end)
+		local dynamic_cover = false
+		if lz_nm_surge_cover ~= nil and type(lz_nm_surge_cover.is_supported_level) == "function" then
+			local dynamic_ok, supported = pcall(lz_nm_surge_cover.is_supported_level)
+			dynamic_cover = dynamic_ok and supported == true
+		end
+		if not cover_ok then return false, "deferred", "surge_cover_check_failed" end
+		if cover_id == nil and not dynamic_cover then return false, "rejected", "surge_cover_unavailable" end
+	end
+	context.options = { surge_manager = manager, level_name = level_name }
+	return true
+end
+
+local function emission_execute(context)
+	if context.options.surge_manager.started then return "rejected", "surge_already_active" end
+	local level_ok, level_name = pcall(function() return level.name() end)
+	if not level_ok or level_name ~= context.options.level_name then
+		return "rejected", "level_changed_before_surge"
+	end
+	local ok = pcall(surge_manager.start_surge)
+	if not ok then return "uncertain", "surge_start_result_unknown" end
+	local state_ok, started = pcall(surge_manager.is_started)
+	if not state_ok then return "uncertain", "surge_start_result_unknown" end
+	if not started or context.options.surge_manager.started ~= true then
+		return "rejected", "surge_start_blocked"
+	end
+	return "executed", "surge_started"
+end
+
+local function sleep_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, { hours = true })
+	if not valid then return false, "rejected", error_code end
+	local hours, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.hours, 8, 1, 24, "sleep_hours_invalid")
+	if hours == nil then return false, "rejected", parse_error end
+	if ui_sleep_dialog == nil or type(ui_sleep_dialog.sleep_forced) ~= "function" then
+		return false, "rejected", "stock_sleep_api_unavailable"
+	end
+	if surge_manager ~= nil and type(surge_manager.is_started) == "function" then
+		local ok, started = pcall(surge_manager.is_started)
+		if not ok or started then return false, "deferred", "sleep_blocked_by_emission" end
+	end
+	context.options = { hours = hours }
+	return true
+end
+
+local function sleep_execute(context)
+	local ok = pcall(ui_sleep_dialog.sleep_forced, context.options.hours)
+	if not ok then return "uncertain", "stock_sleep_result_unknown" end
+	return "executed", "forced_sleep_hours_" .. tostring(context.options.hours)
+end
+
+local function meta_can()
+	return true
+end
+
+local function meta_execute()
+	return "rejected", "meta_action_must_be_resolved_by_application"
+end
+
+local function change_faction_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		faction_communities = true, catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "faction_communities", "faction")
+	if entries == nil then return false, "rejected", catalog_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local current_ok, current = pcall(function()
+		return context.actor:character_community()
+	end)
+	if not current_ok or type(current) ~= "string" or current == "" then
+		return false, "deferred", "player_faction_unavailable"
+	end
+	local candidates = {}
+	for _, entry in ipairs(entries) do
+		local faction = tostring(entry.faction or "")
+		if faction ~= current and faction:match("^[A-Za-z0-9_%.%-]+$") then
+			candidates[#candidates + 1] = faction
+		end
+	end
+	if #candidates == 0 then
+		return false, "rejected", "selected_factions_contain_no_change"
+	end
+	context.options = {
+		before = current,
+		target = candidates[math.random(#candidates)]
+	}
+	return true
+end
+
+local function change_faction_execute(context)
+	local current_ok, current = pcall(function()
+		return context.actor:character_community()
+	end)
+	if not current_ok or current ~= context.options.before then
+		return "rejected", "player_faction_changed_before_execution"
+	end
+	local changed_ok = pcall(function()
+		context.actor:set_character_community(context.options.target, 0, 0)
+	end)
+	if not changed_ok then return "uncertain", "player_faction_change_failed" end
+	local goodwill_ok = pcall(function()
+		game_relations.set_community_goodwill_for_faction(context.options.target)
+	end)
+	local verify_ok, after = pcall(function()
+		return context.actor:character_community()
+	end)
+	if not verify_ok or after ~= context.options.target then
+		return "uncertain", "player_faction_result_not_confirmed"
+	end
+	if not goodwill_ok then
+		return "uncertain", "player_faction_changed_goodwill_unknown"
+	end
+	local notified = pda_tip(context.actor, PDA_TEXT.faction_changed)
+	return "executed", "player_faction_changed_" .. context.options.target ..
+		(notified and "" or "_notification_unavailable")
+end
+
+local function drunk_supported()
+	local supported = level ~= nil and type(level.add_complex_effector) == "function" and
+		type(level.remove_complex_effector) == "function" and
+		anomaly_donation_bridge_common.section_exists("effector_alcohol")
+	return supported, supported and nil or "drunk_effector_unsupported"
+end
+
+local function god_mode_supported(context)
+	local current = read_invulnerable()
+	return current ~= nil, current ~= nil and nil or "god_mode_api_unsupported"
+end
+
+local function emission_supported()
+	local supported = surge_manager ~= nil and
+		type(surge_manager.start_surge) == "function" and
+		type(surge_manager.is_started) == "function" and
+		type(surge_manager.get_surge_manager) == "function" and
+		level ~= nil and type(level.name) == "function" and
+		level_weathers ~= nil and type(level_weathers.valid_levels) == "table" and
+		ui_options ~= nil and type(ui_options.get) == "function" and
+		type(has_alife_info) == "function" and xr_logic ~= nil and
+		type(xr_logic.pick_section_from_condlist) == "function"
+	return supported, supported and nil or "stock_surge_unsupported"
+end
+
+local function sleep_supported()
+	local supported = ui_sleep_dialog ~= nil and
+		type(ui_sleep_dialog.sleep_forced) == "function"
+	return supported, supported and nil or "stock_sleep_unsupported"
+end
+
+local function radiation_supported(context)
+	return actor_api_supported(context, { "change_radiation" }, "radiation",
+		"radiation_api_unsupported")
+end
+
+local function weapon_drop_supported(context)
+	local supported, reason = actor_api_supported(context,
+		{ "active_slot", "active_item", "drop_item" }, nil,
+		"weapon_drop_api_unsupported")
+	if not supported then return false, reason end
+	local story_supported = type(get_object_story_id) == "function"
+	return story_supported, story_supported and nil or "story_id_api_unsupported"
+end
+
+local function health_supported(context)
+	return actor_api_supported(context, { "change_health" }, "health",
+		"health_api_unsupported")
+end
+
+local function needs_supported(context)
+	return actor_api_supported(context, { "change_satiety" }, "satiety",
+		"hunger_api_unsupported")
+end
+
+local function money_supported(context)
+	local supported, reason = actor_api_supported(context, { "money", "give_money" }, nil,
+		"money_api_unsupported")
+	if not supported then return false, reason end
+	local actor = actor_for_probe(context)
+	local ok, balance = pcall(function() return actor:money() end)
+	balance = tonumber(balance)
+	local valid = ok and balance ~= nil and balance == balance and
+		balance == math.floor(balance) and balance >= 0 and balance <= 2000000000
+	return valid, valid and nil or "money_api_unsupported"
+end
+
+local function meta_supported()
+	return true
+end
+
+local function faction_supported(context)
+	local actor = actor_for_probe(context)
+	local supported = actor ~= nil and
+		actor_api_supported(context,
+			{ "character_community", "set_character_community" }, nil,
+			"player_faction_api_unsupported") and
+		game_relations ~= nil and
+		type(game_relations.set_community_goodwill_for_faction) == "function" and
+		anomaly_donation_bridge_catalog ~= nil and
+		type(anomaly_donation_bridge_catalog.validate_sections) == "function"
+	return supported, supported and nil or "player_faction_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = register("add_radiation", change_radiation_can, change_radiation_execute,
+		nil, nil, nil, radiation_supported)
+	if not ok and type(printf) == "function" then
+		printf("[ADB] add_radiation registration failed: %s", tostring(reason))
+	end
+end

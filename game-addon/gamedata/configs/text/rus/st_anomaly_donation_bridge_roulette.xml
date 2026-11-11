@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+  <string id="st_adb_roulette_upgrade"><text>КРУТИТЬ</text></string>
+  <string id="st_adb_roulette_risk_low"><text>Низкий риск</text></string>
+  <string id="st_adb_roulette_risk_high"><text>Высокий риск</text></string>
+  <string id="st_adb_roulette_claim"><text>ЗАБРАТЬ</text></string>
+  <string id="st_adb_roulette_dismiss"><text>ПОНЯТНО</text></string>
+  <string id="st_adb_roulette_sad"><text>ПЕЧАЛЬНО</text></string>
+  <string id="st_adb_roulette_lost"><text>Предмет потерян</text></string>
+  <string id="st_adb_roulette_must_roll"><text>Завершите розыгрыш</text></string>
+  <string id="st_adb_roulette_batch_done"><text>Серия завершена</text></string>
+  <string id="st_adb_roulette_no_candidates"><text>Нет подходящих неквестовых предметов для обмена</text></string>
+  <string id="st_adb_roulette_invalid_risk"><text>Неизвестный режим риска</text></string>
+  <string id="st_adb_roulette_quest_item"><text>Квестовый предмет исключён</text></string>
+  <string id="st_adb_roulette_not_ready"><text>Дождитесь результата</text></string>
+  <string id="st_adb_roulette_invalid_count"><text>Укажите от 1 до 50 попыток</text></string>
+  <string id="st_adb_roulette_unavailable"><text>Игра ещё не готова</text></string>
+  <string id="st_adb_roulette_ui_busy"><text>Другой игровой интерфейс уже открыт</text></string>
+  <string id="st_adb_roulette_input_missing"><text>Предмет ставки больше не принадлежит герою</text></string>
+  <string id="st_adb_roulette_input_unavailable"><text>Этот объект не является предметом</text></string>
+  <string id="st_adb_roulette_input_changed"><text>Предмет изменился. Ставка отменена</text></string>
+  <string id="st_adb_roulette_target_unavailable"><text>Эту награду создать нельзя</text></string>
+  <string id="st_adb_roulette_empty_item"><text>Предмет пуст</text></string>
+  <string id="st_adb_roulette_spawn_failed"><text>Награда не создана. Ставка сохранена</text></string>
+  <string id="st_adb_roulette_consume_failed"><text>Обмен не выполнен</text></string>
+  <string id="st_adb_roulette_failure"><text>ПРОВАЛ</text></string>
+  <string id="st_adb_roulette_busy"><text>Предыдущая попытка ещё не завершена</text></string>
+</string_table>

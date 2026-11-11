@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<w>
+  <file name="ui\anomaly_donation_bridge_voting_material">
+    <texture id="adb_voting_material" x="0" y="0" width="4096" height="128"/>
+  </file>
+</w>

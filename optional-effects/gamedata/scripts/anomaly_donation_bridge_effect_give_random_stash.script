@@ -1,0 +1,130 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"give_random_stash",
+  "displayName":"Выдать случайный тайник",
+  "description":"Штатно выдаёт наводку на случайный доступный тайник, наполняет его, ставит метку и сообщает фактическую локацию в КПК.",
+  "category":"world",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[],
+  "parameters":{}
+}
+ADB_PRESET_END]]
+
+local function life_object(id)
+	if type(alife_object) == "function" then
+		local ok, object = pcall(alife_object, id)
+		if ok and object ~= nil then return object end
+	end
+	if type(alife) ~= "function" then return nil end
+	local life_ok, life = pcall(alife)
+	if not life_ok or life == nil or type(life.object) ~= "function" then return nil end
+	local object_ok, object = pcall(function() return life:object(id, true) end)
+	return object_ok and object or nil
+end
+
+local function stash_level(object)
+	if object == nil or type(alife) ~= "function" or type(game_graph) ~= "function" then
+		return nil
+	end
+	local ok, level_name = pcall(function()
+		local life = alife()
+		local graph = game_graph()
+		local vertex = graph:vertex(object.m_game_vertex_id)
+		return life:level_name(vertex:level_id())
+	end)
+	return ok and type(level_name) == "string" and level_name ~= "" and level_name or nil
+end
+
+local function stash_location(object)
+	local level_name = stash_level(object)
+	if dynamic_news_helper ~= nil and
+		type(dynamic_news_helper.GetPointDescription) == "function" then
+		local ok, description = pcall(dynamic_news_helper.GetPointDescription, object)
+		if ok and type(description) == "string" and description ~= "" then
+			return description, level_name or "unknown"
+		end
+	end
+	if level_name ~= nil and game ~= nil and type(game.translate_string) == "function" then
+		local ok, translated = pcall(game.translate_string, "st_dyn_news_" .. level_name)
+		if ok and type(translated) == "string" and translated ~= "" and
+			translated ~= "st_dyn_news_" .. level_name then
+			return translated, level_name
+		end
+	end
+	return level_name, level_name or "unknown"
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if treasure_manager == nil or
+		type(treasure_manager.get_random_stash) ~= "function" or
+		type(treasure_manager.set_random_stash) ~= "function" then
+		return false, "rejected", "treasure_manager_unavailable"
+	end
+	if news_manager == nil or type(news_manager.send_tip) ~= "function" then
+		return false, "rejected", "pda_message_api_unavailable"
+	end
+	return true
+end
+
+local function execute(context)
+	-- This is the same selection path used by Anomaly's purchased stash tips:
+	-- no local-map restriction, but stock blacklist and already-used checks remain.
+	local selected, id, name, description, hint = pcall(
+		treasure_manager.get_random_stash)
+	id = tonumber(id)
+	if not selected or id == nil or id <= 0 then
+		return "rejected", "random_stash_unavailable"
+	end
+	local marker_text = name
+	if description ~= nil and hint ~= nil then
+		marker_text = "%c[255,255,160,0]" .. tostring(name or "") ..
+			"\\n%c[default]" .. tostring(description) ..
+			"\\n%c[160,100,100,200]" .. tostring(hint)
+	end
+	local applied, result = pcall(
+		treasure_manager.set_random_stash, nil, marker_text, nil, id)
+	if not applied or tonumber(result) ~= id then
+		return "uncertain", "random_stash_content_failed_" .. tostring(id)
+	end
+	local object = life_object(id)
+	local location, level_name = stash_location(object)
+	if location == nil or location == "" then
+		return "uncertain", "random_stash_location_unavailable_" .. tostring(id)
+	end
+	local prefix = anomaly_donation_bridge_common.game_text_cp1251(
+		"Получена наводка на тайник: ")
+	local location_text = anomaly_donation_bridge_common.game_text_cp1251(location)
+	if prefix == nil or location_text == nil then
+		return "uncertain", "random_stash_location_encoding_failed_" .. tostring(id)
+	end
+	local sent, send_result = pcall(
+		news_manager.send_tip, context.actor, prefix .. location_text, nil, nil, 8000)
+	if not sent or send_result == false then
+		return "uncertain", "random_stash_message_failed_" .. tostring(id)
+	end
+	level_name = tostring(level_name or "unknown"):gsub("[^%w_-]", "_")
+	return "executed", "random_stash_" .. tostring(id) .. "_level_" .. level_name
+end
+
+local function supported()
+	local ok = treasure_manager ~= nil and
+		type(treasure_manager.get_random_stash) == "function" and
+		type(treasure_manager.set_random_stash) == "function" and
+		news_manager ~= nil and type(news_manager.send_tip) == "function"
+	return ok, ok and nil or "random_stash_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"give_random_stash", {
+			can_execute = can_execute, execute = execute, is_supported = supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] give_random_stash registration failed: %s", tostring(reason))
+	end
+end

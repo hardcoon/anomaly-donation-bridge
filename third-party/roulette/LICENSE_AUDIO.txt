@@ -1,0 +1,35 @@
+Coin sound: Kenney, RPG Audio, Audio/handleCoins2.ogg
+Source: https://kenney.nl/assets/rpg-audio
+Original archive: https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip
+Duration: 0.338 s; channels: 1; rate: 44100 Hz
+Converted to mono 44100 Hz for X-Ray; peak normalised for audible short UI feedback.
+Original SHA-256: 4b857968d64f9ac9336a10ffac6694d7547e1f01566ad6857b30bc8db3ee6c32
+Installed SHA-256: 3508235b6a9d0c160b262ded6b1883bd75ade79add198aefa4cacb657f3889e1
+
+Wheel tick: Hardcoon, original procedural audio, MIT (see LICENSE).
+File: gamedata/sounds/ui/hc_upg_tick.ogg
+Duration: 0.044 s; channels: 1; rate: 44100 Hz
+SHA-256: cf70ef084d8b406e1d618b66f63a8c7da85ebfb68ed98402a8a3e085b66549fe
+Reproducible source: tools/build_audio.py
+
+	
+
+	RPG Audio
+
+	by  Kenney Vleugels (Kenney.nl)
+
+			------------------------------
+
+	License (Creative Commons Zero, CC0)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	You may use these assets in personal and commercial projects.
+	Credit (Kenney or www.kenney.nl) would be nice but is not mandatory.
+
+			------------------------------
+
+	Donate:   http://support.kenney.nl
+	Request:  http://request.kenney.nl
+
+	Follow on Twitter for updates:
+	@KenneyNL

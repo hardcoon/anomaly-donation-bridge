@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<w>
+  <file name="ui\anomaly_donation_bridge_roulette_atlas">
+    <texture id="adb_roulette_casino_frame" x="2" y="2" width="1254" height="1254"/>
+    <texture id="adb_roulette_casino_risk_hover" x="2" y="1260" width="984" height="230"/>
+    <texture id="adb_roulette_casino_risk_normal" x="2" y="1494" width="984" height="230"/>
+    <texture id="adb_roulette_casino_risk_selected" x="2" y="1728" width="984" height="230"/>
+    <texture id="adb_roulette_casino_dismiss_rus" x="990" y="1260" width="887" height="444"/>
+    <texture id="adb_roulette_casino_loss_rus" x="1260" y="2" width="887" height="444"/>
+    <texture id="adb_roulette_casino_normal_rus" x="1260" y="450" width="887" height="444"/>
+    <texture id="adb_roulette_casino_active_rus" x="1881" y="898" width="887" height="443"/>
+    <texture id="adb_roulette_casino_claim_rus" x="1881" y="1345" width="887" height="443"/>
+    <texture id="adb_roulette_casino_pointer" x="2151" y="2" width="512" height="512"/>
+    <texture id="adb_roulette_divisions" x="990" y="1708" width="256" height="256"/>
+    <texture id="adb_roulette_sector_0" x="1250" y="1708" width="256" height="256"/>
+    <texture id="adb_roulette_sector_1" x="1510" y="1708" width="256" height="256"/>
+    <texture id="adb_roulette_sector_10" x="1260" y="898" width="256" height="256"/>
+    <texture id="adb_roulette_sector_11" x="1520" y="898" width="256" height="256"/>
+    <texture id="adb_roulette_sector_12" x="2151" y="518" width="256" height="256"/>
+    <texture id="adb_roulette_sector_13" x="2411" y="518" width="256" height="256"/>
+    <texture id="adb_roulette_sector_14" x="2667" y="2" width="256" height="256"/>
+    <texture id="adb_roulette_sector_15" x="2671" y="262" width="256" height="256"/>
+    <texture id="adb_roulette_sector_16" x="2927" y="2" width="256" height="256"/>
+    <texture id="adb_roulette_sector_17" x="2671" y="522" width="256" height="256"/>
+    <texture id="adb_roulette_sector_18" x="3187" y="2" width="256" height="256"/>
+    <texture id="adb_roulette_sector_2" x="3447" y="2" width="256" height="256"/>
+    <texture id="adb_roulette_sector_3" x="3707" y="2" width="256" height="256"/>
+    <texture id="adb_roulette_sector_4" x="2931" y="262" width="256" height="256"/>
+    <texture id="adb_roulette_sector_5" x="3191" y="262" width="256" height="256"/>
+    <texture id="adb_roulette_sector_6" x="3451" y="262" width="256" height="256"/>
+    <texture id="adb_roulette_sector_7" x="3711" y="262" width="256" height="256"/>
+    <texture id="adb_roulette_sector_8" x="2931" y="522" width="256" height="256"/>
+    <texture id="adb_roulette_sector_9" x="3191" y="522" width="256" height="256"/>
+    <texture id="adb_roulette_icon_close" x="2" y="1968" width="32" height="32"/>
+    <texture id="adb_roulette_icon_shuffle" x="2" y="2004" width="32" height="32"/>
+    <texture id="adb_roulette_pixel" x="2" y="2040" width="4" height="4"/>
+  </file>
+</w>

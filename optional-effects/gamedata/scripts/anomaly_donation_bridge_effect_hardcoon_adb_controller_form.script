@@ -1,0 +1,1844 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.controller_form",
+  "displayName": "Превратиться в контролёра",
+  "description": "Временно превращает героя в контролёра: свои HP и вид от третьего лица.\nЛКМ — выбранная пси-способность, раз в 3 секунды.\nПКМ — прицеливание (удерживать). F — ближняя атака. R — сменить способность.\nКлавиши, характеристики и предел слуг настраиваются ниже.\nEsc — вернуть героя и освободить слуг. F5/F9 сохраняют форму до перезапуска игры.",
+  "category": "metamorphosis",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "mutant_sections",
+      "displayName": "Внешность контролёра",
+      "kind": "MultiChoice",
+      "catalogKind": "Mutant",
+      "catalogNativeClasses": [
+        "SM_CONTR"
+      ],
+      "minimumSelections": 1,
+      "defaultValue": ""
+    },
+    {
+      "key": "duration_seconds",
+      "displayName": "Длительность превращения, сек.",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 60000,
+      "defaultValue": "60"
+    },
+    {
+      "key": "health_percent",
+      "displayName": "Запас здоровья формы, %",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 99999,
+      "defaultValue": "400"
+    },
+    {
+      "key": "attack_power_percent",
+      "displayName": "Сила ближнего удара, %",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 9000,
+      "defaultValue": "200"
+    },
+    {
+      "key": "max_servants",
+      "displayName": "Максимальное количество слуг",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 50,
+      "defaultValue": "10"
+    },
+    {
+      "key": "camera_mode",
+      "displayName": "Положение камеры",
+      "kind": "Choice",
+      "options": [
+        "side",
+        "center"
+      ],
+      "optionLabels": {
+        "side": "Камера сбоку",
+        "center": "По центру"
+      },
+      "defaultValue": "side"
+    },
+    {
+      "key": "capture_key",
+      "displayName": "Пси-способность (по умолчанию ЛКМ)",
+      "kind": "GameInputKey",
+      "defaultValue": "MOUSE_1"
+    },
+    {
+      "key": "aim_key",
+      "displayName": "Прицеливание (по умолчанию ПКМ, удерживать)",
+      "kind": "GameInputKey",
+      "defaultValue": "MOUSE_2"
+    },
+    {
+      "key": "melee_key",
+      "displayName": "Ближний удар (по умолчанию F)",
+      "kind": "GameInputKey",
+      "defaultValue": "F"
+    },
+    {
+      "key": "cycle_key",
+      "displayName": "Сменить способность (по умолчанию R)",
+      "kind": "GameInputKey",
+      "defaultValue": "R"
+    },
+    {
+      "key": "camera_key",
+      "displayName": "Переключить камеру (по умолчанию V)",
+      "kind": "GameInputKey",
+      "defaultValue": "V"
+    }
+  ],
+  "parameters": {
+    "mutant_sections": "",
+    "duration_seconds": "60",
+    "health_percent": "400",
+    "attack_power_percent": "200",
+    "max_servants": "10",
+    "melee_key": "F",
+    "camera_mode": "side",
+    "camera_key": "V",
+    "capture_key": "MOUSE_1",
+    "aim_key": "MOUSE_2",
+    "cycle_key": "R"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+-- Local effect revision COF-016. Standalone, existing addon 1.0.109 and declarative EXE.
+-- The catalog supplies only a controller visual. Actor HP/physics/config stay untouched.
+-- Existing NPCs/mutants are leased, never spawned, removed, re-factioned or immortal.
+-- Personal NPC goodwill is journalled before changes and restored through verified CSE APIs.
+local HANDLER="hardcoon.adb.controller_form"
+local BODY="adb_controller_form_visual_v1"
+local JOURNAL="adb_controller_form_recovery_v1"
+local EXECUTION_KEY="adb_controller_execution_v1"
+
+local PARTICLES={tear="anomaly2\\body_tear_00"}
+local particle_names
+local MONSTER_OWNER="xr_logic" -- the stock binder releases/captures under this exact name
+local logged={}
+local NORMAL_END={cancelled=true,complete=true,form_destroyed=true,actor_unavailable=true,actor_busy=true,
+    visual_or_camera_changed=true,movement_changed=true,service_save_suspend=true,service_save_resume_cancelled=true,
+    save=true,load=true,interface=true,quit=true,death=true,level_change=true}
+local function log_once(key,format,...)
+    if logged[key] or type(printf)~="function" then return end
+    logged[key]=true;printf(format,...)
+end
+local function log_failure(reason)
+    if reason and not NORMAL_END[reason] then log_once("failure:"..tostring(reason),"[ADB] controller form error: %s",tostring(reason)) end
+end
+local CONCURRENT_SPAWNS={spawn_npcs=true,spawn_mutants=true,spawn_npc_squads=true,spawn_mutant_squads=true,
+    spawn_random_hostile_squad=true,spawn_random_mutant_pack=true,spawn_random_npcs=true,spawn_random_mutants=true,
+    spawn_named_companion=true,spawn_mutant_companion=true,spawn_donor_boss=true,
+    ["hardcoon.adb.mutant_companion_v2"]=true,["hardcoon.adb.helicopter_boss"]=true}
+local MOTIONS={idle="stand_idle_0",walk="stand_walk_fwd_0",run="stand_walk_fwd_0"}
+local BITES={{motion="stand_attack_0",impulse=60},{motion="stand_attack_1",impulse=60}}
+local PSY_MOTIONS={"psy_attack_0","psy_attack_1","psy_attack_2","psy_attack_3"}
+local COOLDOWN={melee=1000,control=3000}
+local AIM_RADIUS=60
+local DEFAULT_KEYS={control="MOUSE_1",aim="MOUSE_2",melee="F",cycle="R",camera="V"}
+local SOUND_PREFIX={melee="monsters\\controller\\controller_attack_",hurt="monsters\\controller\\controller_hit_",
+    idle="monsters\\controller\\controller_idle_"}
+local SOUND_FILE={step="material\\human\\step\\earth1",tear="anomaly\\anomaly_body_tear_1",
+    control="monsters\\controller\\controller_tube_prepare",pull="monsters\\controller\\controller_whoosh",
+    captured="monsters\\controller\\controller_control2"}
+local form,registered,recover_pending,journal_pending=nil,false,false,false
+local damage_hook_registered=false
+local retired={}
+local suspended
+local MANUAL_SAVE=HANDLER..":manual-save"
+local finish,frame_update,execute,hurt
+local update_servants,release_servants,control_target,recover_controls,control_hit,control_enemy_eval,ledger_rows
+local update_effects
+local CONTROL_JOURNAL="adb_controller_servants_recovery_v1"
+local pending_restore={}
+
+local function actor() return db and db.actor end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e8 end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function point(p) return {x=p.x,y=p.y,z=p.z} end
+local function plus(p,d,n) return {x=p.x+d.x*n,y=p.y+d.y*n,z=p.z+d.z*n} end
+local function direction(yaw,pitch)
+    local cp=math.cos(pitch)
+    return {x=-math.sin(yaw)*cp,y=math.sin(pitch),z=math.cos(yaw)*cp}
+end
+local function unit(p)
+    local n=math.sqrt(p.x*p.x+p.y*p.y+p.z*p.z)
+    if not finite(n) or n<0.0001 then error("controller_direction_invalid") end
+    return {x=p.x/n,y=p.y/n,z=p.z/n}
+end
+local function storage() return alife_storage_manager and alife_storage_manager.get_state() end
+local function encoded(text) return anomaly_donation_bridge_common.game_text_cp1251_lossy(text) or "Controller" end
+local function ini(section,key) return anomaly_donation_bridge_common.ini_string(system_ini(),section,key) end
+local function exists(alias,path) return not not getFS():exist(alias,path) end
+local function health_actor(s,allow_dying)
+    local a=actor()
+    if a and a:id()==s.actor_id and a:get_visual_name()==s.actor_visual and (allow_dying or a:alive()) then return a end
+end
+local function restore_actor_health(s,allow_dying)
+    local a=health_actor(s,allow_dying)
+    if not a or not finite(s.actor_health) or s.actor_health<=0 then return false end
+    -- game_object.health uses native SetHealth (absolute), not the queued
+    -- change_health delta. Never adjust max HP, godmode or user.ltx.
+    if tonumber(a.health)~=s.actor_health then a.health=s.actor_health end
+    return true
+end
+local function lose_form_health(s,power)
+    -- Only normalized HEALTH LOSS belongs in the pool, not raw SHit power.
+    if not finite(power) or power<=0 then return 0 end
+    local lost=math.min(s.form_health,power)
+    s.form_health=math.max(0,s.form_health-power)
+    if s.form_health<=0 then s.depleted=true end
+    return lost
+end
+local function sync_actor_health(s,allow_dying)
+    local a=health_actor(s,allow_dying)
+    if not a then return false end
+    if form==s then anomaly_donation_bridge_common.form_restore_conditions(s,a) end
+    local current=tonumber(a.health)
+    if not finite(current) then return false end
+    -- Metabolism/other scripts can change HP without an SHit. Charge only
+    -- their health loss to the vehicle-like form, ignore passive healing,
+    -- and keep the rider's exact entry HP separate throughout the lease.
+    lose_form_health(s,math.max(0,s.actor_health-current))
+    return restore_actor_health(s,allow_dying)
+end
+local MOVE_FIELDS={"walk_accel","run_coef","sprint_koef","runback_coef","run_strafe_coef","sprint_strafe_coef"}
+local function same_value(a,b)
+    return finite(a) and finite(b) and math.abs(a-b)<=math.max(0.00001,math.abs(b)*0.00001)
+end
+local function movement_api(a)
+    if not a or type(a.get_actor_walk_back_coef)~="function" or type(a.get_actor_walk_strafe_coef)~="function" then return false end
+    for _,key in ipairs(MOVE_FIELDS) do
+        if type(a["get_actor_"..key])~="function" or type(a["set_actor_"..key])~="function" then return false end
+    end
+    return true
+end
+local function plan_movement(a)
+    if not movement_api(a) then return end
+    local ok,result=pcall(function()
+        local back,strafe=a:get_actor_walk_back_coef(),a:get_actor_walk_strafe_coef()
+        if not finite(back) or back<0 or not finite(strafe) or strafe<0 then return end
+        -- Another 10% over the previous 1.10 walk scale, applied once with no sprint.
+        local applied={walk_accel=a:get_actor_walk_accel()*1.21,run_coef=1,sprint_koef=1,runback_coef=back,run_strafe_coef=strafe,sprint_strafe_coef=strafe}
+        local lease={}
+        for _,key in ipairs(MOVE_FIELDS) do
+            local before=a["get_actor_"..key](a)
+            if not finite(before) or before<0 then return end
+            lease[#lease+1]={key=key,before=before,applied=applied[key]}
+        end
+        return lease
+    end)
+    return ok and result or nil
+end
+local function apply_movement(s)
+    local a=health_actor(s)
+    if not a then error("form_movement_actor_unavailable") end
+    anomaly_donation_bridge_common.form_movement_apply(a,s.movement,HANDLER)
+end
+local function restore_movement(s)
+    local a=actor()
+    if not a or a:id()~=s.actor_id then anomaly_donation_bridge_common.form_movement_defer(s.movement);return end
+    anomaly_donation_bridge_common.form_movement_release(a,s.movement)
+end
+local function movement_owned(s)
+    return anomaly_donation_bridge_common.form_movement_update(health_actor(s),s.movement)
+end
+local function read_fov()
+    local value=tonumber(get_console():get_float("fov"))
+    return finite(value) and value>=5 and value<=180 and value or nil
+end
+local function restore_aim(s)
+    local zoom=s.zoom
+    if zoom and zoom.attempted and same_value(read_fov(),zoom.applied) then
+        get_console():execute(string.format("fov %.6f",zoom.before))
+    end
+end
+local function update_aim(s)
+    if s.aiming and not s.zoom then
+        local before=read_fov();if not before then error("controller_aim_fov_unavailable") end
+        s.zoom={before=before,applied=math.max(5,before*0.65),attempted=true}
+        get_console():execute(string.format("fov %.6f",s.zoom.applied))
+        if not same_value(read_fov(),s.zoom.applied) then error("controller_aim_setup_failed") end
+    elseif not s.aiming and s.zoom then
+        restore_aim(s);s.zoom=nil
+    elseif s.zoom and not same_value(read_fov(),s.zoom.applied) then
+        -- Another addon's/user's FOV wins; never force our value every frame.
+        s.aiming=false;s.zoom=nil
+    end
+end
+local function body_mode_safe()
+    local value=get_console():get_string("show_actor_body")
+    return value==nil or tonumber(value)==0
+end
+local function particle_library_bytes(fs)
+    -- IReader*& in r_close has a broken Lua binding on supported builds:
+    -- calling it throws a C++ exception and can poison the Lua engine state.
+    -- Let native file_copy manage VFS reader/writer lifetimes inside C++;
+    -- then read its private temporary copy with ordinary Lua file handles.
+    if not io or type(io.open)~="function" or type(fs.update_path)~="function" then return nil,"file_api_unavailable" end
+    local source=fs:update_path("$game_data$","particles.xr")
+    local file=io.open(source,"rb")
+    local temporary
+    if not file then
+        local info=fs:exist("$game_data$","particles.xr")
+        if not info or type(fs.file_copy)~="function" or type(fs.file_delete)~="function" then return nil,"vfs_copy_unavailable" end
+        local ok,size=pcall(function() return info.size_real end)
+        if not ok or not finite(size) or size<=0 or size>32*1024*1024 then return nil,"library_size_invalid" end
+        temporary=fs:update_path("$app_data_root$","adb_controller_particle_probe_"..time_global().."_"..math.random(100000,999999)..".tmp")
+        if fs:exist(temporary) then return nil,"probe_path_busy" end -- never overwrite an existing file
+        local previous=io.open(temporary,"rb")
+        if previous then previous:close();return nil,"probe_path_busy" end
+        local copied=pcall(function() fs:file_copy(source,temporary) end)
+        if copied then file=io.open(temporary,"rb") end
+    end
+    local ok,data=false,nil
+    if file then
+        ok,data=pcall(function() return file:read(32*1024*1024+1) end)
+        pcall(function() file:close() end)
+    end
+    -- Monolith deliberately sets os.remove=nil. An unguarded call here used
+    -- to discard a SUCCESSFUL read and mark every VFX resource unavailable.
+    -- Delete only our exact private copy via the engine's VFS API instead.
+    if temporary then
+        local removed=pcall(function() fs:file_delete(temporary) end)
+        if not removed then log_once("particle_cleanup","[ADB] controller particle probe cleanup failed") end
+    end
+    if ok and type(data)=="string" and #data<=32*1024*1024 then return data end
+    return nil,"library_read_failed"
+end
+local function available_particles()
+    if particle_names then return particle_names end
+    particle_names={}
+    if particles_object==nil then return particle_names end
+    local fs=getFS()
+    -- A missing particle causes a native renderer assertion, not a Lua error.
+    -- Inspect the VFS library first; pcall(constructor) is NOT a safe probe.
+    if exists("$game_data$","particles.xr") then
+        local read_ok,data,why=pcall(particle_library_bytes,fs)
+        if read_ok and data then
+            local ok,names=pcall(function()
+                local found={}
+                local function u32(offset)
+                    local a,b,c,d=data:byte(offset+1,offset+4)
+                    return a+b*256+c*65536+d*16777216
+                end
+                local function chunks(first,last,visit)
+                    local cursor,count=first,0
+                    while cursor+8<=last and count<65536 do
+                        local id,size=u32(cursor),u32(cursor+4)
+                        local start,ending=cursor+8,cursor+8+size
+                        if ending>last or ending<start then error("controller_particle_library_invalid") end
+                        -- Compressed/unknown chunks are never read as plain data.
+                        if id<2147483648 then visit(id,start,ending) end
+                        cursor=ending;count=count+1
+                    end
+                end
+                chunks(0,#data,function(id,first,last)
+                    if id~=3 and id~=4 then return end -- effect/group containers
+                    chunks(first,last,function(_,entry_first,entry_last)
+                        chunks(entry_first,entry_last,function(key,name_first,name_last)
+                            if key~=2 then return end -- PED/PGD_CHUNK_NAME
+                            local name=data:sub(name_first+1,math.min(name_last,name_first+256)):match("^([^%z]*)%z")
+                            if name then found[name]=true end
+                        end)
+                    end)
+                end)
+                return found
+            end)
+            if ok then particle_names=names
+            else log_once("particle_library","[ADB] controller particle library: invalid chunks") end
+        else
+            log_once("particle_library","[ADB] controller particle library: %s",read_ok and tostring(why) or tostring(data))
+        end
+    end
+    for _,name in pairs(PARTICLES) do
+        if exists("$game_particles$",name..".pe") or exists("$game_particles$",name..".pg") then particle_names[name]=true end
+    end
+    return particle_names
+end
+local function available_sounds()
+    local assets={}
+    if sound_object==nil then return assets end
+    for kind,prefix in pairs(SOUND_PREFIX) do
+        assets[kind]={}
+        for i=0,15 do
+            local name=prefix..i
+            if exists("$game_sounds$",name..".ogg") then assets[kind][#assets[kind]+1]=name end
+        end
+    end
+    for kind,name in pairs(SOUND_FILE) do
+        assets[kind]=exists("$game_sounds$",name..".ogg") and {name} or {}
+    end
+    return assets
+end
+local function stop_sound(s,channel)
+    local handle=s.sounds[channel];s.sounds[channel]=nil
+    if handle then pcall(function() handle:stop() end) end
+end
+local function play_sound(kind,pos,volume,looped)
+    local s=form;local names=s and s.sound_assets[kind]
+    if not names or #names==0 then return false end
+    stop_sound(s,kind)
+    local handle=sound_object(names[math.random(1,#names)])
+    s.sounds[kind]=handle
+    -- sm_2D makes OpenAL coordinates LISTENER-RELATIVE, not unpositioned.
+    -- Passing the actor's world position here pans mono steps to one ear.
+    if kind=="step" then handle:play_at_pos(actor(),vector():set(0,0,0),0,sound_object.s2d)
+    else handle:play_at_pos(actor(),vec(pos),0,looped and sound_object.looped or 0) end
+    handle.volume=volume or 1
+    return true
+end
+local function ui_free()
+    local a=actor()
+    if a then
+        -- Do not enter in the middle of an already-running native burst or
+        -- reload. Consuming later key holds does not call CWeapon::FireEnd.
+        local item=a:active_item()
+        if item and IsWeapon(item) and item:get_state()~=0 then return false end -- CWeaponStates::eIdle
+    end
+    return a and a:alive() and _HUD_STATE==true and not device():is_paused() and
+        actor_menu and actor_menu.is_hud_free() and not a:is_talking() and a:get_current_holder()==nil and
+        (type(Check_UI)~="function" or not Check_UI()) and
+        (type(_GUIs)~="table" or next(_GUIs)==nil) and
+        (not actor_effects or actor_effects.item_not_in_use~=false)
+end
+local function supported()
+    local common=anomaly_donation_bridge_common
+    if not common or type(common.form_restore_conditions)~="function" or
+        type(common.form_equipment_before_hit)~="function" or type(common.form_equipment_after_hit)~="function" then return false end
+    return actor() and movement_api(actor()) and type(get_console().get_float)=="function" and type(get_console().execute)=="function" and
+        level and type(level.add_attachment)=="function" and type(level.get_attachment)=="function" and
+        type(level.remove_attachment)=="function" and type(level.set_cam_custom_position_direction)=="function" and
+        type(level.remove_cam_custom_position_direction)=="function" and type(level.get_active_cam)=="function" and
+        type(level.set_active_cam)=="function" and type(level.ray_pick)=="function" and type(level.object_by_id)=="function" and
+        type(level.iterate_nearest)=="function" and
+        level_input and type(level_input.on_mouse_move)=="function" and
+        game and type(game.motion_exists)=="function" and CUIScriptWnd~=nil and CUITextWnd~=nil and CUIStatic~=nil and
+        type(GetFontLetterica16Russian)=="function" and type(get_hud)=="function" and
+        type(RegisterScriptCallback)=="function" and type(IsStalker)=="function" and type(IsMonster)=="function" and type(IsWeapon)=="function" and
+        DIK_keys and DIK_keys.MOUSE_1 and DIK_keys.MOUSE_2 and DIK_keys.DIK_F and DIK_keys.DIK_R and
+        rq_result~=nil and rq_target and hit~=nil and storage()~=nil and
+        type(CBeforeHitAfterCalcs)=="function" and damage_hook_registered and
+        type(CAI_Stalker__BeforeHitCallback)=="function" and type(CBaseMonster__BeforeHitCallback)=="function" and
+        type(alife)=="function" and alife() and type(alife().iterate_objects)=="function" and relation_registry and
+        type(relation_registry.community_goodwill)=="function" and type(relation_registry.community_relation)=="function" and
+        type(action)=="function" and act~=nil and act.attack~=nil and act.rest~=nil and cond~=nil
+end
+local function validate_options(params)
+    local ok,why=anomaly_donation_bridge_common.params_only(params,{camera_mode=true,camera_key=true,mutant_sections=true,duration_seconds=true,health_percent=true,attack_power_percent=true,catalog_revision=true,
+        cycle_key=true,panic_key=true,melee_key=true,capture_key=true,aim_key=true,max_servants=true,mark_key=true,control_key=true}) -- old selection/capture bindings are accepted but ignored
+    if not ok then return nil,why end
+    local duration=tonumber(params.duration_seconds or "60")
+    if not finite(duration) or duration%1~=0 or duration<1 or duration>60000 then return nil,"controller_duration_invalid" end
+    local health=tonumber(params.health_percent or "400")
+    if not finite(health) or health%1~=0 or health<10 or health>99999 then return nil,"controller_health_percent_invalid" end
+    local attack_power=tonumber(params.attack_power_percent or "200")
+    if not finite(attack_power) or attack_power%1~=0 or attack_power<10 or attack_power>9000 then return nil,"controller_attack_power_invalid" end
+    local limit=tonumber(params.max_servants or "10")
+    if not finite(limit) or limit%1~=0 or limit<1 or limit>50 then return nil,"controller_max_servants_invalid" end
+    local camera_mode=params.camera_mode or "side"
+    if camera_mode~="side" and camera_mode~="center" then return nil,"controller_camera_mode_invalid" end
+    local keys,used={},{}
+    for kind,default in pairs(DEFAULT_KEYS) do
+        local name=params[kind=="control" and "capture_key" or kind.."_key"] or default
+        local dik=type(name)=="string" and DIK_keys[name:match("^MOUSE_[1-5]$") and name or "DIK_"..name]
+        if type(dik)~="number" or name:find("CONTROL") or name:find("SHIFT") or name:find("MENU") or
+            name=="ESCAPE" or name=="F5" or name=="F9" or name=="W" or name=="A" or name=="S" or name=="D" then
+            return nil,"controller_ability_key_invalid"
+        end
+        if used[dik] then return nil,"controller_ability_keys_duplicate" end
+        if type(bind_to_dik)=="function" and key_bindings then
+            for _,binding in ipairs({"kQUICK_SAVE","kQUICK_LOAD","kJUMP","kSPRINT_TOGGLE"}) do
+                if key_bindings[binding] and bind_to_dik(key_bindings[binding])==dik then return nil,"controller_ability_key_reserved" end
+            end
+        end
+        used[dik]=true;keys[kind]={dik=dik,name=name}
+    end
+    local entries,reason=anomaly_donation_bridge_catalog.validate_sections(params,"mutant_sections","mutant")
+    if not entries then return nil,reason end
+    if #entries==0 then return nil,"selection_empty" end
+    local choices={}
+    for _,entry in ipairs(entries) do
+        if ini(entry.section_id,"class")~="SM_CONTR" then return nil,"controller_visual_class_unsupported" end
+        local model=ini(entry.section_id,"visual")
+        if type(model)~="string" or model=="" or model:find("..",1,true) or model:find(":",1,true) then
+            return nil,"controller_visual_path_invalid"
+        end
+        model=model:gsub("/","\\"):gsub("%.ogf$","")
+        if not exists("$game_meshes$",model..".ogf") then return nil,"controller_visual_missing" end
+        for _,motion in pairs(MOTIONS) do
+            if not game.motion_exists(model,motion) then return nil,"controller_animation_missing_"..motion end
+        end
+        for _,name in ipairs(PSY_MOTIONS) do
+            if not game.motion_exists(model,name) then return nil,"controller_animation_missing_"..name end
+        end
+        local bites={}
+        for _,bite in ipairs(BITES) do if game.motion_exists(model,bite.motion) then bites[#bites+1]=bite end end
+        if #bites==0 then return nil,"controller_bite_animation_missing" end
+        choices[#choices+1]={section=entry.section_id,model=model,bites=bites}
+    end
+    local selected=choices[math.random(1,#choices)]
+    return {section=selected.section,model=selected.model,duration=duration*1000,keys=keys,camera_mode=camera_mode,health_percent=health,
+        attack_factor=attack_power/100,bites=selected.bites,servant_limit=limit}
+end
+local function can_execute(context,params)
+    if type(CBeforeHitAfterCalcs)~="function" then return false,"deferred","controller_calculated_damage_api_unavailable" end
+    if not supported() then return false,"deferred","controller_form_api_unavailable" end
+    if form or suspended or recover_pending or #pending_restore>0 then return false,"deferred","controller_form_busy" end
+    if not ui_free() then return false,"deferred","controller_waiting_for_free_actor" end
+    if not body_mode_safe() then return false,"deferred","controller_actor_body_debug_enabled" end
+    if level.get_attachment(BODY)~=nil then return false,"deferred","controller_visual_name_busy" end
+    if not exists("$game_textures$","ui\\anomaly_donation_bridge_burer_form.dds") or
+        not exists("$game_config$","ui\\textures_descr\\anomaly_donation_bridge_burer_form.xml") then
+        return false,"deferred","controller_form_update_addon_required"
+    end
+    local options,why=validate_options(params)
+    if not options then return false,why=="catalog_revision_mismatch" and "deferred" or "rejected",why end
+    context.controller=options
+    return true
+end
+local function motion(name,force)
+    local s=form
+    if not s then return 0 end
+    local now=time_global()
+    if s.motion==name and not force and (not s.motion_restart_at or now<s.motion_restart_at) then return 0 end
+    s.motion=name
+    -- Native pose crossfade only: no extra action wait/input lock or speed change.
+    local duration=s.body:play_motion(name,true,1)
+    -- Some controller locomotion clips have StopAtEnd. The attachment then
+    -- falls back to literal "idle", which this model may not have. Re-arm
+    -- only finite clips, just before native expiry; true loops keep running.
+    s.motion_restart_at=finite(duration) and duration>0 and now+math.max(1,duration-math.min(40,duration*0.1)) or nil
+    return finite(duration) and math.max(0,duration) or 0
+end
+local function ray(origin,dir,range,mode,ignore)
+    local offset,last=0,nil
+    for _=1,64 do
+        local remaining=range-offset
+        if remaining<=0.001 then return end
+        local from=plus(origin,dir,offset)
+        local result=rq_result()
+        if not level.ray_pick(vec(from),vec(dir),remaining,mode,result,ignore or actor()) then return end
+        if not finite(result.range) or result.range<0 or result.range>remaining+0.01 then error("controller_ray_invalid") end
+        last={object=result.object,element=result.element,range=offset+result.range}
+        -- Monolith rq_result.set reads a STATIC triangle material even for a
+        -- dynamic skeleton hit (element is then a BONE index). Those flags
+        -- cannot classify NPCs/props: never skip them as if they were leaves.
+        if result.object then return last end
+        local ok,flags=pcall(function() return tonumber(result.material_flags) end)
+        flags=ok and flags or 0;flags=flags or 0
+        local named,material=pcall(function() return tostring(result.material_name or ""):lower() end)
+        material=named and material:gsub(string.char(92),"/"):match("([^/]+)$") or ""
+        -- Stock grass has NO flPassable flag. Match only vegetation material
+        -- tokens, never transparency alone (glass/fences/tree trunks stay solid).
+        local foliage=material=="grass" or material=="bush" or material=="bush_sux" or
+            material=="leaves" or material=="leaf" or material=="foliage" or material=="vegetation"
+        local obstacle=math.floor(flags/4096)%2==1
+        last.material_flags=flags
+        if obstacle or not (foliage or math.floor(flags/128)%2==1) then return last end
+        offset=offset+result.range+0.035
+    end
+    return last -- bounded traversal; excessive layers fail closed
+end
+local function trace_attack(origin,dir,range,radius,ignore)
+    -- A swept cross-section, not an infinitely thin decorative ray. Every
+    -- lane still hits the first solid obstacle, including small props.
+    local horizontal=dir.x^2+dir.z^2
+    local right=horizontal>0.000001 and unit({x=dir.z,y=0,z=-dir.x}) or {x=1,y=0,z=0}
+    local up=unit({x=-dir.y*right.z,y=dir.z*right.x-dir.x*right.z,z=dir.y*right.x})
+    local best
+    for _,offset in ipairs({{0,0},{1,0},{-1,0},{0,1},{0,-1},
+        {0.5,0},{-0.5,0},{0,0.5},{0,-0.5},{0.7,0},{-0.7,0},{0,0.7},{0,-0.7},
+        {0.7,0.7},{-0.7,0.7},{0.7,-0.7},{-0.7,-0.7}}) do
+        local delta={x=(right.x*offset[1]+up.x*offset[2])*radius,
+            y=up.y*offset[2]*radius,z=(right.z*offset[1]+up.z*offset[2])*radius}
+        local length=math.sqrt(delta.x^2+delta.y^2+delta.z^2)
+        if length<0.001 or not ray(origin,unit(delta),length,rq_target.rqtStatic) then
+            local from=plus(origin,delta,1)
+            local pick=ray(from,dir,range,rq_target.rqtBoth,ignore)
+            if pick and (not best or pick.range<best.range) then
+                best={object=pick.object,element=pick.element,range=pick.range,pos=plus(from,dir,pick.range)}
+            end
+        end
+    end
+    return best
+end
+local function creature(object)
+    return object and object:id()~=actor():id() and (IsStalker(object)==true or IsMonster(object)==true)
+end
+local function notice(text,now,damage_number)
+    if not form then return end
+    if not damage_number and text~="Не готово" and text~="Путь перекрыт" then text="Не получилось" end
+    form.notice=text;form.notice_until=now+2200;form.notice_damage=damage_number==true
+end
+local function damage(pick,dir,power,impulse,kind)
+    if not form then return false end
+    local object=pick and pick.object
+    if not creature(object) or not object:alive() then return false end
+    -- RayPick.element is the struck skeleton bone, not necessarily bone 0.
+    -- Root/helper bones can have zero damage scaling. Never guess a human
+    -- bone name for a mutant, nor bypass the target's native immunities.
+    local bones=object:list_bones(false)
+    local bone=bones and bones[pick.element]
+    if type(bone)~="string" or bone=="" then
+        notice("Не получилось",time_global())
+        return false
+    end
+    -- Base bite damage is scaled once; native victim protections stay native.
+    if kind=="melee" then power=power*form.attack_factor end
+    local h=hit();h.power=power;h.impulse=impulse;h.type=hit.wound
+    -- No weapon: ID 0 is the actor, not a CWeapon (GBO inspects this field).
+    h.direction=vec(dir);h.draftsman=actor();h.weapon_id=65535;h.bone=bone
+    local before=tonumber(object.health)
+    object:hit(h)
+    if form and finite(before) and #form.hit_checks<8 then
+        form.hit_checks[#form.hit_checks+1]={id=object:id(),section=object:section(),before=before,
+            due=time_global()+250,kind=kind,bone=bone,impulse=impulse,
+            submitted=power,hit_type=h.type}
+    end
+    return true
+end
+local function update_hit_feedback(now)
+    local s=form
+    for i=#s.hit_checks,1,-1 do
+        local check=s.hit_checks[i]
+        if now>=check.due then
+            table.remove(s.hit_checks,i)
+            local target=level.object_by_id(check.id)
+            if target and target:section()==check.section then
+                local after=tonumber(target.health)
+                if finite(after) then
+                    anomaly_donation_bridge_common.form_hit_report(HANDLER,check,after)
+                    local lost=math.max(0,check.before-after)*100
+                    -- U+2212 is not CP1251 and was rendered as '?'. Keep the
+                    -- numeric loss positive, with no unsupported glyph.
+                    notice(lost>0.01 and ("-"..math.max(1,math.floor(lost+0.5))) or "0",now,true)
+                end
+            end
+        end
+    end
+end
+local function aim(max_range,filter,include_dead)
+    local s=form
+    local dir=direction(s.yaw,s.pitch)
+    local origin=point(actor():position());origin.y=origin.y+form.bite_height
+    local from=s.camera_pos or origin
+    if max_range and filter then
+        local fov=tonumber(device().fov)
+        if not finite(fov) or fov<5 or fov>180 then fov=67.5 end
+        -- Native build_projection takes VERTICAL FOV. Project the same
+        -- 60/768 UI-height radius as the aspect-corrected atlas ring.
+        local slope=math.tan(fov*math.pi/360)*(2*AIM_RADIUS/768)
+        local best,count=nil,0
+        level.iterate_nearest(vec(origin),max_range+1,function(object)
+            if not filter(object) or not include_dead and creature(object) and not object:alive() then return false end
+            -- Loose loot/zone helpers must not exhaust the candidate budget.
+            count=count+1;if count>128 then return true end
+            local center=object:center(false)
+            if not center or not finite(center.x) or not finite(center.y) or not finite(center.z) then return false end
+            local dx,dy,dz=center.x-from.x,center.y-from.y,center.z-from.z
+            local depth=dx*dir.x+dy*dir.y+dz*dir.z
+            if depth<=0.2 then return false end
+            local radial=math.max(0,(dx*dx+dy*dy+dz*dz)/(depth*depth)-1)
+            local reach=(center.x-origin.x)^2+(center.y-origin.y)^2+(center.z-origin.z)^2
+            if (center.x-origin.x)*dir.x+(center.y-origin.y)*dir.y+(center.z-origin.z)*dir.z<=0.25 then return false end
+            if radial>slope*slope or reach>max_range*max_range then return false end
+            local distance=math.sqrt(dx*dx+dy*dy+dz*dz)
+            local ray_dir={x=dx/distance,y=dy/distance,z=dz/distance}
+            -- Physical melee still respects intervening creatures and props.
+            -- Unlimited mental capture uses its separate selector below.
+            local pick=ray(from,ray_dir,distance+0.2,rq_target.rqtBoth)
+            if (not pick or pick.object and pick.object:id()==object:id()) and
+                (not best or radial<best.score or radial==best.score and distance<best.distance) then
+                best={object=object,pos=point(center),score=radial,distance=distance}
+            end
+            return false
+        end)
+        if best then
+            return origin,unit({x=best.pos.x-origin.x,y=best.pos.y-origin.y,z=best.pos.z-origin.z}),best.object
+        end
+    end
+    local pick=ray(from,dir,80,rq_target.rqtBoth)
+    local target=plus(from,dir,pick and pick.range or 80)
+    local delta={x=target.x-origin.x,y=target.y-origin.y,z=target.z-origin.z}
+    -- A camera/ground hit behind the casting plane must not turn the attack
+    -- backwards into the actor's feet when looking down in third person.
+    if delta.x*dir.x+delta.y*dir.y+delta.z*dir.z<=0.25 then return origin,dir end
+    return origin,unit(delta)
+end
+local function body_fx_position()
+    local pos=point(actor():position());pos.y=pos.y+form.bite_height
+    return pos
+end
+-- Identity-only records are safe across online/offline changes; never compare game_object wrappers.
+local function identity(object)
+    return {id=object:id(),name=object:name(),section=object:section()}
+end
+local function valid_identity(row)
+    return type(row)=="table" and finite(row.id) and row.id%1==0 and row.id>=0 and row.id<65535 and
+        type(row.name)=="string" and row.name~="" and #row.name<=512 and
+        type(row.section)=="string" and row.section~="" and #row.section<=256
+end
+local function matches(object,row,server)
+    return object and row and (server and object.id or object:id())==row.id and
+        object:name()==row.name and (server and object:section_name() or object:section())==row.section
+end
+local function online(row)
+    local object=valid_identity(row) and level.object_by_id(row.id)
+    return matches(object,row) and object or nil
+end
+local function server(row)
+    local sim=alife();local object=valid_identity(row) and sim and sim:object(row.id)
+    return matches(object,row,true) and object or nil
+end
+local function copy_plain(value)
+    if type(value)~="table" then return value end
+    local result={};for k,v in pairs(value) do result[k]=copy_plain(v) end;return result
+end
+local function servant(object)
+    if not form or not object then return end
+    for _,row in ipairs(form.servants) do if matches(object,row) then return row end end
+end
+local function display_name(object)
+    local text=IsStalker(object) and type(object.character_name)=="function" and object:character_name() or object:section()
+    text=anomaly_donation_bridge_common.game_text_utf8(text) or text
+    return anomaly_donation_bridge_common.truncate_utf8(tostring(text or ""):gsub("[%z\1-\31\127]",""),96)
+end
+local function hostile(object)
+    if not creature(object) or not object:alive() or object:id()==actor():id() or servant(object) then return false end
+    local data=storage() or {}
+    for _,key in ipairs({"adb_mutant_companions_v1","adb_mutant_companions_v2"}) do
+        local pets=data[key];if pets and (pets[object:id()] or pets[tostring(object:id())]) then return false end
+    end
+    if IsStalker(object) and type(object.has_info)=="function" and object:has_info("npcx_is_companion") then return false end
+    return tonumber(object:relation(actor())) and object:relation(actor())>=(game_object and game_object.enemy or 2)
+end
+local function pick_creature(filter)
+    local s=form
+    local origin=body_fx_position();local from=s.camera_pos or origin
+    local dir=direction(s.yaw,s.pitch)
+    local fov=tonumber(device().fov)
+    if not finite(fov) or fov<5 or fov>180 then fov=67.5 end
+    local slope=math.tan(fov*math.pi/360)*(2*AIM_RADIUS/768)
+    local candidates={}
+    -- No gameplay distance/radius cap and no math.huge sent to the spatial
+    -- database. Enumerate ALife identities ONCE on press; inspect only online
+    -- clients. Never bring offline creatures online or mutate this iterator.
+    alife():iterate_objects(function(server)
+        local object=server and finite(server.id) and level.object_by_id(server.id)
+        if not creature(object) or not object:alive() or filter and not filter(object) then return false end
+        local center=object:center(false)
+        if not center or not finite(center.x) or not finite(center.y) or not finite(center.z) then return false end
+        local delta={x=center.x-from.x,y=center.y-from.y,z=center.z-from.z}
+        local depth=delta.x*dir.x+delta.y*dir.y+delta.z*dir.z
+        if depth<=0.2 then return false end
+        local distance=math.sqrt(delta.x^2+delta.y^2+delta.z^2)
+        local radial=math.max(0,distance^2/(depth*depth)-1)
+        local forward=(center.x-origin.x)*dir.x+(center.y-origin.y)*dir.y+(center.z-origin.z)*dir.z
+        if radial<=slope*slope and forward>0.25 and finite(distance) then
+            candidates[#candidates+1]={object=object,pos=point(center),score=radial,distance=distance,id=object:id()}
+        end
+        return false
+    end)
+    table.sort(candidates,function(a,b)
+        if a.score~=b.score then return a.score<b.score end
+        if a.distance~=b.distance then return a.distance<b.distance end
+        return a.id<b.id
+    end)
+    for _,candidate in ipairs(candidates) do
+        local delta={x=candidate.pos.x-from.x,y=candidate.pos.y-from.y,z=candidate.pos.z-from.z}
+        if not ray(from,unit(delta),math.max(0.01,candidate.distance-0.15),rq_target.rqtStatic) then return candidate.object end
+    end
+end
+ledger_rows=function()
+    local rows={}
+    for _,row in ipairs(pending_restore) do rows[#rows+1]=copy_plain(row) end
+    if form then
+        for _,row in ipairs(form.servants) do rows[#rows+1]=copy_plain(row) end
+
+    end
+    return rows
+end
+local function write_ledger()
+    local data=storage();if not data then return end
+    local rows=ledger_rows();data[CONTROL_JOURNAL]=#rows>0 and {version=1,rows=rows} or nil
+end
+-- Restore raw personal goodwill EXACTLY, without SetGoodwill's clamps. The CSE
+-- setter subtracts current community offsets, so add those offsets explicitly.
+-- Only verified trader pairs may reach this API (never mutant targets: native VERIFY).
+local function set_raw(from,to,raw)
+    local object,target=online(from),online(to)
+    local a,b=server(from),server(to)
+    if (not a or not b) and (not object or not target) then return true end -- gone/reused ID is not ours to edit
+    local from_community=a and type(a.community)=="function" and a:community() or
+        object and type(object.character_community)=="function" and object:character_community()
+    local to_community=b and type(b.community)=="function" and b:community() or
+        target and type(target.character_community)=="function" and target:character_community()
+    if type(from_community)~="string" or type(to_community)~="string" then return false end
+    local offset=relation_registry.community_goodwill(from_community,to.id)+
+        relation_registry.community_relation(from_community,to_community)
+    if not finite(offset) or not finite(raw) then return false end
+    if object and target and type(object.force_set_goodwill)=="function" then
+        object:force_set_goodwill(raw+offset,target)
+    elseif a and b and type(a.force_set_goodwill)=="function" then a:force_set_goodwill(raw+offset,to.id)
+    else return false end
+    return not object or not target or tonumber(object:goodwill(target))==raw
+end
+local function restore_relations(row)
+    for i=#row.relations,1,-1 do
+        local rel=row.relations[i]
+        local ok,result=pcall(set_raw,rel.from or row,rel.target,rel.before)
+        if not ok or not result then return false end
+        table.remove(row.relations,i)
+    end
+    return true
+end
+-- Old saves may still contain a cancelled execution lease. Restore only its
+-- identity/token-verified queue and movement; never resume a lethal sequence.
+local function cleanup_execution_row(row)
+    if not row.execution then return true end
+    if type(row.token)~="string" or row.token=="" then return true end
+    local object=online(row);local st=db.storage and db.storage[row.id]
+    if not object then
+        return level.object_by_id(row.id)~=nil or server(row)==nil
+    end
+    if not st or st[EXECUTION_KEY]~=row.token then return true end
+    if object:alive() then
+        local owns_state=not row.state_before or state_mgr and type(state_mgr.get_state)=="function" and
+            state_mgr.get_state(object)=="idle"
+        if owns_state then
+            local owned_queue=object:animation_count()<=3
+            if owned_queue then object:clear_animations() end
+            if owned_queue and row.state_before and state_lib and state_lib.states and state_lib.states[row.state_before] and
+                state_mgr and type(state_mgr.set_state)=="function" then
+                state_mgr.set_state(object,row.state_before,nil,nil,nil,{fast_set=true})
+            end
+            if move and object:target_movement_type()==move.stand and finite(row.move_before) then object:set_movement_type(row.move_before) end
+        end
+    end
+    st[EXECUTION_KEY]=nil -- after successful cleanup, so a failed setter can retry
+    return true
+end
+local function release_row(row)
+    if not cleanup_execution_row(row) then return false end
+    if not restore_relations(row) then return false end
+    local object=online(row)
+    if object and row.kind=="mutant" and row.script_touched and
+        (not object:get_script() or object:get_script_name()==(row.native_owner or HANDLER)) then
+        if object:get_script() then object:script(false,row.native_owner or HANDLER) end
+        -- A true script flag with an empty queue softlocks stock mob_walker.
+        -- Rebuild only its still-current original scheme; otherwise leave the
+        -- flag released so its own binder/owner can reacquire normally.
+        local st=db.storage and db.storage[row.id]
+        if row.script_before and st and st.active_scheme==row.scheme and xr_logic and
+            type(xr_logic.issue_event)=="function" and st[row.scheme] then
+            xr_logic.issue_event(object,st[row.scheme],"reset_scheme")
+        end
+    end
+    return true
+end
+local function restore_or_queue(row)
+    local ok,result=pcall(release_row,row)
+    if not ok or not result then
+        pending_restore[#pending_restore+1]=row
+        log_once("restore","[ADB] controller: servant restoration pending")
+        return false
+    end
+    return true
+end
+release_servants=function(s)
+    for _,row in ipairs(s.servants) do restore_or_queue(row) end
+    s.servants={};write_ledger()
+end
+recover_controls=function()
+    local data=storage();local saved=data and data[CONTROL_JOURNAL]
+    pending_restore={}
+    if type(saved)=="table" and saved.version==1 and type(saved.rows)=="table" then
+        for i,row in ipairs(saved.rows) do
+            if i>100 then break end
+            if valid_identity(row) and type(row.relations)=="table" and #row.relations<=3 and
+                (row.kind=="npc" or row.kind=="mutant") then
+                local valid=true
+                for _,rel in ipairs(row.relations) do
+                    if type(rel)~="table" or not finite(rel.before) or not valid_identity(rel.target) or
+                        rel.from~=nil and not valid_identity(rel.from) then valid=false end
+                end
+                if valid then restore_or_queue(copy_plain(row)) end
+            end
+        end
+    end
+    write_ledger()
+end
+local function lease_goodwill(row,target,desired)
+    if not IsStalker(target) and target:id()~=actor():id() then return true end
+    local object=online(row);local a,b=server(row),server(identity(target))
+    if not object or type(object.goodwill)~="function" or type(object.force_set_goodwill)~="function" or
+        not (a and type(a.community)=="function" or type(object.character_community)=="function") or
+        not (b and type(b.community)=="function" or type(target.character_community)=="function") then
+        log_once("npc_api","[ADB] controller capture unavailable: npc_personal_goodwill_api")
+        return false
+    end
+    local before=tonumber(object:goodwill(target));if not finite(before) then return false end
+    row.relations[#row.relations+1]={target=identity(target),before=before}
+    if IsStalker(target) then
+        -- Native return fire can alter the victim's personal goodwill too.
+        -- Journal it without changing it; restore both directions on release.
+        local reverse=tonumber(target:goodwill(object))
+        if not finite(reverse) then return false end
+        row.relations[#row.relations+1]={from=identity(target),target=identity(object),before=reverse}
+    end
+    write_ledger() -- write-ahead before the native registry mutation
+    object:force_set_goodwill(desired,target)
+    return true
+end
+local function default_enemy()
+    local best,distance=nil,60^2
+    level.iterate_nearest(actor():position(),60,function(object)
+        if hostile(object) then
+            local p,q=object:position(),actor():position()
+            local d=(p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2
+            if d<distance then best,distance=object,d end
+        end
+        return false
+    end)
+    return best
+end
+local function set_order(row,target)
+    local object=online(row);if not object then return false end
+    local target_id=target and target:id() or nil
+    if row.ordered and (not row.target and not target or row.target and target and matches(target,row.target)) then
+        -- Native AI runs autonomously. Do not restart every tick or append commands.
+        if row.kind=="npc" then return true end
+        if object:get_script() and object:get_script_name()~=MONSTER_OWNER then return false end
+        if object:get_script() and not row.native_dirty then return true end
+        -- bind_monster may have legitimately released/reset the stock queue.
+        -- Restore one order after its scheduled update, never every render frame.
+    end
+    if not restore_relations(row) then return false end
+    row.target=target and identity(target) or nil;write_ledger()
+    if row.kind=="npc" then
+        if not lease_goodwill(row,actor(),100000) then return false end
+        if target and IsStalker(target) and not lease_goodwill(row,target,-100000) then return false end
+        -- Native enemy evaluation below excludes everyone except the assigned target.
+        -- The verified stalker memory API works on human and mutant targets.
+        if target then
+            if type(object.make_object_visible_somewhen)~="function" then return false end
+            object:enable_memory_object(target,true);object:make_object_visible_somewhen(target)
+        end
+    else
+        if object:get_script() and object:get_script_name()~=MONSTER_OWNER and row.issued then return false end
+        row.script_touched=true;row.native_owner=MONSTER_OWNER;write_ledger()
+        if object:get_script() and object:get_script_name()~=MONSTER_OWNER then object:script(false,object:get_script_name()) end
+        if not object:get_script() then object:script(true,MONSTER_OWNER)
+        else object:reset_action_queue() end
+        if not object:get_script() or object:get_script_name()~=MONSTER_OWNER then return false end
+        if target then action(object,act(act.attack,target),cond(cond.time_end,60000000))
+        else action(object,act(act.rest),cond(cond.time_end,60000000)) end
+        row.issued=true;row.native_dirty=nil
+    end
+    row.ordered=true
+    return true
+end
+
+control_target=function(object)
+    local s=form
+    if not s or #pending_restore>0 or not creature(object) or not object:alive() or object:id()==actor():id() then return false end
+    if servant(object) then return false end
+    if #s.servants>=s.servant_limit then notice("Лимит слуг",time_global());return false end
+    local row=identity(object);row.kind=IsStalker(object) and "npc" or "mutant";row.relations={}
+    if row.kind=="mutant" then
+        if type(object.get_script)~="function" or type(object.get_script_name)~="function" or type(object.script)~="function" then return false end
+        row.script_before=object:get_script();row.script_name=object:get_script_name()
+        local st=db.storage and db.storage[row.id];row.scheme=st and st.active_scheme
+    end
+    s.servants[#s.servants+1]=row;write_ledger()
+    local target=default_enemy()
+    if target and target:id()==row.id then target=nil end
+    local ok,result=pcall(set_order,row,target)
+    if not ok or not result then
+        if not ok then log_once("control_native","[ADB] controller control failed: %s",tostring(result)) end
+        table.remove(s.servants);restore_or_queue(row);write_ledger();return false
+    end
+    return true
+end
+update_servants=function(now)
+    local s=form
+    if now<(s.order_at or 0) then return end
+    s.order_at=now+250
+    local target=default_enemy()
+    for i=#s.servants,1,-1 do
+        local row=s.servants[i];local object=online(row)
+        local valid=object and object:alive()
+        local selected=target and target:id()~=row.id and target or nil
+        local ok,result=true,true
+        if valid then ok,result=pcall(set_order,row,selected) end
+        if not valid or not ok or not result then
+            if not ok then log_once("order_native","[ADB] controller order failed: %s",tostring(result)) end
+            table.remove(s.servants,i);restore_or_queue(row);write_ledger()
+        end
+    end
+end
+control_enemy_eval=function(object,enemy,flags)
+    if not form or not object or not enemy or type(flags)~="table" then return end
+
+    local row=servant(object)
+    if row then
+        flags.override=true
+        flags.result=creature(enemy) and enemy:alive() and enemy:id()~=actor():id() and
+            row.target~=nil and matches(enemy,row.target)
+    end
+end
+control_hit=function(target,h,_,flags)
+    if not form or not h or not target then return end
+    local row=h.draftsman and servant(h.draftsman)
+    if row and (not row.target or not matches(target,row.target) or target:id()==actor():id()) then
+        h.power=0;if type(flags)=="table" then flags.ret_value=false end
+    end
+end
+local function release_selected_servant(object)
+    local s=form
+    for i=#s.servants,1,-1 do
+        if matches(object,s.servants[i]) then
+            local row=table.remove(s.servants,i)
+            if not restore_or_queue(row) then write_ledger();return false end
+            write_ledger();break
+        end
+    end
+    return true
+end
+local function tear_resource()
+    local names=available_particles()
+    if anomaly_donation_bridge_catalog and type(anomaly_donation_bridge_catalog.snapshot)=="function" then
+        local catalog=anomaly_donation_bridge_catalog.snapshot()
+        for _,entry in ipairs(catalog and catalog.entries or {}) do
+            if entry.kind=="anomaly" then
+                local class=ini(entry.section_id,"class")
+                local name=(class=="ZS_MINCE" or class=="ZS_GALAN") and ini(entry.section_id,"tearing_particles")
+                if type(name)=="string" and names[name] then return name end
+            end
+        end
+    end
+    if names[PARTICLES.tear] then return PARTICLES.tear end
+end
+local function spawn_tear(object,now)
+    local name=tear_resource()
+    if not name or not form or #form.fx>=8 then return false end
+    -- The same tearing_particles used by CTeleWhirlwind, NOT a guessed effect.
+    -- CPHDestroyable::Destroy itself is not exported to Lua: leave the normal
+    -- dead body/loot intact rather than delete it or fake unsafe skeleton parts.
+    local handle=particles_object(name)
+    handle:set_direction(vector():set(0,1,0))
+    form.fx[#form.fx+1]={handle=handle,expires=now+3500}
+    handle:play_at_pos(object:position(),false)
+    play_sound("tear",point(object:position()))
+    return true
+end
+local function fatal_hit(object,draftsman,impulse)
+    if not creature(object) or not object:alive() or type(object.kill)~="function" then return false end
+    local bone,fallback
+    for index,name in pairs(type(object.list_bones)=="function" and object:list_bones(false) or {}) do
+        if type(name)=="string" and name~="" then
+            fallback=(index~=0 and fallback==nil) and name or fallback
+            if name:lower():find("head",1,true) then bone=name;break end
+        end
+    end
+    bone=bone or fallback
+    local before=tonumber(object.health)
+    if bone then
+        local h=hit();h.type=hit.fire_wound;h.power=math.max(1,finite(before) and before or 1)*1000
+        h.impulse=impulse;h.direction=vector():set(0,1,0);h.draftsman=draftsman;h.bone=bone
+        object:hit(h)
+    end
+    if object:alive() then object:kill(draftsman) end
+    if form then notice("-"..math.max(1,math.floor((finite(before) and before or 1)*100+0.5)),time_global(),true) end
+    return true
+end
+update_effects=function(now)
+    local s=form
+    for i=#s.fx,1,-1 do
+        local entry=s.fx[i]
+        if now>=entry.expires then entry.handle:stop();table.remove(s.fx,i) end
+    end
+end
+local function apply_psy_mode(object,mode,now)
+    if not creature(object) or not object:alive() then return false end
+    if mode==1 then return control_target(object) end
+
+    if mode~=2 or not tear_resource() or not release_selected_servant(object) then return false end
+    if not spawn_tear(object,now) then return false end
+    return fatal_hit(object,actor(),120)
+end
+local function start_ability(kind,now)
+    local s=form;if not s then return end
+    if s.action or now<(s.cooldowns[kind] or 0) then notice("Не готово",now);return end
+    if kind=="control" then
+        if #pending_restore>0 then notice("Не получилось",now);return end
+        update_servants(now)
+        s.ability_mode=s.ability_mode==2 and 2 or 1
+        if s.ability_mode==1 and #s.servants>=s.servant_limit then notice("Лимит слуг",now);return end
+        local mode=s.ability_mode
+        local target=pick_creature(function(o) return mode==1 and not servant(o) or mode==2 end)
+        if not target or mode==2 and not tear_resource() then notice("Не получилось",now);return end
+        s.cooldowns.control=now+3000
+        local length=motion(PSY_MOTIONS[1],true)
+        s.action={kind=kind,mode=mode,stage=1,target=identity(target),next_stage=now+math.max(100,math.min(700,length>0 and length or 700))}
+        stop_sound(s,"idle");play_sound("control",body_fx_position())
+    elseif kind=="melee" then
+        s.bite_index=(s.bite_index or 0)%#s.bites+1;local bite=s.bites[s.bite_index]
+        s.cooldowns.melee=now+COOLDOWN.melee
+        local duration=math.max(300,math.min(5000,motion(bite.motion,true)))
+        s.action={kind=kind,fire_at=now+duration*(s.bite_index==1 and 0.45 or 0.25),until_ms=now+duration,fired=false,impulse=bite.impulse}
+        stop_sound(s,"idle");play_sound("melee",body_fx_position())
+    end
+end
+local function update_combat(now,dt)
+    local s=form
+    if s.pending then local kind=s.pending;s.pending=nil;start_ability(kind,now) end
+    update_servants(now)
+    if form~=s then return end
+    local action=s.action
+    if action and action.kind=="control" then
+        if now>=action.next_stage then
+            action.stage=action.stage+1
+            if action.stage>4 then s.action=nil
+            else
+                local length=motion(PSY_MOTIONS[action.stage],true)
+                action.next_stage=now+math.max(100,math.min(700,length>0 and length or 700))
+                if action.stage==2 then play_sound("pull",body_fx_position()) end
+                if action.stage==3 then
+                    local target=online(action.target)
+                    -- Revalidate the actual casting path at impact; foliage is passable, walls are not.
+                    local origin=body_fx_position();local center=target and target:center(false)
+                    local delta=center and {x=center.x-origin.x,y=center.y-origin.y,z=center.z-origin.z}
+                    local distance=delta and math.sqrt(delta.x^2+delta.y^2+delta.z^2) or 0
+                    local in_range=finite(distance) and distance>0.01
+                    local pick=in_range and ray(origin,unit(delta),math.max(0.01,distance-0.15),rq_target.rqtStatic)
+                    if in_range and not pick and apply_psy_mode(target,action.mode,now) then
+                        play_sound("captured",center)
+                    else notice("Не получилось",now) end
+                end
+            end
+        end
+    elseif action then
+        if not action.fired and now>=action.fire_at then
+            action.fired=true
+            local origin,dir=aim(3.5,creature);local pick=trace_attack(origin,dir,3.5,0.65)
+            if pick then damage(pick,dir,0.55,action.impulse,"melee") end
+        end
+        if now>=action.until_ms then s.action=nil end
+    end
+    if not s.action then
+        local speed=actor():get_movement_speed();local velocity=math.sqrt(speed.x^2+speed.z^2)
+        motion(velocity>2 and MOTIONS.run or velocity>0.15 and MOTIONS.walk or MOTIONS.idle)
+        if velocity<=0.15 and now>=(s.idle_sound_at or 0) then
+            play_sound("idle",body_fx_position(),0.45);s.idle_sound_at=now+math.random(14000,24000)
+        end
+    end
+end
+local function camera_update()
+    local s=form;local p=point(actor():position())
+    s.body:set_position(vec(p))
+    -- ScriptAttachment rotation is DEGREES in HPB order, unlike native actor
+    -- and camera setters (radians). It is not an XYZ rotation around Y.
+    s.body:set_rotation(s.yaw*180/math.pi,0,0)
+    -- FirstEye uses a transposed quaternion; FPCam/attachments use setHPB.
+    -- Their yaw/pitch signs are opposite. Align native WASD to the view,
+    -- rather than swapping movement keys or teleporting the actor.
+    actor():set_actor_direction(-s.yaw,-s.pitch,0)
+    local dir=direction(s.yaw,s.pitch)
+    -- Reference framing is independent of RMB. Zoom changes ONLY FOV:
+    -- never dolly the camera backwards to freeze the body's on-screen size.
+    local side=s.camera_mode=="side"
+    local height=side and (s.side_camera_height+0.17) or s.camera_height
+    local camera_distance=side and 1.4 or s.camera_distance
+    local target={x=p.x,y=p.y+height,z=p.z}
+    if side then
+        local right={x=math.cos(s.yaw),y=0,z=math.sin(s.yaw)}
+        local shoulder=0.44
+        local obstruction=ray(target,right,shoulder,rq_target.rqtStatic)
+        target=plus(target,right,obstruction and math.max(0,obstruction.range-0.2) or shoulder)
+    end
+    local backwards={x=-dir.x,y=-dir.y,z=-dir.z}
+    local pick=ray(target,backwards,camera_distance,rq_target.rqtStatic)
+    local distance=pick and math.max(0.15,pick.range-0.2) or camera_distance
+    s.camera_pos=plus(target,backwards,distance)
+    s.camera_owned=true
+    level.set_cam_custom_position_direction(vec(s.camera_pos),vector():set(s.yaw,s.pitch,0),1,false,false)
+end
+local function owned_body(s)
+    local body=level.get_attachment(BODY)
+    if not body then return false end
+    local metadata=body.userdata
+    -- Luabind may return a fresh userdata wrapper for the same C++ pointer.
+    -- Compare our Lua lease, not wrapper identity or a reused private name.
+    return type(metadata)=="table" and metadata.owner==HANDLER and metadata.lease==s.lease
+end
+local function outlined_label(window,x,y,width,height,alignment)
+    -- CUITextWnd has no exported shadow/outline API on supported Monolith.
+    -- Eight offset glyph copies provide a real outline, not a DDS rectangle.
+    local group={controls={},offsets={},pos={x=x,y=y},size={x=width,y=height}}
+    local aspect=form.aspect
+    for _,offset in ipairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1},{0,0}}) do
+        local control=CUITextWnd();control:SetAutoDelete(true)
+        control:SetWndPos(vector2():set(x+offset[1]*aspect,y+offset[2]))
+        control:SetWndSize(vector2():set(width,height))
+        control:SetFont(GetFontLetterica16Russian());control:SetTextAlignment(alignment or 0)
+        control:SetTextComplexMode(false);control:SetTextColor(GetARGB(245,0,0,0))
+        window:AttachChild(control);group.controls[#group.controls+1]=control;group.offsets[#group.offsets+1]=offset
+    end
+    group.main=group.controls[#group.controls]
+    function group:SetText(text) for _,control in ipairs(self.controls) do control:SetText(text) end end
+    function group:SetTextColor(color) self.main:SetTextColor(color) end
+    function group:Show(shown) for _,control in ipairs(self.controls) do control:Show(shown) end end
+    function group:SetWndPos(p)
+        self.pos={x=p.x,y=p.y}
+        for index,control in ipairs(self.controls) do
+            local offset=self.offsets[index];control:SetWndPos(vector2():set(p.x+offset[1]*aspect,p.y+offset[2]))
+        end
+    end
+    function group:SetWndSize(size)
+        self.size={x=size.x,y=size.y};for _,control in ipairs(self.controls) do control:SetWndSize(size) end
+    end
+    function group:TextWidth()
+        -- Measure the selected game font, not UTF-8 bytes or a guessed box:
+        -- glyph metrics and UI scale can differ between builds/aspect ratios.
+        self.main:AdjustWidthToText()
+        local measured=self.main:GetWidth()
+        self.main:SetWndSize(vector2():set(self.size.x,self.size.y))
+        return finite(measured) and math.max(0,measured) or self.size.x
+    end
+    return group
+end
+local function servant_head(object)
+    local pos,center=object:position(),object:center(false)
+    if not pos or not center or not finite(center.x) or not finite(center.y) or not finite(center.z) then return end
+    local height=center.y+math.max(0.4,center.y-pos.y)+0.2
+    -- BoundingBox is MODEL-LOCAL, not world coordinates; supports arbitrary
+    -- NPC/mutant skeletons without requesting missing head bones or log spam.
+    if type(object.bounding_box)=="function" then
+        local ok,box=pcall(object.bounding_box,object,false)
+        if ok and box and box.max and finite(box.max.y) and box.max.y>0 then height=pos.y+box.max.y+0.2 end
+    end
+    return {x=center.x,y=height,z=center.z}
+end
+local function update_servant_labels(now)
+    local s=form
+    for index,row in ipairs(s.servants) do
+        local label=s.servant_labels[index]
+        if not label then
+            label=outlined_label(s.window,0,0,100*s.aspect,24,2)
+            label:SetText(encoded("Слуга"));label:SetTextColor(GetARGB(255,100,220,110))
+            s.servant_labels[index]=label
+        end
+        local object=online(row);local head=object and object:alive() and servant_head(object)
+        local visible,screen=false,nil
+        if head and s.camera_pos then
+            local delta={x=head.x-s.camera_pos.x,y=head.y-s.camera_pos.y,z=head.z-s.camera_pos.z}
+            local distance=math.sqrt(delta.x^2+delta.y^2+delta.z^2);local dir=direction(s.yaw,s.pitch)
+            local depth=delta.x*dir.x+delta.y*dir.y+delta.z*dir.z
+            if finite(distance) and distance>0.01 and depth>0.1 then
+                -- world2ui uses Device.mFullTransform, which still belongs to
+                -- the previous render/view during HUD Update. Project using
+                -- the SAME custom camera/FOV we just submitted, in 1024x768 UI.
+                local fov=tonumber(device().fov)
+                if not finite(fov) or fov<5 or fov>180 then fov=67.5 end
+                local focal=384/math.tan(fov*math.pi/360)
+                local right={x=math.cos(s.yaw),y=0,z=math.sin(s.yaw)}
+                local up={x=dir.y*right.z,y=dir.z*right.x-dir.x*right.z,z=-dir.y*right.x}
+                screen={x=512+(delta.x*right.x+delta.z*right.z)/depth*focal*s.aspect,
+                    y=384-(delta.x*up.x+delta.y*up.y+delta.z*up.z)/depth*focal}
+                visible=finite(screen.x) and finite(screen.y) and screen.x>=0 and screen.x<=1024 and screen.y>=0 and screen.y<=768
+                -- Identification tags remain visible over partial cover and
+                -- vegetation; this is HUD identification, not an attack ray.
+            end
+        end
+        label:Show(not not visible)
+        if visible then label:SetWndPos(vector2():set(screen.x-50*s.aspect,screen.y-24)) end
+    end
+    for index=#s.servants+1,#s.servant_labels do s.servant_labels[index]:Show(false) end
+end
+local function status(now)
+    local s=form
+    local function key(kind)
+        local name=s.keys[kind].name
+        return ({MOUSE_1="ЛКМ",MOUSE_2="ПКМ",MOUSE_3="СКМ",MOUSE_4="Мышь 4",MOUSE_5="Мышь 5"})[name] or name
+    end
+    local hp=math.floor(math.max(0,math.min(1,s.form_health/s.form_max_health))*100+0.5)
+    if s.hp~=hp then
+        s.hp=hp;s.hp_label:SetText(encoded("— "..hp.."% HP —"))
+        s.hp_label:SetTextColor(hp<=25 and GetARGB(255,235,100,90) or GetARGB(255,238,205,125))
+    end
+    local wait=math.max(0,math.ceil(((s.cooldowns.control or 0)-now)/1000))
+    s.ability_mode=s.ability_mode==2 and 2 or 1
+    local lines={cycle="Сменить способность",aim="Прицеливание (удерживать)",control=({"Контроль","Разорвать внутренности"})[s.ability_mode]..(wait>0 and (" ("..wait.." с)") or ""),melee="Ближний удар",
+        camera=s.camera_mode=="side" and "Камера сбоку" or "По центру",
+        footer="Вернуть героя  |  "..math.ceil(s.remaining/1000).." с"}
+    s.info_label:SetText(encoded("Слуги: "..#s.servants.."/"..s.servant_limit))
+    update_servant_labels(now)
+    local layout_dirty=false
+    for kind,text in pairs(lines) do
+        local key_text=kind=="footer" and "Esc" or key(kind)
+        if text~=s.hint_texts[kind] or key_text~=s.key_texts[kind] then
+            layout_dirty=true
+            s.key_texts[kind]=key_text
+            s.hint_texts[kind]=text;s.hint_labels[kind]:SetText(encoded(text))
+            local color=GetARGB(255,238,205,125)
+            local mode_colors={GetARGB(255,100,220,110),GetARGB(255,255,65,65)}
+            s.hint_labels[kind]:SetTextColor(kind=="control" and mode_colors[s.ability_mode] or GetARGB(255,180,185,180));s.key_labels[kind]:SetTextColor(color)
+            s.separators[kind]:SetTextColor(GetARGB(255,150,155,150))
+            s.key_labels[kind]:SetText(encoded(key_text))
+        end
+    end
+    if layout_dirty then
+        local width=0
+        for _,label in pairs(s.hint_labels) do width=math.max(width,label:TextWidth()) end
+        width=math.min(440*s.aspect,width)
+        local left=512-width/2
+        -- Centre the description column itself under HP/aim; put key
+        -- labels outside it, preserving a shared left edge for all hints.
+        for kind,label in pairs(s.hint_labels) do
+            local y=label.pos.y
+            label:SetWndPos(vector2():set(left,y));label:SetWndSize(vector2():set(width,24))
+            s.key_labels[kind]:SetWndPos(vector2():set(left-72*s.aspect,y))
+            s.separators[kind]:SetWndPos(vector2():set(left-18*s.aspect,y))
+        end
+        s.window.controller_ui.left=left;s.window.controller_ui.width=width
+    end
+    local notice=s.notice_until and now<s.notice_until and s.notice or ""
+    if notice~=s.notice_text then
+        s.notice_text=notice;s.notice_label:SetText(encoded(notice))
+        s.notice_label:SetTextColor(s.notice_damage and GetARGB(255,224,155,155) or GetARGB(255,238,205,125))
+        local width=((s.notice_damage or notice=="") and 56 or math.max(100,math.min(360,#encoded(notice)*7+20)))*s.aspect
+        s.notice_label:SetWndPos(vector2():set(512-width/2+4*s.aspect,480))
+        s.notice_label:SetWndSize(vector2():set(width-8*s.aspect,24))
+        s.notice_label:Show(notice~="")
+    end
+end
+finish=function(reason,stale)
+    local s=form;form=nil
+    if not s then return end
+    if stale then anomaly_donation_bridge_common.form_movement_defer(s.movement) end
+    -- No persistent invulnerability was acquired: clearing form immediately
+    -- releases input interception, even if native cleanup fails.
+    -- sound_object owns its ref_sound independently of the loaded world;
+    -- unlike native world particles, these handles remain safe on load.
+    for channel in pairs(s.sounds) do stop_sound(s,channel) end
+    pcall(restore_aim,s) -- console FOV is not world userdata; restore even on a stale-world exit
+    if not stale then
+        pcall(restore_actor_health,s)
+        pcall(restore_movement,s)
+
+        for _,entry in ipairs(s.fx) do pcall(function() entry.handle:stop() end) end
+        s.fx={}
+        release_servants(s)
+        pcall(function() local hud=get_hud();if hud and s.window then hud:RemoveDialogToRender(s.window) end end)
+        pcall(function() if owned_body(s) then level.remove_attachment(BODY) end end)
+        if s.camera_owned and actor() and actor():id()==s.actor_id then
+            pcall(level.remove_cam_custom_position_direction)
+            pcall(level.set_active_cam,s.camera)
+        end
+        -- Keep userdata alive until CDialogHolder drops its disabled raw
+        -- pointer after OnFrame; removal can occur inside our own Update.
+        retired[#retired+1]={window=s.window,frame=device().frame+4}
+    end
+    log_failure(reason)
+end
+frame_update=function()
+    if not form then return end
+    local s=form;local now=time_global();local d=device()
+    if s.frame==d.frame then return end
+    s.frame=d.frame
+    if not actor() or actor():id()~=s.actor_id or not actor():alive() then finish("actor_unavailable");return end
+    sync_actor_health(s)
+    if s.depleted then finish("form_destroyed");return end
+    if not ui_free() then
+        if d:is_paused() then
+            local elapsed=math.max(0,now-s.last);s.last=now
+            if s.motion_restart_at then s.motion_restart_at=s.motion_restart_at+elapsed end
+            for kind,until_ms in pairs(s.cooldowns) do s.cooldowns[kind]=until_ms+elapsed end
+            if s.action then
+                if s.action.kind=="control" then s.action.next_stage=s.action.next_stage+elapsed
+                else s.action.fire_at=s.action.fire_at+elapsed;s.action.until_ms=s.action.until_ms+elapsed end
+            end
+            if s.idle_sound_at then s.idle_sound_at=s.idle_sound_at+elapsed end
+
+            for _,entry in ipairs(s.fx) do entry.expires=entry.expires+elapsed end
+            for _,check in ipairs(s.hit_checks) do check.due=check.due+elapsed end
+            return
+        end
+        finish("actor_busy");return
+    end
+    if actor():get_visual_name()~=s.actor_visual or not body_mode_safe() or not owned_body(s) then
+        finish("visual_or_camera_changed");return
+    end
+    if not movement_owned(s) then finish("movement_changed");return end
+    local dt=math.max(0,now-s.last);s.last=now;s.remaining=s.remaining-dt
+    if s.remaining<=0 then finish("complete");return end
+    update_aim(s)
+    update_effects(now)
+    update_combat(now,dt)
+    if form~=s then return end
+    update_hit_feedback(now);camera_update();status(now)
+end
+local function safe_frame()
+    local ok,why=pcall(frame_update)
+    if not ok then finish(why) end
+end
+local function ensure_hud()
+    if adb_controller_form_hud then return end
+    class "adb_controller_form_hud" (CUIScriptWnd)
+    function adb_controller_form_hud:__init()
+        super();self:SetAutoDelete(false);self:SetWndRect(Frect():set(0,0,1024,768))
+    end
+    function adb_controller_form_hud:Update()
+        CUIScriptWnd.Update(self)
+        if form and form.window==self then safe_frame() end
+    end
+end
+execute=function(context,params)
+    if not supported() then return "deferred","controller_form_api_unavailable" end
+    if form or suspended or #pending_restore>0 then return "deferred","controller_form_busy" end
+    if not ui_free() or not body_mode_safe() then return "deferred","controller_waiting_for_free_actor" end
+    -- Recheck catalog/model at the side-effect boundary, not a stale check.
+    local options,why=validate_options(params)
+    if not options then return "rejected",why end
+    if level.get_attachment(BODY)~=nil then return "deferred","controller_visual_name_busy" end
+    local a=actor();local dir=vec(device().cam_dir)
+    local movement=plan_movement(a)
+    if not movement then return "deferred","controller_movement_values_unavailable" end
+    local entry_health=tonumber(a.health)
+    if not finite(entry_health) or entry_health<=0 then return "deferred","controller_actor_health_unavailable" end
+    -- Store no actor userdata for equality/lifetime probes. The registry's
+    -- on_game_load callback invalidates the entire form before the new world
+    -- updates (the actor ID itself is reused across saves).
+    form={actor_id=a:id(),actor_visual=a:get_visual_name(),camera=level.get_active_cam(),
+        actor_health=entry_health,form_max_health=options.health_percent/100,form_health=options.health_percent/100,
+        attack_factor=options.attack_factor,bites=options.bites,params={},
+        servants={},servant_limit=options.servant_limit,servant_labels={},fx={},ability_mode=1,movement=movement,
+        yaw=dir:getH(),pitch=math.max(-0.8,math.min(0.8,dir:getP())),
+        remaining=options.duration,last=time_global(),cooldowns={},section=options.section,lease={},
+        sounds={},sound_assets=available_sounds(),idle_sound_at=time_global()+8000,keys=options.keys,camera_mode=options.camera_mode,
+        hit_checks={},hint_texts={},key_texts={},hint_labels={},key_labels={},separators={}}
+    for key,value in pairs(params) do form.params[key]=value end
+    local ok,reason=pcall(function()
+        apply_movement(form)
+        ensure_hud()
+        form.body=level.add_attachment(BODY,options.model)
+        if not form.body then error("controller_attachment_failed") end
+        form.body.userdata={owner=HANDLER,lease=form.lease}
+        form.camera_height=2.6;form.camera_distance=3.6;form.bite_height=1.3
+        form.side_camera_height=1.65
+        -- Model-local center, sampled once. Actor collision stays unchanged.
+        if type(form.body.get_center)=="function" then
+            local measured,center=pcall(function() return form.body:get_center() end)
+            if measured and center and finite(center.y) and center.y>0 then
+                form.bite_height=math.max(0.9,math.min(1.8,center.y))
+                form.camera_height=math.max(2.4,math.min(3.2,center.y*2+0.8))
+                form.camera_distance=math.max(3.6,math.min(5,form.camera_height*1.5))
+                form.side_camera_height=math.max(1.5,math.min(1.85,center.y*1.5+0.15))
+            end
+        end
+        form.body:set_position(a:position());motion(MOTIONS.idle,true)
+        form.hud=get_hud();if not form.hud then error("controller_hud_missing") end
+        form.window=adb_controller_form_hud()
+        local display=device()
+        local w,h=tonumber(display.width),tonumber(display.height)
+        local aspect=w and h and w>0 and h>0 and math.min(1,(h/w)/(768/1024)) or 1
+        form.aspect=aspect
+        local width=320*aspect;local left=512-width/2
+        form.hp_label=outlined_label(form.window,left,580,width,24,2)
+        form.info_label=outlined_label(form.window,250,430,524,24,2)
+        form.info_label:SetTextColor(GetARGB(255,180,185,180))
+        for i,kind in ipairs({"control","aim","melee","cycle","camera","footer"}) do
+            local y=608+(i-1)*20+(kind=="footer" and 6 or 0)
+            form.key_labels[kind]=outlined_label(form.window,left,y,50*aspect,24,1)
+            form.separators[kind]=outlined_label(form.window,left+54*aspect,y,10*aspect,24,2)
+            form.separators[kind]:SetText("|")
+            form.hint_labels[kind]=outlined_label(form.window,left+72*aspect,y,248*aspect,24,0)
+        end
+        local ring=CUIStatic();ring:SetAutoDelete(true)
+        ring:SetWndPos(vector2():set(512-64*aspect,384-64))
+        ring:SetWndSize(vector2():set(128*aspect,128))
+        ring:InitTexture("adb_burer_aim_ring");ring:SetStretchTexture(true)
+        form.window:AttachChild(ring);form.aim_ring=ring
+        local notice_width=56*aspect
+        form.notice_label=outlined_label(form.window,512-notice_width/2+4*aspect,480,notice_width-8*aspect,24,2)
+        form.notice_label:Show(false)
+        -- Logical widget groups retain their native text children together.
+        form.window.controller_ui={hp=form.hp_label,keys=form.key_labels,labels=form.hint_labels,
+            separators=form.separators,ring=ring,notice=form.notice_label,info=form.info_label,servants=form.servant_labels,left=left,width=width}
+        form.hud:AddDialogToRender(form.window)
+        form.camera_owned=true;level.set_active_cam(0);camera_update();status(time_global())
+    end)
+    if not ok then finish(reason);return "rejected","controller_form_setup_failed" end
+    return "executed","controller_form_started"
+end
+local function ability_key(dik)
+    if form then for kind,key in pairs(form.keys) do if key.dik==dik then return kind end end end
+end
+local function block_bind(bind)
+    local keys=key_bindings or {}
+    for _,name in ipairs({"kWPN_FIRE","kWPN_ZOOM","kWPN_RELOAD","kWPN_FUNC","kWPN_NEXT","kWPN_PREV",
+        "kWPN_1","kWPN_2","kWPN_3","kWPN_4","kWPN_5","kWPN_6","kUSE","kCAM_1","kCAM_2","kCAM_3",
+        "kSHOW_DETECTOR","kDETECTOR","kDROP","kINVENTORY","kACTIVE_JOBS","kCUSTOM20","kNEXT_SLOT","kPREV_SLOT",
+        "kQUICK_USE_1","kQUICK_USE_2","kQUICK_USE_3","kQUICK_USE_4"}) do
+        if keys[name]~=nil and bind==keys[name] then return true end
+    end
+    return false
+end
+local function on_key(dik,bind,disabled,flags,pressed,released)
+    if not form or type(flags)~="table" or flags.ret_value==false or disabled then return end
+    -- Block native actions, not physical keys: remapped jump/sprint are covered.
+    -- Always pass releases through so entry/exit cannot latch held input.
+    local bindings=key_bindings or {}
+    if not released and (bindings.kJUMP~=nil and bind==bindings.kJUMP or
+        bindings.kSPRINT_TOGGLE~=nil and bind==bindings.kSPRINT_TOGGLE) then flags.ret_value=false;return end
+    local kind=ability_key(dik)
+    if kind=="aim" and released then
+        flags.ret_value=false;form.aiming=false
+        local ok,reason=pcall(update_aim,form);if not ok then finish(reason) end
+        return
+    end
+    -- Block inventory/PDA/slot switches even during a transient busy frame,
+    -- including knife entry and the scripted PDA-map hotkey (custom20).
+    if not ui_free() then
+        if kind or not released and block_bind(bind) then flags.ret_value=false end
+        return
+    end
+    if dik==DIK_keys.DIK_ESCAPE then
+        flags.ret_value=false
+        if pressed then finish("cancelled") end
+        return
+    end
+    if kind=="aim" then
+        flags.ret_value=false;form.aiming=true;return
+    end
+    if kind=="cycle" then
+        flags.ret_value=false
+        if pressed then form.ability_mode=form.ability_mode==2 and 1 or 2 end
+        return
+    end
+    -- Camera input never overwrites a queued attack, cooldown or held power.
+    if kind=="camera" then
+        flags.ret_value=false
+        if pressed then form.camera_mode=form.camera_mode=="side" and "center" or "side" end
+        return
+    end
+    -- Let native weapon STOP/release events through, so an action which was
+    -- already held at entry cannot remain latched after the form ends.
+    if kind or not released and block_bind(bind) then
+        flags.ret_value=false
+        if pressed and kind then form.pending=kind end
+    end
+end
+local function on_mouse(x,y,disabled,flags)
+    if not form or disabled or not ui_free() or type(flags)~="table" or flags.ret_value==true then return end
+    -- This callback consumes only the mouse turn, never WASD. The native
+    -- first-eye camera is aligned through the HPB/quaternion sign conversion.
+    flags.ret_value=true
+    local sensitivity=form.aiming and 0.55 or 1
+    form.yaw=(form.yaw-x*0.0025*sensitivity)%(math.pi*2)
+    form.pitch=math.max(-0.8,math.min(0.8,form.pitch-y*0.001875*sensitivity))
+end
+-- Incoming hits are charged only by the native post-calculation callback.
+local function calculated_hit(h,target,bone)
+    anomaly_donation_bridge_common.form_hit_calculated(form,h,target)
+    if form and h and target then control_hit(target,h) end
+    local active=form or suspended
+    if not active or not h or not target or not health_actor(active) or
+        target:id()~=active.actor_id or target:get_visual_name()~=active.actor_visual then return end
+    if form==active then anomaly_donation_bridge_common.form_equipment_after_hit(form,target,h,bone) end
+    -- Native power here ALREADY includes belt, outfit/helmet, immunity,
+    -- boosters, health_hit_part and relevant hit-bone coefficients. Do not
+    -- divide by capacity again; 0.3 final damage / 3 HP = 10% at 300%.
+    -- Radiation adds exposure, not instant HP loss. Keep that native, and
+    -- transfer its later condition damage via sync_actor_health instead.
+    if h.type==hit.radiation then return end
+    local power=tonumber(h.power)
+    -- Keep the rider safe even on overkill/further hits in the final frame.
+    -- This only edits the current actor hit, never NPC/mutant damage or _G.
+    h.power=0
+    local lost=lose_form_health(active,power)
+    if form and lost>0 then hurt() end
+end
+local function footstep(_,power,_,flags)
+    if not form or not ui_free() or type(flags)~="table" or flags.ret_value==false then return end
+    -- Use the native grounded footstep event; never add steps from a frame
+    -- timer while jumping, blocked by a wall, standing still or paused.
+    if play_sound("step",actor():position(),math.max(0.1,math.min(1,tonumber(power) or 1))) then flags.ret_value=false end
+end
+hurt=function()
+    if not form or not ui_free() or time_global()<(form.hurt_sound_at or 0) then return end
+    play_sound("hurt",actor():position(),0.7);form.hurt_sound_at=time_global()+1500
+end
+local function cancel(reason,stale)
+    if suspended then log_failure(reason) end
+    local snapshot=suspended;suspended=nil
+    if snapshot and not stale then pcall(restore_actor_health,snapshot) end
+    finish(reason,stale)
+end
+local function before_death(_,flags)
+    local s=form or suspended
+    if s and type(flags)=="table" and flags.ret_value~=false then
+        local a=health_actor(s,true)
+        local current=a and tonumber(a.health)
+        if finite(current) and sync_actor_health(s,true) then
+            -- Native condition loss can reach death before the render/update
+            -- guard. Restore the rider BEFORE allowing native KillEntity to
+            -- continue. An explicit kill with no HP loss destroys the form.
+            if current>=s.actor_health then s.form_health=0;s.depleted=true end
+            flags.ret_value=false
+            return
+        end
+    end
+    cancel("death")
+end
+local function effect_save(stage,name,success)
+    if stage=="before" then
+        if form and not suspended then
+            local s=form;local now=time_global()
+            sync_actor_health(s)
+            if s.depleted then finish("form_destroyed");return end
+            local snapshot={params={},remaining=math.max(0,s.remaining-(device():is_paused() and 0 or math.max(0,now-s.last))),yaw=s.yaw,pitch=s.pitch,camera_mode=s.camera_mode,ability_mode=s.ability_mode,
+                actor_id=s.actor_id,actor_visual=s.actor_visual,actor_health=s.actor_health,
+                form_health=s.form_health,form_max_health=s.form_max_health,
+                cooldowns={},requests={},deadline=now+10000}
+            snapshot.servants={}
+            for _,row in ipairs(s.servants) do snapshot.servants[#snapshot.servants+1]={id=row.id,name=row.name,section=row.section} end
+            for key,value in pairs(s.params) do snapshot.params[key]=value end
+            snapshot.params.mutant_sections=s.section
+            for kind,until_ms in pairs(s.cooldowns) do snapshot.cooldowns[kind]=math.max(0,until_ms-now) end
+            -- Only plain Lua values survive the suspension, never a window,
+            -- attachment, particle, held object, shell or actor userdata.
+            suspended=snapshot;finish("service_save_suspend")
+            if #pending_restore>0 then suspended=nil;return false end
+        end
+        if suspended then
+            if #suspended.requests>=64 then return false end
+            suspended.requests[#suspended.requests+1]={name=name}
+        end
+    elseif stage=="after" and suspended then
+        if success~=true then cancel("service_save_failed");return end
+        for _,request in ipairs(suspended.requests) do if request.name==name then request.returned=true;break end end
+    end
+end
+local function write_health_recovery(data,s,camera_owned)
+    if type(data)~="table" then return end
+    -- Cleanup values belong to this save. Only plain form parameters, HP
+    -- and relative timers accompany them; process RAM gates restoration.
+    local movement={}
+    for _,entry in ipairs(s.movement or {}) do
+        if entry.attempted then movement[#movement+1]={key=entry.key,before=entry.before,applied=entry.applied} end
+    end
+    data[JOURNAL]={version=5,actor_health=s.actor_health,actor_visual=s.actor_visual,
+        zoom=s.zoom and s.zoom.attempted and {before=s.zoom.before,applied=s.zoom.applied} or nil,
+        movement=movement,camera=s.camera,camera_owned=camera_owned==true}
+    if type(anomaly_donation_bridge_common.form_save_snapshot)=="function" then
+        local ok,value=pcall(anomaly_donation_bridge_common.form_save_snapshot,s,HANDLER,time_global(),device():is_paused())
+        if ok then data[JOURNAL].form_state=value end
+    end
+    journal_pending=true
+end
+local function before_save_input(flags)
+    if type(flags)=="table" and flags.ret==true then return end
+    if not form and not suspended then return end
+    -- Coalesce repeated F5 presses while the same native save is pending.
+    if suspended then for _,request in ipairs(suspended.requests) do if request.manual then return end end end
+    effect_save("before",MANUAL_SAVE)
+    if suspended then
+        for _,request in ipairs(suspended.requests) do
+            if request.name==MANUAL_SAVE then request.manual=true end
+        end
+    end
+end
+local function observe_save()
+    if not suspended then return end
+    for _,request in ipairs(suspended.requests) do
+        if not request.observed then request.observed=true;break end
+    end
+    for _,request in ipairs(suspended.requests) do
+        if request.manual and request.observed then
+            request.returned=true;request.saved_frame=device().frame
+            suspended.manual_saved_frame=device().frame;suspended.manual_returned=nil
+        end
+    end
+end
+local function on_save(data)
+    if type(data)~="table" then return end
+    if not form and #pending_restore>0 and type(data)=="table" then
+        data[CONTROL_JOURNAL]={version=1,rows=ledger_rows()}
+    end
+    data[JOURNAL]=nil
+    if suspended then
+        sync_actor_health(suspended)
+        -- This event proves native serialization reached its save-state
+        -- boundary. Waiting for it handles asynchronous console saves too.
+        observe_save()
+        write_health_recovery(data,suspended,false)
+        return -- actor/camera were already restored BEFORE ClientSave
+    end
+    local s=form;if not s then return end
+    local rows=ledger_rows()
+    -- Console/mod autosaves may reach save_state after native ClientSave.
+    -- Keep this save's original cleanup lease, and recreate the live form on
+    -- a later actor frame, after the synchronous native writer has returned.
+    before_save_input();observe_save()
+    if type(data)=="table" and #rows>0 then data[CONTROL_JOURNAL]={version=1,rows=rows} end
+    write_health_recovery(data,s,s.camera_owned)
+end
+local function update()
+    if recover_pending and (not actor() or not storage() or (tonumber(device().precache_frame) or 0)>0) then return end
+    anomaly_donation_bridge_common.form_movement_recover(actor())
+    if recover_pending then recover_controls() end
+    if not device():is_paused() then
+        for i=#pending_restore,1,-1 do
+            local row=pending_restore[i]
+            if time_global()>=(row.retry_at or 0) then
+                row.retry_at=time_global()+1000
+                local ok,result=pcall(release_row,row)
+                if ok and result then table.remove(pending_restore,i) end
+            end
+        end
+        if not form then write_ledger() end
+    end
+    if journal_pending then local data=storage();if data then data[JOURNAL]=nil end;journal_pending=false end
+    if recover_pending then
+        recover_pending=false
+        local data=storage();local r=data and data[JOURNAL]
+        if type(r)=="table" and (r.version==1 or r.version==2 or r.version==3 or r.version==4 or r.version==5) then
+            if r.camera_owned==true and finite(r.camera) and r.camera%1==0 and r.camera>=0 and r.camera<=2 then
+                pcall(level.remove_cam_custom_position_direction);pcall(level.set_active_cam,r.camera)
+            end
+            local z=r.version==5 and r.zoom
+            if type(z)=="table" and finite(z.before) and z.before>=5 and z.before<=180 and finite(z.applied) and z.applied>=5 and z.applied<=180 then
+                pcall(restore_aim,{zoom={before=z.before,applied=z.applied,attempted=true}})
+            end
+            local a=actor()
+            if r.version>=2 and finite(r.actor_health) and r.actor_health>0 and type(r.actor_visual)=="string" and
+                a and a:alive() and a:get_visual_name()==r.actor_visual then
+                a.health=r.actor_health
+                if r.version>=4 and type(r.movement)=="table" and movement_api(a) then
+                    for _,saved in ipairs(r.movement) do
+                        if type(saved)=="table" and finite(saved.before) and saved.before>=0 and finite(saved.applied) then
+                            for _,key in ipairs(MOVE_FIELDS) do
+                                if saved.key==key then pcall(function()
+                                    if same_value(a["get_actor_"..key](a),saved.applied) then a["set_actor_"..key](a,saved.before) end
+                                end) end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if type(r)=="table" and r.version==5 and type(anomaly_donation_bridge_common.form_load_snapshot)=="function" then
+            local ok,value=pcall(anomaly_donation_bridge_common.form_load_snapshot,r.form_state,HANDLER,actor())
+            if ok then suspended=value end
+        end
+        if data then data[JOURNAL]=nil end
+    end
+    if suspended then
+        local snapshot=suspended;local now=time_global();local a=actor()
+        if snapshot.manual_saved_frame then
+            -- Disk IO can take longer than the suspension timeout. Start its
+            -- recovery budget on the first gameplay frame after serialization.
+            if not snapshot.manual_returned or not ui_free() then snapshot.deadline=now+10000 end
+            if device().frame>snapshot.manual_saved_frame then snapshot.manual_returned=true end
+        end
+        sync_actor_health(snapshot)
+        if snapshot.depleted then
+            cancel("form_destroyed")
+        elseif (not snapshot.from_save and now>snapshot.deadline) or snapshot.remaining<=0 or not a or a:id()~=snapshot.actor_id or not a:alive() or
+            a:get_visual_name()~=snapshot.actor_visual then
+            cancel("service_save_resume_cancelled")
+        else
+            local complete=snapshot.from_save or #snapshot.requests>0
+            for _,request in ipairs(snapshot.requests) do
+                -- Match the actual uniquely named Anomaly save too: an
+                -- unrelated save_state event cannot prematurely resume us.
+                if request.manual then
+                    if not request.returned or not request.observed or device().frame<=request.saved_frame then complete=false end
+                elseif not request.returned or not request.observed or
+                    not getFS():exist("$game_saves$",request.name..".scop") then complete=false end
+            end
+            if complete and ui_free() and body_mode_safe() and #pending_restore==0 then
+                if snapshot.from_save and type(anomaly_donation_bridge_catalog.snapshot)=="function" then
+                    local current=anomaly_donation_bridge_catalog.snapshot()
+                    if not current then return end
+                    snapshot.params.catalog_revision=current.revision
+                end
+                -- Saved forms carry no native world objects. Loading has
+                -- already repaired this save's camera/movement leases.
+                suspended=nil
+                local outcome=execute({},snapshot.params)
+                if outcome=="executed" and form then
+                    form.remaining=snapshot.remaining;form.yaw=snapshot.yaw;form.pitch=snapshot.pitch
+                    form.camera_mode=snapshot.camera_mode or form.camera_mode
+                    form.ability_mode=snapshot.ability_mode==2 and 2 or 1
+                    form.actor_health=snapshot.actor_health;form.form_health=snapshot.form_health;form.form_max_health=snapshot.form_max_health
+                    for kind,remaining in pairs(snapshot.cooldowns) do form.cooldowns[kind]=now+remaining end
+                    for _,row in ipairs(snapshot.servants or {}) do
+                        local object=online(row);if object then control_target(object) end
+                    end
+                    camera_update();status(now)
+                elseif outcome=="deferred" then suspended=snapshot end
+            end
+        end
+    end
+    for i=#retired,1,-1 do if device().frame>=retired[i].frame then table.remove(retired,i) end end
+    -- Render callbacks perform smooth updates. This is only a cleanup guard
+    -- if a HUD replacement stops updating/removes our lightweight window.
+    if form and not device():is_paused() and time_global()-form.last>1500 then finish("hud_update_stalled") end
+end
+function on_game_start()
+    if registered then return end;registered=true
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=function() return not not supported() end,
+        is_blocking=function() return form~=nil or suspended~=nil or #pending_restore>0 end,allow_while_blocking=CONCURRENT_SPAWNS,
+        can_execute=can_execute,execute=execute,update=update,
+        on_effect_save=effect_save,
+        on_game_load=function() cancel("load",true);retired={};pending_restore={};recover_pending=true;journal_pending=false end,
+        on_level_changing=function() cancel("level_change") end})
+    RegisterScriptCallback("on_before_key_press",function(d,b,disabled,flags) on_key(d,b,disabled,flags,true) end)
+    RegisterScriptCallback("on_before_key_hold",function(d,b,disabled,flags) on_key(d,b,disabled,flags,false) end)
+    RegisterScriptCallback("on_before_key_release",function(d,b,disabled,flags) on_key(d,b,disabled,flags,false,true) end)
+    if level_input and type(level_input.on_mouse_move)=="function" then RegisterScriptCallback("on_before_mouse_move",on_mouse) end
+    if type(CBeforeHitAfterCalcs)=="function" then
+        RegisterScriptCallback("on_before_hit_after_calcs",calculated_hit)
+        damage_hook_registered=true
+    end
+    RegisterScriptCallback("actor_on_footstep",footstep)
+    RegisterScriptCallback("actor_on_hit_callback",hurt)
+    RegisterScriptCallback("npc_on_before_hit",control_hit)
+    RegisterScriptCallback("monster_on_before_hit",control_hit)
+    RegisterScriptCallback("actor_on_before_hit",function(h,b,flags)
+        control_hit(actor(),h,b,flags)
+        anomaly_donation_bridge_common.form_equipment_before_hit(form,actor(),h,b,flags)
+    end)
+    RegisterScriptCallback("on_enemy_eval",control_enemy_eval)
+    RegisterScriptCallback("monster_on_update",function(object)
+        local row=servant(object)
+        if row and row.kind=="mutant" then row.native_dirty=true end
+    end)
+    RegisterScriptCallback("actor_on_update",function()
+        local s=form or suspended
+        if s then
+            local ok=pcall(sync_actor_health,s)
+            if not ok then cancel("health_guard_failed") end
+        end
+    end)
+    RegisterScriptCallback("on_before_save_input",function(flags) local ok=pcall(before_save_input,flags);if not ok then cancel("save") end end)
+    RegisterScriptCallback("on_before_load_input",function() cancel("load") end)
+    RegisterScriptCallback("save_state",on_save)
+    RegisterScriptCallback("GUI_on_show",function() if not (suspended and (suspended.from_save or suspended.manual_saved_frame)) then cancel("interface") end end)
+    RegisterScriptCallback("main_menu_on_quit",function() cancel("quit");if type(anomaly_donation_bridge_common.form_save_session_end)=="function" then anomaly_donation_bridge_common.form_save_session_end() end end)
+    RegisterScriptCallback("actor_on_before_death",before_death)
+end

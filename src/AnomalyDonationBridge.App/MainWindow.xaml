@@ -1,0 +1,1957 @@
+<Window x:Class="AnomalyDonationBridge.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:AnomalyDonationBridge.App"
+        xmlns:vm="clr-namespace:AnomalyDonationBridge.App.ViewModels"
+        xmlns:core="clr-namespace:AnomalyDonationBridge.Core;assembly=AnomalyDonationBridge.Core"
+        Title="Anomaly Donation Bridge"
+        Width="1440" Height="860" MinWidth="640" MinHeight="520"
+        Background="{DynamicResource BackgroundBrush}"
+        Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13"
+        UseLayoutRounding="True"
+        WindowStartupLocation="CenterScreen" PreviewKeyDown="Window_PreviewKeyDown" ContextMenuOpening="TemplateContextMenu_Opening">
+    <Window.Resources>
+        <Style x:Key="TraderStockSliderStyle" TargetType="Slider">
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="IsMoveToPointEnabled" Value="True" />
+            <Setter Property="SmallChange" Value="1" />
+            <Setter Property="LargeChange" Value="1" />
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="Slider">
+                    <Grid x:Name="SliderRoot" Background="Transparent">
+                        <Border Height="4" Background="{DynamicResource BorderBrush}" CornerRadius="2" VerticalAlignment="Center" />
+                        <Track x:Name="PART_Track" VerticalAlignment="Center">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
+                                    <RepeatButton.Template><ControlTemplate TargetType="RepeatButton">
+                                        <Border Height="4" Background="{DynamicResource AccentBrush}" CornerRadius="2" VerticalAlignment="Center" />
+                                    </ControlTemplate></RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Width="14" Height="20" Cursor="SizeWE">
+                                    <Thumb.Template><ControlTemplate TargetType="Thumb">
+                                        <Border x:Name="Grip" Background="{DynamicResource AccentBrush}" CornerRadius="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" />
+                                        <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Grip" Property="BorderBrush" Value="{DynamicResource TextBrush}" />
+                                        </Trigger></ControlTemplate.Triggers>
+                                    </ControlTemplate></Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="Slider.IncreaseLarge" Focusable="False">
+                                    <RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="SliderRoot" Property="Opacity" Value="0.35" /></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="SearchEmptyTitleStyle" TargetType="TextBlock">
+            <Setter Property="Text" Value="{Binding RelativeSource={RelativeSource Self}, Path=Tag}" />
+            <Style.Triggers><DataTrigger Binding="{Binding HasTemplateSearchText}" Value="True"><Setter Property="Text" Value="Ничего не найдено" /></DataTrigger></Style.Triggers>
+        </Style>
+        <Style x:Key="SearchEmptyHintStyle" TargetType="TextBlock">
+            <Setter Property="Text" Value="{Binding RelativeSource={RelativeSource Self}, Path=Tag}" />
+            <Style.Triggers><DataTrigger Binding="{Binding HasTemplateSearchText}" Value="True"><Setter Property="Text" Value="Измените запрос, категорию или очистите поиск, чтобы сбросить фильтр." /></DataTrigger></Style.Triggers>
+        </Style>
+        <local:ParameterColumnWidthConverter x:Key="ParameterColumnWidth" />
+        <Style x:Key="ThemeChoiceStyle" TargetType="RadioButton">
+            <Setter Property="Background" Value="{DynamicResource InputBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="9,8" />
+            <Setter Property="Margin" Value="0,0,6,7" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="ChoiceSurface" Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="{TemplateBinding Padding}" CornerRadius="3">
+                        <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Left" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ChoiceSurface" Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" /></Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="ChoiceSurface" Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+                            <Setter TargetName="ChoiceSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="ChoiceSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            <Setter TargetName="ChoiceSurface" Property="BorderThickness" Value="2" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5" /></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="CategoryTabStyle" TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="ListBoxItem">
+                    <Border x:Name="TabSurface" Background="Transparent" BorderBrush="Transparent" BorderThickness="0,0,0,2" Padding="{TemplateBinding Padding}" Margin="0,0,3,0">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource AccentForegroundBrush}" />
+                            <Setter TargetName="TabSurface" Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+                            <Setter TargetName="TabSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Trigger>
+                        <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="TabSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <DataTemplate x:Key="CategoryTabsTemplate">
+            <ListBox ItemsSource="{x:Static vm:ActionBrowserViewModel.Categories}" SelectedItem="{Binding SelectedCategory, Mode=TwoWay}" SelectionChanged="CategoryTabs_SelectionChanged"
+                     Background="Transparent" BorderThickness="0" Padding="0" FontSize="12"
+                     ItemContainerStyle="{StaticResource CategoryTabStyle}"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                     AutomationProperties.Name="Категории действий">
+                <ListBox.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+                <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" /></DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+        </DataTemplate>
+        <DataTemplate x:Key="BrowserViewTemplate">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                <CheckBox Content="Описание" VerticalAlignment="Center" Margin="0,0,14,0"
+                          IsChecked="{Binding DataContext.ShowTemplateDescriptions, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}"
+                          ToolTip="Показывать описания и выбранные настройки карточек во всех разделах шаблонов" />
+                <ComboBox Width="182" MinHeight="30" Padding="8,4"
+                          ItemsSource="{x:Static vm:ActionBrowserViewModel.ViewOptions}" DisplayMemberPath="Label"
+                          SelectedItem="{Binding SelectedView, Mode=TwoWay}"
+                          AutomationProperties.Name="Вид шаблонов" ToolTip="Компактный список или число колонок сетки" />
+            </StackPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="PresetToolbarTemplate">
+            <Grid Margin="0,0,8,10">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource CategoryTabsTemplate}" HorizontalAlignment="Left" VerticalAlignment="Center" />
+                <ContentPresenter Grid.Column="1" Content="{Binding}" ContentTemplate="{StaticResource BrowserViewTemplate}" />
+            </Grid>
+        </DataTemplate>
+        <Style x:Key="HistoryStatusBadgeStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource PanelBrush}" />
+            <Setter Property="TextElement.Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="Margin" Value="0,2" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Executed}"><Setter Property="Background" Value="{DynamicResource GoodDarkBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource GoodBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Rejected}"><Setter Property="Background" Value="{DynamicResource BadDarkBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource BadBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Uncertain}"><Setter Property="Background" Value="{DynamicResource BadDarkBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource BadBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Expired}"><Setter Property="Background" Value="{DynamicResource BadDarkBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource BadBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Skipped}"><Setter Property="Background" Value="{DynamicResource WarningPanelBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource WarningTextBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.NoRule}"><Setter Property="Background" Value="{DynamicResource WarningPanelBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource WarningTextBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Deferred}"><Setter Property="Background" Value="{DynamicResource WarningPanelBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource WarningTextBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Sent}"><Setter Property="Background" Value="{DynamicResource InfoPanelBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource BlueBrush}" /></DataTrigger>
+                <DataTrigger Binding="{Binding State}" Value="{x:Static core:DispatchState.Queued}"><Setter Property="Background" Value="{DynamicResource InfoPanelBrush}" /><Setter Property="TextElement.Foreground" Value="{DynamicResource InfoTextBrush}" /></DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <local:HistoryStatusMarkerConverter x:Key="HistoryStatusMarker" />
+
+
+        <Style x:Key="StatusCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="Padding" Value="14" />
+        </Style>
+
+        <Style x:Key="ActionRowCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource ActionRowEvenBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource ActionRowBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="3" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="VerticalAlignment" Value="Top" />
+            <Setter Property="ClipToBounds" Value="True" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource ActionExpanderHoverBrush}" />
+                    <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="CompactOrdinalBadgeStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+            <Setter Property="Padding" Value="5,3" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <DataTemplate x:Key="PriceGroupExpansionHintTemplate">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsHitTestVisible="False">
+                <TextBlock FontFamily="Segoe MDL2 Assets" Foreground="{DynamicResource MutedBrush}"
+                           FontSize="11" VerticalAlignment="Center" Margin="0,0,7,0">
+                    <TextBlock.Style><Style TargetType="TextBlock">
+                        <Setter Property="Text" Value="&#xE76C;" />
+                        <Style.Triggers><DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                            <Setter Property="Text" Value="&#xE70D;" />
+                        </DataTrigger></Style.Triggers>
+                    </Style></TextBlock.Style>
+                </TextBlock>
+                <TextBlock Foreground="{DynamicResource MutedBrush}" FontSize="12" VerticalAlignment="Center">
+                    <TextBlock.Style><Style TargetType="TextBlock">
+                        <Setter Property="Text" Value="Развернуть" />
+                        <Style.Triggers><DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                            <Setter Property="Text" Value="Скрыть" />
+                        </DataTrigger></Style.Triggers>
+                    </Style></TextBlock.Style>
+                </TextBlock>
+            </StackPanel>
+        </DataTemplate>
+
+        <Style x:Key="MainTabItemStyle" TargetType="TabItem">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="16,10,16,12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Grid Margin="0,0,5,0" Background="{TemplateBinding Background}">
+                            <Border x:Name="SelectionLine" Height="2" CornerRadius="1"
+                                    Background="{DynamicResource AccentBrush}"
+                                    VerticalAlignment="Bottom" Visibility="Collapsed" />
+                            <ContentPresenter ContentSource="Header"
+                                              Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="SelectionLine" Property="Visibility" Value="Visible" />
+                                <Setter Property="Foreground" Value="{DynamicResource AccentForegroundBrush}" />
+                                <Setter Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="SelectionLine" Property="Background" Value="{DynamicResource BlueBrush}" />
+                                <Setter TargetName="SelectionLine" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MainHistoryHeaderStyle" TargetType="DataGridColumnHeader"
+               BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Background" Value="{DynamicResource PanelAltBrush}" />
+            <Setter Property="Padding" Value="9,7" />
+        </Style>
+
+        <Style x:Key="CatalogListBoxStyle" TargetType="ListBox">
+            <Setter Property="Background" Value="{DynamicResource InputBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="3" />
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+        </Style>
+
+        <Style x:Key="CatalogListBoxItemStyle" TargetType="ListBoxItem">
+            <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Padding" Value="7,5" />
+            <Setter Property="Margin" Value="1" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="CatalogItemBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="Transparent" BorderThickness="1"
+                                CornerRadius="5" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="CatalogItemBorder" Property="Background" Value="{DynamicResource ComboItemHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="CatalogItemBorder" Property="Background" Value="{DynamicResource SelectionSurfaceBrush}" />
+                                <Setter TargetName="CatalogItemBorder" Property="BorderBrush" Value="{DynamicResource BlueBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource SelectionTextBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.62" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="HistoryQueueRemoveButtonStyle" TargetType="Button"
+               BasedOn="{StaticResource DangerButtonStyle}">
+            <Setter Property="Content" Value="Удалить из очереди" />
+            <Setter Property="Padding" Value="9,3" />
+            <Setter Property="Margin" Value="5,2" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="ToolTip" Value="Отменить событие, пока оно ещё не передано игре" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="ReplaceOnFocusTextBoxStyle" TargetType="TextBox"
+               BasedOn="{StaticResource {x:Type TextBox}}">
+            <EventSetter Event="GotKeyboardFocus" Handler="EditableTextBox_GotKeyboardFocus" />
+            <EventSetter Event="PreviewMouseLeftButtonDown" Handler="EditableTextBox_PreviewMouseLeftButtonDown" />
+        </Style>
+
+        <DataTemplate x:Key="ParameterOptionTemplate">
+            <TextBlock Text="{Binding Label}" Foreground="{DynamicResource TextBrush}" />
+        </DataTemplate>
+        <DataTemplate x:Key="SpawnPointMethodOptionTemplate">
+            <TextBlock Text="{Binding Label}" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="ParameterTemplate" DataType="{x:Type vm:ParameterValueViewModel}">
+            <Grid Margin="0,0,10,14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="{Binding DisplayName, Mode=OneWay}"
+                           Foreground="{DynamicResource MutedBrush}"
+                           VerticalAlignment="Top"
+                           TextWrapping="Wrap"
+                           FontSize="12" Margin="0,0,0,7" />
+                <StackPanel Grid.Row="1">
+                    <Grid>
+                        <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}">
+                            <TextBox.Style>
+                                <Style TargetType="TextBox" BasedOn="{StaticResource ReplaceOnFocusTextBoxStyle}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsKeyboardKey, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBox.Style>
+                        </TextBox>
+                        <TextBox Text="{Binding Value, Mode=OneWay}" IsReadOnly="True"
+                                 PreviewKeyDown="GameKey_PreviewKeyDown" PreviewMouseDown="GameKey_PreviewMouseDown" ToolTip="{Binding GameKeyHint}">
+                            <TextBox.Style>
+                                <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsKeyboardKey}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBox.Style>
+                        </TextBox>
+                        <ComboBox ItemsSource="{Binding OptionEntries, Mode=OneWay}"
+                                  SelectedValuePath="Value"
+                                  SelectedValue="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
+                            <ComboBox.Style>
+                                <Style TargetType="ComboBox" BasedOn="{StaticResource {x:Type ComboBox}}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Setter Property="ItemTemplate" Value="{StaticResource ParameterOptionTemplate}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsSpawnPointMethod, Mode=OneWay}" Value="True">
+                                            <Setter Property="ItemTemplate" Value="{StaticResource SpawnPointMethodOptionTemplate}" />
+                                            <Setter Property="Padding" Value="10,6,38,6" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsFlatChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ComboBox.Style>
+                        </ComboBox>
+                        <CheckBox IsChecked="{Binding BooleanValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                  Content="Включено"
+                                  VerticalAlignment="Center"
+                                  HorizontalAlignment="Left">
+                            <CheckBox.Style>
+                                <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsBooleanChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </CheckBox.Style>
+                        </CheckBox>
+                        <Grid>
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsGroupedItemChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="3*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Категория" Foreground="{DynamicResource SubtleBrush}"
+                                           FontSize="11" Margin="0,0,0,3" />
+                                <ComboBox ItemsSource="{Binding Categories, Mode=OneWay}"
+                                          SelectedItem="{Binding SelectedCategory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Converter={StaticResource FriendlyValueConverter}}"
+                                                       Foreground="{DynamicResource TextBrush}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Предмет" Foreground="{DynamicResource SubtleBrush}"
+                                           FontSize="11" Margin="0,0,0,3" />
+                                <ComboBox ItemsSource="{Binding FilteredOptionEntries, Mode=OneWay}"
+                                          SelectedValuePath="Value"
+                                          SelectedValue="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          MaxDropDownHeight="420"
+                                          ScrollViewer.CanContentScroll="True"
+                                          VirtualizingStackPanel.IsVirtualizing="True"
+                                          VirtualizingStackPanel.VirtualizationMode="Recycling">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Label}"
+                                                       ToolTip="{Binding Value}" Foreground="{DynamicResource TextBrush}" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                            </StackPanel>
+                        </Grid>
+                        <ItemsControl ItemsSource="{Binding MultiChoiceOptions, Mode=OneWay}">
+                            <ItemsControl.Style>
+                                <Style TargetType="ItemsControl">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsWrappedMultiChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ItemsControl.Style>
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:MultiChoiceOptionViewModel}">
+                                    <CheckBox Content="{Binding Label, Mode=OneWay}"
+                                              IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              ToolTip="{Binding Value, Mode=OneWay}"
+                                              MinWidth="215" Margin="0,3,12,3"
+                                              VerticalAlignment="Center" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <StackPanel Visibility="{Binding IsActiveTemplateSelection, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="{Binding ActiveTemplateSelectionHint}" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,8" />
+                            <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding MultiChoiceOptions}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,12,6">
+                                                <TextBlock Text="{Binding Label}" TextWrapping="Wrap" />
+                                            </CheckBox>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </StackPanel>
+                        <Border Background="Transparent" BorderThickness="0" Padding="0">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsDynamicCatalogChoice, Mode=OneWay}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="2*" />
+                                        <ColumnDefinition Width="8" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding CatalogSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             Tag="Поиск в каталоге…" AutomationProperties.Name="Поиск в каталоге"
+                                             ToolTip="Поиск по локализованному названию, section ID, группировке и силе" />
+                                    <ComboBox Grid.Column="2"
+                                              ItemsSource="{Binding CatalogCategories, Mode=OneWay}"
+                                              SelectedItem="{Binding SelectedCatalogCategory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                </Grid>
+                                <TextBlock Grid.Row="1" Text="{Binding CatalogHint, Mode=OneWay}"
+                                           Foreground="{DynamicResource SubtleBrush}" FontSize="11"
+                                           TextWrapping="Wrap" Margin="0,5,0,5" />
+
+                                <ListBox Grid.Row="2" ItemsSource="{Binding CatalogOptionsView, Mode=OneWay}"
+                                          SelectedItem="{Binding SelectedCatalogOption, Mode=TwoWay}"
+                                          ItemContainerStyle="{StaticResource CatalogListBoxItemStyle}"
+                                          MaxHeight="240" ScrollViewer.CanContentScroll="True"
+                                          VirtualizingPanel.IsVirtualizing="True"
+                                          VirtualizingPanel.VirtualizationMode="Recycling">
+                                    <ListBox.Style>
+                                        <Style TargetType="ListBox" BasedOn="{StaticResource CatalogListBoxStyle}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDynamicCatalogSingleChoice}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ListBox.Style>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate DataType="{x:Type vm:CatalogOptionViewModel}">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding LocalizedAndTechnicalName}"
+                                                           Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding Metadata}" Foreground="{DynamicResource SubtleBrush}"
+                                                           FontSize="11" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <ListBox Grid.Row="3" ItemsSource="{Binding CatalogOptionsView, Mode=OneWay}"
+                                         ItemContainerStyle="{StaticResource CatalogListBoxItemStyle}"
+                                         MaxHeight="260" ScrollViewer.CanContentScroll="True"
+                                         VirtualizingPanel.IsVirtualizing="True"
+                                         VirtualizingPanel.VirtualizationMode="Recycling">
+                                    <ListBox.Style>
+                                        <Style TargetType="ListBox" BasedOn="{StaticResource CatalogListBoxStyle}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDynamicCatalogMultiChoice}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ListBox.Style>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate DataType="{x:Type vm:CatalogOptionViewModel}">
+                                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      IsEnabled="{Binding IsAvailable}" IsHitTestVisible="True">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding LocalizedAndTechnicalName}"
+                                                               Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding Metadata}" Foreground="{DynamicResource SubtleBrush}"
+                                                               FontSize="11" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </CheckBox>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,7,0,0">
+                                    <StackPanel.Style>
+                                        <Style TargetType="StackPanel">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDynamicCatalogMultiChoice}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </StackPanel.Style>
+                                    <TextBlock Text="{Binding DisplayValue, Mode=OneWay}"
+                                               Foreground="{DynamicResource SubtleBrush}"
+                                               VerticalAlignment="Center" Margin="0,0,14,0" />
+                                    <Button Content="Выделить всё"
+                                            Command="{Binding SelectAllCatalogSelectionCommand}"
+                                            Style="{StaticResource GhostButtonStyle}"
+                                            Margin="0,0,8,0" />
+                                    <Button Content="Снять все отметки"
+                                            Command="{Binding ClearCatalogSelectionCommand}"
+                                            Style="{StaticResource GhostButtonStyle}" />
+                                </StackPanel>
+                                <StackPanel Grid.Row="5" Margin="0,7,0,0"
+                                            Visibility="{Binding HasHiddenCatalogSelections, Converter={StaticResource BoolToVisibility}}">
+                                    <TextBlock Text="{Binding HiddenCatalogSummary, Mode=OneWay}"
+                                               Foreground="{DynamicResource WarningTextBrush}"
+                                               TextWrapping="Wrap" Margin="0,0,0,5" />
+                                    <Button Content="Убрать скрытые секции"
+                                            Command="{Binding RemoveHiddenCatalogSelectionsCommand}"
+                                            HorizontalAlignment="Left" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                    <TextBlock Text="{Binding ValidationMessage, Mode=OneWay}"
+                               Foreground="{DynamicResource BadBrush}"
+                               FontSize="11" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding SpawnPointMethodHint}" TextWrapping="Wrap"
+                               Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,7,0,0"
+                               Visibility="{Binding IsSpawnPointMethod, Converter={StaticResource BoolToVisibility}}" />
+                    <TextBlock Text="При включённой паузе курсор неподвижен. Запуск и подтверждение результата — Пробел или назначенная клавиша прыжка."
+                               Foreground="{DynamicResource MutedBrush}" FontSize="11"
+                               TextWrapping="Wrap" Margin="0,7,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding Definition.Key, Mode=OneWay}" Value="pause_game" />
+                                            <Condition Binding="{Binding BooleanValue}" Value="True" />
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+
+        <Style x:Key="PriceChipButtonStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="9,5" />
+            <Setter Property="Foreground" Value="{DynamicResource AccentForegroundBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <DataTemplate x:Key="PriceConditionsTemplate">
+            <StackPanel Margin="0,9,0,4">
+                <ItemsControl ItemsSource="{Binding PriceItems}" ToolTip="Суммы доната: действие запускается при совпадении любого из условий." AutomationProperties.Name="Суммы доната">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.Resources>
+                        <DataTemplate DataType="{x:Type vm:TriggerRuleViewModel}">
+                            <Border Background="{DynamicResource TriggerChipBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1" CornerRadius="3" Margin="0,0,6,6">
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="{Binding Label}" Style="{StaticResource PriceChipButtonStyle}"
+                                            ToolTip="Изменить только это условие" AutomationProperties.Name="{Binding Label, StringFormat=Изменить условие {0}}"
+                                            Command="{Binding DataContext.EditTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                                    <Button Content="×" MinWidth="26" MinHeight="32" Padding="4,4" Style="{StaticResource GhostButtonStyle}"
+                                            Foreground="{DynamicResource MutedBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1,0,0,0"
+                                            ToolTip="Удалить только это условие" AutomationProperties.Name="{Binding Label, StringFormat=Удалить условие {0}}"
+                                            Command="{Binding DataContext.DeleteTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                        <DataTemplate DataType="{x:Type vm:ActionViewModel}">
+                            <Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Content="+ Сумма" MinHeight="34" Margin="0,0,6,6" Padding="10,5"
+                                    Style="{StaticResource AccentOutlineButtonStyle}" BorderBrush="{DynamicResource WarningBorderBrush}"
+                                    Command="{Binding DataContext.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        </DataTemplate>
+                    </ItemsControl.Resources>
+                </ItemsControl>
+            </StackPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactCatalogOptionTemplate" DataType="{x:Type vm:CatalogOptionViewModel}">
+            <Border CornerRadius="2" Padding="3,1" Background="Transparent">
+                <TextBlock Text="{Binding LocalizedAndTechnicalName}" ToolTip="{Binding Metadata}"
+                           TextTrimming="CharacterEllipsis">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsAvailable}" Value="False">
+                                    <Setter Property="Foreground" Value="{DynamicResource DangerTextBrush}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Border>
+        </DataTemplate>
+        <Style x:Key="CompactCatalogComboItemStyle" TargetType="ComboBoxItem">
+            <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+            <Setter Property="ToolTip" Value="{Binding Metadata}" />
+        </Style>
+        <Style x:Key="CompactEditorComboBoxStyle" TargetType="ComboBox"
+               BasedOn="{StaticResource {x:Type ComboBox}}">
+            <Setter Property="Height" Value="34" />
+        </Style>
+        <Style x:Key="CompactEditorTextBoxStyle" TargetType="TextBox"
+               BasedOn="{StaticResource ReplaceOnFocusTextBoxStyle}">
+            <Setter Property="Height" Value="34" />
+            <Setter Property="Padding" Value="10,4" />
+        </Style>
+        <Style x:Key="CompactEditorSearchTextBoxStyle" TargetType="TextBox"
+               BasedOn="{StaticResource CompactEditorTextBoxStyle}">
+            <!-- Search is intentionally tighter than numeric inputs: its caret,
+                 watermark and typed text share this single left inset. -->
+            <Setter Property="Padding" Value="4,4" />
+        </Style>
+        <DataTemplate x:Key="ActionEditorTemplate">
+            <StackPanel Margin="0,4,0,0">
+                <StackPanel Visibility="{Binding IsItemBundle, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="Предметы в одном срабатывании" Style="{StaticResource SectionTitleStyle}" Margin="0,0,0,8" />
+                    <ItemsControl ItemsSource="{Binding ItemSpawnRows}">
+                        <ItemsControl.ItemTemplate><DataTemplate DataType="{x:Type vm:ItemSpawnRowViewModel}">
+                            <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                    CornerRadius="4" Padding="10,8" Margin="0,0,0,8">
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1.1*" MinWidth="163" /><ColumnDefinition Width="1.2*" MinWidth="125" />
+                                        <ColumnDefinition Width="3*" MinWidth="260" /><ColumnDefinition Width="95" /><ColumnDefinition Width="82" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,8,0">
+                                        <TextBlock Text="Категория" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <ComboBox ItemsSource="{Binding Picker.CatalogCategories, Mode=OneWay}"
+                                                  Style="{StaticResource CompactEditorComboBoxStyle}"
+                                                  SelectedItem="{Binding Picker.SelectedCatalogCategory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                        <TextBlock Text="Поиск" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding Picker.CatalogSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 Style="{StaticResource CompactEditorSearchTextBoxStyle}"
+                                                 Tag="Название или ID…" AutomationProperties.Name="Поиск в каталоге"
+                                                 ToolTip="Фильтрует список по локализованному и техническому названию" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding Picker.DisplayName}" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <ComboBox ItemsSource="{Binding Picker.CatalogOptionsView, Mode=OneWay}"
+                                                  Style="{StaticResource CompactEditorComboBoxStyle}"
+                                                  SelectedValuePath="SectionId"
+                                                  SelectedValue="{Binding Picker.Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  ItemTemplate="{StaticResource CompactCatalogOptionTemplate}"
+                                                  ItemContainerStyle="{StaticResource CompactCatalogComboItemStyle}"
+                                                  IsTextSearchEnabled="False" MaxDropDownHeight="480"
+                                                  ScrollViewer.CanContentScroll="True"
+                                                  VirtualizingStackPanel.IsVirtualizing="True"
+                                                  VirtualizingStackPanel.VirtualizationMode="Recycling" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="3" Margin="0,0,8,0">
+                                        <TextBlock Text="Количество" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding CountText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource CompactEditorTextBoxStyle}" />
+                                    </StackPanel>
+                                    <Button Grid.Column="4" Content="Удалить" Height="34" VerticalAlignment="Bottom"
+                                            Style="{StaticResource DangerButtonStyle}"
+                                            Command="{Binding DataContext.RemoveItemSpawnCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}" />
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="5" Text="{Binding ValidationMessage}"
+                                               Foreground="{DynamicResource BadBrush}" FontSize="11" TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding ItemSpawnRows[0].Picker.CatalogHint, Mode=OneWay}"
+                               Foreground="{DynamicResource SubtleBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,7" />
+                    <Button Content="+ Добавить предмет" HorizontalAlignment="Left" Padding="11,5" Margin="0,0,0,12"
+                            Style="{StaticResource AccentOutlineButtonStyle}" Command="{Binding AddItemSpawnCommand}" />
+                </StackPanel>
+
+                <StackPanel Visibility="{Binding IsSpawnGroupBundle, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="Состав групп в одном срабатывании" Style="{StaticResource SectionTitleStyle}" Margin="0,0,0,8" />
+                    <ItemsControl ItemsSource="{Binding SpawnGroupRows}">
+                        <ItemsControl.ItemTemplate><DataTemplate DataType="{x:Type vm:SpawnGroupRowViewModel}">
+                            <Border Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                    CornerRadius="4" Padding="10,8" Margin="0,0,0,8">
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1.1*" MinWidth="163" /><ColumnDefinition Width="1.1*" MinWidth="125" />
+                                        <ColumnDefinition Width="2.2*" MinWidth="260" />
+                                        <ColumnDefinition Width="90" /><ColumnDefinition Width="82" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,8,0">
+                                        <TextBlock Text="Категория" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <ComboBox ItemsSource="{Binding Picker.CatalogCategories, Mode=OneWay}"
+                                                  Style="{StaticResource CompactEditorComboBoxStyle}"
+                                                  SelectedItem="{Binding Picker.SelectedCatalogCategory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                        <TextBlock Text="Поиск" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding Picker.CatalogSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 Style="{StaticResource CompactEditorSearchTextBoxStyle}"
+                                                 Tag="Название или ID…" AutomationProperties.Name="Поиск в каталоге"
+                                                 ToolTip="Фильтрует список по названию, section ID, группировке и силе" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding Picker.DisplayName}" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <ComboBox ItemsSource="{Binding Picker.CatalogOptionsView, Mode=OneWay}"
+                                                  Style="{StaticResource CompactEditorComboBoxStyle}"
+                                                  SelectedValuePath="SectionId"
+                                                  SelectedValue="{Binding Picker.Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  ItemTemplate="{StaticResource CompactCatalogOptionTemplate}"
+                                                  ItemContainerStyle="{StaticResource CompactCatalogComboItemStyle}"
+                                                  IsTextSearchEnabled="False" MaxDropDownHeight="480"
+                                                  ScrollViewer.CanContentScroll="True"
+                                                  VirtualizingStackPanel.IsVirtualizing="True"
+                                                  VirtualizingStackPanel.VirtualizationMode="Recycling" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="3" Margin="0,0,8,0">
+                                        <TextBlock Text="Количество" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding CountText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource CompactEditorTextBoxStyle}" />
+                                    </StackPanel>
+                                    <Button Grid.Column="4" Content="Удалить" Height="34" VerticalAlignment="Bottom"
+                                            Style="{StaticResource DangerButtonStyle}"
+                                            Command="{Binding DataContext.RemoveSpawnGroupCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}" />
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="5" Text="{Binding ValidationMessage}"
+                                               Foreground="{DynamicResource BadBrush}" FontSize="11" TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding SpawnGroupRows[0].Picker.CatalogHint, Mode=OneWay}"
+                               Foreground="{DynamicResource SubtleBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,7" />
+                    <Button Content="+ Добавить группу" HorizontalAlignment="Left" Padding="11,5" Margin="0,0,0,12"
+                            Style="{StaticResource AccentOutlineButtonStyle}" Command="{Binding AddSpawnGroupCommand}" />
+                </StackPanel>
+
+                <ItemsControl ItemsSource="{Binding RegularParameters}" ItemTemplate="{StaticResource ParameterTemplate}">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate>
+                        <WrapPanel>
+                            <WrapPanel.ItemWidth><MultiBinding Converter="{StaticResource ParameterColumnWidth}">
+                                <Binding Path="ActualWidth" RelativeSource="{RelativeSource AncestorType=ItemsControl}" />
+                                <Binding Path="DataContext.CompactParameterColumns" RelativeSource="{RelativeSource AncestorType=ItemsControl}" />
+                            </MultiBinding></WrapPanel.ItemWidth>
+                        </WrapPanel>
+                    </ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                </ItemsControl>
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="5" Padding="12" Margin="0,0,12,16"
+                        Visibility="{Binding IsWanderingTrader, Converter={StaticResource BoolToVisibility}}">
+                    <StackPanel>
+                        <TextBlock Text="Ассортимент" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12" />
+                        <ItemsControl ItemsSource="{Binding TraderStockRows}">
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                                <Grid Margin="0,4">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="260" /><ColumnDefinition Width="*" /><ColumnDefinition Width="50" /></Grid.ColumnDefinitions>
+                                    <CheckBox Content="{Binding Label}" IsChecked="{Binding Enabled.BooleanValue, Mode=TwoWay}" VerticalAlignment="Center" />
+                                    <Slider Grid.Column="1" Style="{StaticResource TraderStockSliderStyle}" Minimum="1" Maximum="{Binding Maximum}" Value="{Binding Count, Mode=TwoWay}" IsSnapToTickEnabled="True" TickFrequency="1"
+                                            IsEnabled="{Binding Enabled.BooleanValue}" VerticalAlignment="Center" Margin="12,0,14,0" />
+                                    <TextBlock Grid.Column="2" Text="{Binding Count}" Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+                <ItemsControl ItemsSource="{Binding AbilityKeyParameters}" ItemTemplate="{StaticResource ParameterTemplate}">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate>
+                        <UniformGrid Columns="2" />
+                    </ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                </ItemsControl>
+                <Grid Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="{Binding CooldownLabel}" Foreground="{DynamicResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,7" />
+                        <TextBox Text="{Binding CooldownText, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource ReplaceOnFocusTextBoxStyle}"
+                                 Width="120" HorizontalAlignment="Left" />
+                        <TextBlock Text="{Binding CooldownValidationMessage}" Foreground="{DynamicResource BadBrush}" FontSize="11" TextWrapping="Wrap" />
+                    </StackPanel>
+
+                </Grid>
+                <TextBlock Text="{Binding CooldownHint}" Foreground="{DynamicResource SubtleBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBlock Text="{Binding EditorUsageHint}" Foreground="{DynamicResource SubtleBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"
+                           Visibility="{Binding IsPreset, Converter={StaticResource BoolToVisibility}}" />
+            </StackPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="PdaActionCardContentTemplate" DataType="{x:Type vm:ActionViewModel}">
+            <StackPanel Margin="14,12,14,10">
+                <DockPanel>
+                    <Border DockPanel.Dock="Left" Background="{DynamicResource TriggerChipBrush}" Padding="5,3" Margin="0,0,10,0"
+                            VerticalAlignment="Top" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}">
+                        <TextBlock Text="{Binding VisualDisplayOrdinalLabel}" Foreground="{DynamicResource AccentBrush}" FontSize="12" FontFamily="Consolas" />
+                    </Border>
+                    <Button DockPanel.Dock="Right" Content="✎" Width="30" Height="28" Padding="0" Margin="8,0,0,0"
+                            Style="{StaticResource GhostButtonStyle}" ToolTip="Переименовать пользовательский шаблон"
+                            Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                            Command="{Binding DataContext.RenameUserPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                            CommandParameter="{Binding}" />
+                    <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" />
+                </DockPanel>
+                <local:TemplateDescriptionTextBlock Description="{Binding Description}" HandlerId="{Binding HandlerId}" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,5,0,0"
+                           Visibility="{Binding DataContext.ShowTemplateDescriptions, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibility}}" />
+                <TextBlock Text="{Binding OriginLabel}" Foreground="{DynamicResource BlueBrush}" FontSize="11" Margin="0,4,0,0">
+                    <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers>
+                        <DataTrigger Binding="{Binding OriginLabel}" Value=""><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+                    </Style.Triggers></Style></TextBlock.Style>
+                </TextBlock>
+                <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource PriceConditionsTemplate}"
+                                  Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" />
+                <ItemsControl ItemsSource="{Binding ParameterSummaryItems}"
+                              Visibility="{Binding DataContext.ShowTemplateDescriptions, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibility}}">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate><DataTemplate>
+                        <TextBlock Text="{Binding}" FontSize="11" Foreground="{DynamicResource InfoTextBrush}" TextWrapping="Wrap" Margin="0,0,12,3" />
+                    </DataTemplate></ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,9,0,0" Padding="0,8,0,0">
+                    <local:CardToolbarPanel>
+                        <Button local:ButtonVisual.Glyph="&#xE713;" Content="Настроить" Click="ConfigureAction_Click" Padding="6,5" AutomationProperties.Name="Настроить параметры шаблона" />
+                        <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,5"
+                                Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                ToolTip="{Binding AvailabilityHint}" ToolTipService.ShowOnDisabled="True" IsEnabled="{Binding CanTest}"
+                                Command="{Binding DataContext.TestCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE734;" Content="В пользовательские" Padding="6,5" Style="{StaticResource AccentOutlineButtonStyle}"
+                                Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}" ToolTip="Сохранить настроенный вариант без цены в пользовательские шаблоны"
+                                Command="{Binding DataContext.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE8FD;" Content="В активные" Padding="6,5" Style="{StaticResource AccentOutlineButtonStyle}"
+                                Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}" ToolTip="Создать активный вариант с этими параметрами и назначенными суммами"
+                                Command="{Binding DataContext.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        <Button Content="⋯" Width="34" Padding="0" FontSize="20"
+                                Style="{StaticResource GhostButtonStyle}" Click="CardMenu_Click"
+                                Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}" AutomationProperties.Name="Другие действия" ToolTip="Код и удаление">
+                            <Button.ContextMenu>
+                                <ContextMenu Placement="Bottom" VerticalOffset="6" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                    <MenuItem Header="+ Сумма" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Горячая клавиша" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddPresetHotkeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В активные" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В пользовательские" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator />
+                                    <MenuItem Header="Запустить от имени донатера" Style="{StaticResource SuccessMenuItemStyle}"
+                                              Command="{Binding PlacementTarget.Tag.RunAsDonorCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Добавить в голосование" Style="{StaticResource VotingTargetsMenuItemStyle}" SubmenuOpened="VotingTargets_SubmenuOpened" CommandParameter="{Binding}">
+                                        <MenuItem Header="Выберите голосование" IsEnabled="False" />
+                                    </MenuItem>
+                                    <Separator />
+                                    <MenuItem Header="Переименовать" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.RenameUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить копию" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить как пользовательский шаблон" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Открыть код" Command="{Binding PlacementTarget.Tag.CodeCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" />
+                                    <MenuItem Header="Удалить пользовательский шаблон" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Удалить из активных" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteActiveCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                    </local:CardToolbarPanel>
+                </Border>
+
+            </StackPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="ActiveActionCardTemplateV2" DataType="{x:Type vm:ActionViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}">
+                <Border BorderBrush="{DynamicResource ActionRowMarkerBrush}" BorderThickness="3,0,0,0">
+                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource PdaActionCardContentTemplate}" />
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="SequenceHandleTemplate">
+            <Border Background="Transparent" Cursor="SizeAll" MinHeight="28" Padding="3,0"
+                    PreviewMouseLeftButtonDown="SequenceHandle_MouseDown" PreviewMouseMove="SequenceHandle_MouseMove"
+                    PreviewMouseLeftButtonUp="SequenceHandle_MouseUp" LostMouseCapture="SequenceHandle_LostCapture"
+                    ToolTip="Зажмите и перетащите, чтобы изменить порядок шагов" AutomationProperties.Name="Переместить шаг">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="⠿" Foreground="{DynamicResource MutedBrush}" FontSize="17" VerticalAlignment="Center" Margin="0,0,5,0" />
+                    <TextBlock Text="{Binding SequenceOrdinal}" Foreground="{DynamicResource AccentForegroundBrush}" FontFamily="Consolas" VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="SequenceCardTemplate">
+            <Border x:Name="SequenceCardDropTarget" Tag="SequenceStepRow" Background="Transparent" AllowDrop="True"
+                    PreviewDragOver="SequenceRow_DragOver" PreviewDrop="SequenceRow_Drop" DragLeave="SequenceRow_DragLeave">
+                <StackPanel>
+                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource SequenceHandleTemplate}" />
+                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource ActiveActionCardTemplateV2}" />
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="PresetCardTemplateV2" DataType="{x:Type vm:ActionViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}">
+                <Border BorderBrush="{DynamicResource ActionRowMarkerBrush}" BorderThickness="3,0,0,0">
+                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource PdaActionCardContentTemplate}" />
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactBuiltInPresetRowTemplate" DataType="{x:Type vm:ActionViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}" Margin="0,0,0,2" MinHeight="38">
+                <Border BorderBrush="{DynamicResource ActionRowMarkerBrush}" BorderThickness="3,0,0,0" Padding="12,3,4,3">
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="1.1*" MinWidth="150" MaxWidth="440" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center" Margin="0,0,12,0" ToolTip="{Binding Description}" />
+                        <local:CardToolbarPanel Grid.Column="1" VerticalAlignment="Center">
+<Button local:ButtonVisual.Glyph="&#xE713;" Content="Настроить" Click="ConfigureAction_Click" Padding="6,4"
+                                AutomationProperties.Name="Настроить параметры шаблона" />
+                        <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,4"
+                                Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                ToolTip="{Binding AvailabilityHint}" ToolTipService.ShowOnDisabled="True" IsEnabled="{Binding CanTest}"
+                                Command="{Binding DataContext.TestCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE734;" Content="В пользовательские" Padding="6,4"
+                                Style="{StaticResource AccentOutlineButtonStyle}"
+                                Command="{Binding DataContext.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                        <Button Content="⋯" Width="32" Height="28" Padding="0" FontSize="18"
+                                Style="{StaticResource GhostButtonStyle}" Click="CardMenu_Click"
+                                Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}"
+                                AutomationProperties.Name="Другие действия" ToolTip="Другие действия">
+                            <Button.ContextMenu>
+                                <ContextMenu Placement="Bottom" VerticalOffset="6" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                    <MenuItem Header="+ Сумма" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Горячая клавиша" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddPresetHotkeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В активные" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В пользовательские" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator />
+                                    <MenuItem Header="Запустить от имени донатера" Style="{StaticResource SuccessMenuItemStyle}"
+                                              Command="{Binding PlacementTarget.Tag.RunAsDonorCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Добавить в голосование" Style="{StaticResource VotingTargetsMenuItemStyle}" SubmenuOpened="VotingTargets_SubmenuOpened" CommandParameter="{Binding}">
+                                        <MenuItem Header="Выберите голосование" IsEnabled="False" />
+                                    </MenuItem>
+                                    <Separator />
+                                    <MenuItem Header="Переименовать" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.RenameUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить копию" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить как пользовательский шаблон" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Открыть код" Command="{Binding PlacementTarget.Tag.CodeCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" />
+                                    <MenuItem Header="Удалить пользовательский шаблон" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Удалить из активных" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteActiveCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                        </local:CardToolbarPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactPriceChipTemplate" DataType="{x:Type vm:TriggerRuleViewModel}">
+            <Border Background="{DynamicResource TriggerChipBrush}" CornerRadius="3"
+                    Padding="6,2" Margin="0,1,5,1">
+                <TextBlock Text="{Binding Label}" FontFamily="Consolas" FontSize="11"
+                           Foreground="{DynamicResource InfoTextBrush}" />
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactActiveActionRowTemplate" DataType="{x:Type vm:ActionViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}" Margin="0,0,0,2" MinHeight="38">
+                <Border BorderBrush="{DynamicResource ActionRowMarkerBrush}" BorderThickness="3,0,0,0" Padding="8,3,4,3">
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition><ColumnDefinition.Style><Style TargetType="ColumnDefinition"><Setter Property="Width" Value="54" /><Style.Triggers><DataTrigger Binding="{Binding IsSequenceStep}" Value="True"><Setter Property="Width" Value="0" /></DataTrigger></Style.Triggers></Style></ColumnDefinition.Style></ColumnDefinition><ColumnDefinition Width="2*" MinWidth="100" /><ColumnDefinition Width="2*" MinWidth="80" /><ColumnDefinition Width="2*" MinWidth="150" MaxWidth="360" /></Grid.ColumnDefinitions>
+                        <Border Style="{StaticResource CompactOrdinalBadgeStyle}">
+                            <TextBlock Text="{Binding VisualDisplayOrdinalLabel}" FontFamily="Consolas" FontSize="12"
+                                       Foreground="{DynamicResource AccentBrush}" />
+                        </Border>
+                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,12,0"
+                                   ToolTip="{Binding Description}" />
+                        <ItemsControl Grid.Column="2" ItemsSource="{Binding Triggers}" Margin="0,0,8,0"
+                                      VerticalAlignment="Center" ToolTip="Все назначенные суммы">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate><StaticResource ResourceKey="CompactPriceChipTemplate" /></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Grid.Column="2" Text="—" FontFamily="Consolas" Foreground="{DynamicResource InfoTextBrush}"
+                                   VerticalAlignment="Center" Visibility="{Binding HasTriggers, Converter={StaticResource InverseBooleanConverter}}" />
+                        <local:CardToolbarPanel Grid.Column="3" VerticalAlignment="Center">
+<Button local:ButtonVisual.Glyph="&#xE713;" Content="Настроить" Click="ConfigureAction_Click" Padding="6,4"
+                                AutomationProperties.Name="Настроить параметры шаблона" />
+                        <Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Content="+ Сумма" Padding="6,4"
+                                Command="{Binding DataContext.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,4"
+                                Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                ToolTip="{Binding AvailabilityHint}" ToolTipService.ShowOnDisabled="True"
+                                IsEnabled="{Binding CanTest}"
+                                Command="{Binding DataContext.TestCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                        <Button Content="⋯" Width="32" Height="28" Padding="0" FontSize="18"
+                                Style="{StaticResource GhostButtonStyle}" Click="CardMenu_Click"
+                                Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}"
+                                AutomationProperties.Name="Другие действия" ToolTip="Другие действия">
+                            <Button.ContextMenu>
+                                <ContextMenu Placement="Bottom" VerticalOffset="6" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                    <MenuItem Header="+ Сумма" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Горячая клавиша" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddPresetHotkeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В активные" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В пользовательские" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator />
+                                    <MenuItem Header="Запустить от имени донатера" Style="{StaticResource SuccessMenuItemStyle}"
+                                              Command="{Binding PlacementTarget.Tag.RunAsDonorCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Добавить в голосование" Style="{StaticResource VotingTargetsMenuItemStyle}" SubmenuOpened="VotingTargets_SubmenuOpened" CommandParameter="{Binding}">
+                                        <MenuItem Header="Выберите голосование" IsEnabled="False" />
+                                    </MenuItem>
+                                    <Separator />
+                                    <MenuItem Header="Переименовать" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.RenameUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить копию" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить как пользовательский шаблон" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Открыть код" Command="{Binding PlacementTarget.Tag.CodeCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" />
+                                    <MenuItem Header="Удалить пользовательский шаблон" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Удалить из активных" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteActiveCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                        </local:CardToolbarPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactUserPresetRowTemplate" DataType="{x:Type vm:ActionViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}" Margin="0,0,0,2" MinHeight="38">
+                <Border BorderBrush="{DynamicResource ActionRowMarkerBrush}" BorderThickness="3,0,0,0" Padding="8,3,4,3">
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="54" /><ColumnDefinition Width="2*" MinWidth="100" /><ColumnDefinition Width="1*" MinWidth="80" /><ColumnDefinition Width="2.5*" MinWidth="190" MaxWidth="520" /></Grid.ColumnDefinitions>
+                        <Border Style="{StaticResource CompactOrdinalBadgeStyle}">
+                            <TextBlock Text="{Binding DisplayOrdinalLabel}" FontFamily="Consolas" FontSize="12"
+                                       Foreground="{DynamicResource AccentBrush}" />
+                        </Border>
+                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,12,0"
+                                   ToolTip="{Binding Description}" />
+                        <ItemsControl Grid.Column="2" ItemsSource="{Binding FirstThreeTriggers}" Margin="0,0,8,0"
+                                      VerticalAlignment="Center" ToolTip="Первые три назначенные суммы">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate><StaticResource ResourceKey="CompactPriceChipTemplate" /></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Grid.Column="2" Text="—" FontFamily="Consolas" Foreground="{DynamicResource InfoTextBrush}"
+                                   VerticalAlignment="Center" Visibility="{Binding HasTriggers, Converter={StaticResource InverseBooleanConverter}}" />
+                        <local:CardToolbarPanel Grid.Column="3" VerticalAlignment="Center">
+<Button local:ButtonVisual.Glyph="&#xE713;" Content="Настроить" Click="ConfigureAction_Click" Padding="6,4"
+                                AutomationProperties.Name="Настроить параметры шаблона" />
+                        <Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Content="+ Сумма" Padding="6,4"
+                                Command="{Binding DataContext.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE8FD;" Content="В активные" Padding="6,4"
+                                Style="{StaticResource AccentOutlineButtonStyle}"
+                                ToolTip="Создать активный вариант с этими параметрами и назначенными суммами"
+                                Command="{Binding DataContext.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                        <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,4"
+                                Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                ToolTip="{Binding AvailabilityHint}" ToolTipService.ShowOnDisabled="True"
+                                IsEnabled="{Binding CanTest}"
+                                Command="{Binding DataContext.TestCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                        <Button Content="⋯" Width="32" Height="28" Padding="0" FontSize="18"
+                                Style="{StaticResource GhostButtonStyle}" Click="CardMenu_Click"
+                                Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}"
+                                AutomationProperties.Name="Другие действия" ToolTip="Другие действия">
+                            <Button.ContextMenu>
+                                <ContextMenu Placement="Bottom" VerticalOffset="6" DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                    <MenuItem Header="+ Сумма" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Горячая клавиша" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.AddPresetHotkeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В активные" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="В пользовательские" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator />
+                                    <MenuItem Header="Запустить от имени донатера" Style="{StaticResource SuccessMenuItemStyle}"
+                                              Command="{Binding PlacementTarget.Tag.RunAsDonorCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Добавить в голосование" Style="{StaticResource VotingTargetsMenuItemStyle}" SubmenuOpened="VotingTargets_SubmenuOpened" CommandParameter="{Binding}">
+                                        <MenuItem Header="Выберите голосование" IsEnabled="False" />
+                                    </MenuItem>
+                                    <Separator />
+                                    <MenuItem Header="Переименовать" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.RenameUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить копию" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Сохранить как пользовательский шаблон" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Открыть код" Command="{Binding PlacementTarget.Tag.CodeCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <Separator Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" />
+                                    <MenuItem Header="Удалить пользовательский шаблон" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteUserPresetCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                    <MenuItem Header="Удалить из активных" Style="{StaticResource DangerMenuItemStyle}" Visibility="{Binding IsPreset, Converter={StaticResource InverseBooleanConverter}}"
+                                              Command="{Binding PlacementTarget.Tag.DeleteActiveCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" CommandParameter="{Binding}" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                        </local:CardToolbarPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactSequenceTemplate">
+            <Border Tag="SequenceStepRow" AllowDrop="True" DragOver="SequenceRow_DragOver" Drop="SequenceRow_Drop" DragLeave="SequenceRow_DragLeave" Background="Transparent">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="50" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource SequenceHandleTemplate}" />
+                    <ContentPresenter Grid.Column="1" Content="{Binding}" ContentTemplate="{StaticResource CompactActiveActionRowTemplate}" />
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="ActivePriceGroupCardTemplate" DataType="{x:Type vm:ActivePriceGroupViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}" TextElement.Foreground="{DynamicResource TextBrush}">
+                <Border BorderBrush="{DynamicResource AccentBrush}" BorderThickness="3,0,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid Margin="15,8,8,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="66" />
+                            </Grid.ColumnDefinitions>
+                            <Grid Background="Transparent" Cursor="Hand" Focusable="True"
+                                  MouseLeftButtonUp="PriceGroupHeader_MouseLeftButtonUp"
+                                  KeyDown="PriceGroupHeader_KeyDown"
+                                  AutomationProperties.Name="Развернуть или скрыть группу шаблонов">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="54" />
+                                    <ColumnDefinition Width="102" />
+                                    <ColumnDefinition Width="32" />
+                                    <ColumnDefinition Width="2*" MinWidth="180" />
+                                    <ColumnDefinition Width="3*" MinWidth="180" />
+                                </Grid.ColumnDefinitions>
+                                <Border Style="{StaticResource CompactOrdinalBadgeStyle}">
+                                    <TextBlock Text="{Binding DisplayOrdinalLabel}" FontFamily="Consolas" FontSize="12"
+                                               Foreground="{DynamicResource AccentBrush}" />
+                                </Border>
+                                <ContentPresenter Grid.Column="1" Content="{Binding}"
+                                                  ContentTemplate="{StaticResource PriceGroupExpansionHintTemplate}" />
+                                <Button Grid.Column="2" Width="28" Height="28" Padding="0" Focusable="False"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        AutomationProperties.Name="Переименовать группу"
+                                        Command="{Binding DataContext.RenamePriceGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}">
+                                    <TextBlock Text="&#xE70F;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                               Foreground="{DynamicResource MutedBrush}" />
+                                </Button>
+                                <TextBlock Grid.Column="3" Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextBrush}" TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center" Margin="6,0,12,0" ToolTip="{Binding CountLabel}" />
+                                <ItemsControl Grid.Column="4" ItemsSource="{Binding SharedTriggers}" Margin="0,0,8,0"
+                                              IsHitTestVisible="False" VerticalAlignment="Center"
+                                              ToolTip="Общие суммы вложенных шаблонов">
+                                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate><StaticResource ResourceKey="CompactPriceChipTemplate" /></ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Grid>
+                            <Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Grid.Column="1" Content="+ Сумма" Padding="10,4" MinWidth="82" Margin="0,0,6,0"
+                                    Command="{Binding DataContext.AddPriceGroupTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}" />
+                            <Button local:ButtonVisual.Glyph="&#xE768;" Grid.Column="2" Content="Тест" Padding="10,4" MinWidth="58"
+                                    Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                    IsEnabled="{Binding CanTest}"
+                                    ToolTip="Создать один тестовый донат с общей суммой и запустить все вложенные шаблоны"
+                                    Command="{Binding DataContext.TestPriceGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}" />
+                        </Grid>
+                        <StackPanel Grid.Row="1" Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}">
+                            <WrapPanel Margin="18,0,8,4">
+                                <CheckBox Content="Выполнять строго по порядку" Margin="0,0,22,6" VerticalAlignment="Center" IsChecked="{Binding StrictSequence, Mode=OneWay}" Click="StrictSequence_Click"
+                                          ToolTip="Ожидающий шаг не пропускает следующие шаги этой группы. Другие группы продолжают работу. Окончание длительного эффекта не ожидается." />
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6" ToolTip="Заменяет глобальную задержку между эффектами одного доната. 0 — без дополнительной паузы.">
+                                    <TextBlock Text="Задержка между срабатываниями эффектов:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                    <TextBox Text="{Binding GroupDelaySeconds, Mode=OneWay}" Width="64" Padding="7,4" VerticalContentAlignment="Center" MaxLength="5" LostKeyboardFocus="GroupDelay_LostKeyboardFocus" KeyDown="GroupDelay_KeyDown" AutomationProperties.Name="Задержка между срабатываниями эффектов" />
+                                    <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
+                                </StackPanel>
+                            </WrapPanel>
+                        <ItemsControl ItemsSource="{Binding Actions}" Margin="18,0,-1,9"
+                                      ItemTemplate="{StaticResource SequenceCardTemplate}">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate>
+                                <local:ActionCardPanel MinimumColumnWidth="380" MaximumColumns="5"
+                                                       Columns="{Binding DataContext.ActiveBrowser.EffectiveColumns, RelativeSource={RelativeSource AncestorType=Window}}" />
+                            </ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactActivePriceGroupRowTemplate" DataType="{x:Type vm:ActivePriceGroupViewModel}">
+            <Border Style="{StaticResource ActionRowCardStyle}" Margin="0,0,0,2" MinHeight="38"
+                    TextElement.Foreground="{DynamicResource TextBrush}">
+                <Border BorderBrush="{DynamicResource AccentBrush}" BorderThickness="3,0,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid Margin="8,4,4,4" Background="Transparent" Cursor="Hand" Focusable="True"
+                              MouseLeftButtonUp="PriceGroupHeader_MouseLeftButtonUp"
+                              KeyDown="PriceGroupHeader_KeyDown"
+                              AutomationProperties.Name="Развернуть или скрыть группу шаблонов">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="54" /><ColumnDefinition Width="2*" MinWidth="100" /><ColumnDefinition Width="2*" MinWidth="80" /><ColumnDefinition Width="2*" MinWidth="150" MaxWidth="360" /></Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource CompactOrdinalBadgeStyle}">
+                                <TextBlock Text="{Binding DisplayOrdinalLabel}" FontFamily="Consolas" FontSize="12"
+                                           Foreground="{DynamicResource AccentBrush}" />
+                            </Border>
+                            <Grid Grid.Column="1" Margin="0,0,12,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="102" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter Content="{Binding}"
+                                                  ContentTemplate="{StaticResource PriceGroupExpansionHintTemplate}" />
+                                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextBrush}" TextTrimming="CharacterEllipsis"
+                                           VerticalAlignment="Center" Margin="6,0,0,0" ToolTip="{Binding CountLabel}" />
+                            </Grid>
+                            <ItemsControl Grid.Column="2" ItemsSource="{Binding SharedTriggers}" Margin="0,0,8,0"
+                                          IsHitTestVisible="False" VerticalAlignment="Center"
+                                          ToolTip="Общие суммы вложенных шаблонов">
+                                <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate><StaticResource ResourceKey="CompactPriceChipTemplate" /></ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <local:CardToolbarPanel Grid.Column="3" VerticalAlignment="Center"><Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Content="+ Сумма" Padding="6,4"
+                                    Command="{Binding DataContext.AddPriceGroupTriggerCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}" />
+                            <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,4"
+                                    Background="{DynamicResource PanelAltBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                    IsEnabled="{Binding CanTest}"
+                                    ToolTip="Создать один тестовый донат с общей суммой и запустить все вложенные шаблоны"
+                                    Command="{Binding DataContext.TestPriceGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}" />
+                            <Button Width="32" Height="28" Padding="0" Focusable="False"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    AutomationProperties.Name="Переименовать группу"
+                                    ToolTip="Переименовать группу"
+                                    Command="{Binding DataContext.RenamePriceGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}">
+                                <TextBlock Text="&#xE70F;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                           Foreground="{DynamicResource MutedBrush}" />
+                            </Button></local:CardToolbarPanel>
+                        </Grid>
+                        <StackPanel Grid.Row="1" Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}">
+                            <WrapPanel Margin="18,0,8,4">
+                                <CheckBox Content="Выполнять строго по порядку" Margin="0,0,22,6" VerticalAlignment="Center" IsChecked="{Binding StrictSequence, Mode=OneWay}" Click="StrictSequence_Click"
+                                          ToolTip="Ожидающий шаг не пропускает следующие шаги этой группы. Другие группы продолжают работу. Окончание длительного эффекта не ожидается." />
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6" ToolTip="Заменяет глобальную задержку между эффектами одного доната. 0 — без дополнительной паузы.">
+                                    <TextBlock Text="Задержка между срабатываниями эффектов:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                    <TextBox Text="{Binding GroupDelaySeconds, Mode=OneWay}" Width="64" Padding="7,4" VerticalContentAlignment="Center" MaxLength="5" LostKeyboardFocus="GroupDelay_LostKeyboardFocus" KeyDown="GroupDelay_KeyDown" AutomationProperties.Name="Задержка между срабатываниями эффектов" />
+                                    <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
+                                </StackPanel>
+                            </WrapPanel>
+                            <ItemsControl ItemsSource="{Binding Actions}" Margin="18,1,-1,4" ItemTemplate="{StaticResource CompactSequenceTemplate}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="ActiveActionListEntryTemplate" DataType="{x:Type vm:ActiveActionListEntryViewModel}">
+            <ContentControl>
+                <ContentControl.Style><Style TargetType="ContentControl">
+                    <Setter Property="Content" Value="{Binding Action}" />
+                    <Setter Property="ContentTemplate" Value="{StaticResource ActiveActionCardTemplateV2}" />
+                    <Style.Triggers><DataTrigger Binding="{Binding IsGroup}" Value="True">
+                        <Setter Property="Content" Value="{Binding Group}" />
+                        <Setter Property="ContentTemplate" Value="{StaticResource ActivePriceGroupCardTemplate}" />
+                    </DataTrigger></Style.Triggers>
+                </Style></ContentControl.Style>
+            </ContentControl>
+        </DataTemplate>
+        <DataTemplate x:Key="CompactActiveActionListEntryTemplate" DataType="{x:Type vm:ActiveActionListEntryViewModel}">
+            <ContentControl>
+                <ContentControl.Style><Style TargetType="ContentControl">
+                    <Setter Property="Content" Value="{Binding Action}" />
+                    <Setter Property="ContentTemplate" Value="{StaticResource CompactActiveActionRowTemplate}" />
+                    <Style.Triggers><DataTrigger Binding="{Binding IsGroup}" Value="True">
+                        <Setter Property="Content" Value="{Binding Group}" />
+                        <Setter Property="ContentTemplate" Value="{StaticResource CompactActivePriceGroupRowTemplate}" />
+                    </DataTrigger></Style.Triggers>
+                </Style></ContentControl.Style>
+            </ContentControl>
+        </DataTemplate>
+    </Window.Resources>
+
+    <Grid>
+    <Grid x:Name="WideShell" Background="{DynamicResource BackgroundBrush}" Margin="26,18,26,16"
+          Visibility="{Binding IsCompactLayout, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource InverseBooleanConverter}}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Image x:Name="ApplicationLogo" Width="44" Height="44" Margin="0,0,14,0" RenderOptions.BitmapScalingMode="HighQuality" />
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="ANOMALY DONATION BRIDGE" FontSize="18" FontWeight="SemiBold" />
+                    <TextBlock Text="Интерактивные события для стрима" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,1,0,0" />
+                </StackPanel>
+            </StackPanel>
+            <Button x:Name="HeaderBridgeUpdateButton" Grid.Column="1"
+                    Content="{Binding BridgeUpdateButtonText}" Command="{Binding InstallBridgeCommand}"
+                    Visibility="{Binding ShowBridgeUpdate, Converter={StaticResource BoolToVisibility}}"
+                    Style="{StaticResource AccentOutlineButtonStyle}"
+                    ToolTip="{Binding BridgeUpdateHint}" Padding="16,8" Margin="12,0"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <local:CardToolbarPanel Grid.Column="2" VerticalAlignment="Center" MaxWidth="480" HorizontalAlignment="Right">
+                <Button x:Name="ThemeButton" Content="Тема" local:ButtonVisual.Glyph="&#xE790;" Click="ThemePicker_Click" Padding="9,8" ToolTip="Цвет оформления и чёрный или белый фон" AutomationProperties.Name="Тема приложения" />
+
+                <Button local:ButtonVisual.Glyph="&#xEB05;" Content="Голосования" Click="Voting_Click"
+                        Padding="9,8" VerticalAlignment="Center" />
+                <Button local:ButtonVisual.Glyph="&#xE716;" Content="Профили" Click="Profiles_Click"
+                        Padding="9,8" VerticalAlignment="Center" />
+                <Button local:ButtonVisual.Glyph="&#xE713;" Content="Настройки" Click="Settings_Click"
+                        Padding="9,8" VerticalAlignment="Center" />
+            </local:CardToolbarPanel>
+        </Grid>
+
+        <Grid Grid.Row="1" Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="1.1*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource StatusCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Ellipse Width="9" Height="9" Fill="{DynamicResource AccentBrush}" Margin="0,3,12,0" VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="ИНТЕГРАЦИИ" Style="{StaticResource EyebrowTextStyle}" />
+                        <TextBlock Text="{Binding DonationStatus, Mode=OneWay}" FontSize="14" FontWeight="SemiBold"
+                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2" Style="{StaticResource StatusCardStyle}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="9" Height="9" Fill="{DynamicResource BlueBrush}" Margin="0,3,12,0" VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Text="ИГРА" Style="{StaticResource EyebrowTextStyle}" />
+                        <TextBlock Text="{Binding GameStatus, Mode=OneWay}" FontSize="14" FontWeight="SemiBold"
+                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                        <TextBlock Text="{Binding CatalogStatus, Mode=OneWay}" ToolTip="{Binding CatalogStatus}" Foreground="{DynamicResource MutedBrush}"
+                                   FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,2,0,0" />
+                        <TextBlock Text="{Binding ExtensionStatus, Mode=OneWay}" ToolTip="{Binding ExtensionStatus}" Foreground="{DynamicResource SubtleBrush}"
+                                   FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,1,0,0" />
+                        <ProgressBar Height="4" Margin="0,6,0,0" Minimum="0" Maximum="100"
+                                     Value="{Binding CatalogProgressPercent, Mode=OneWay}"
+                                     IsIndeterminate="{Binding IsCatalogProgressIndeterminate, Mode=OneWay}"
+                                     Visibility="{Binding IsCatalogSynchronizing, Converter={StaticResource BoolToVisibility}}" />
+                        <TextBlock Text="{Binding CatalogProgressText, Mode=OneWay}"
+                                   Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,4,0,0"
+                                   Visibility="{Binding IsCatalogSynchronizing, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                    <Button Grid.Column="2" Content="↻" Command="{Binding RefreshCatalogCommand}"
+                            IsEnabled="{Binding CanRefreshCatalog, Mode=OneWay}"
+                            Width="32" Height="32" Padding="0" Margin="10,0,0,0"
+                            VerticalAlignment="Top" FontSize="19" FontWeight="SemiBold"
+                            Style="{StaticResource GhostButtonStyle}"
+                            ToolTip="Обновить каталог игры вручную"
+                            AutomationProperties.Name="Обновить каталог игры" />
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="4">
+                <Border.Style>
+                    <Style TargetType="Border" BasedOn="{StaticResource StatusCardStyle}">
+                        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+                        <Setter Property="BorderThickness" Value="0,0,0,2" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Armed}" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+                                <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock Text="ОБРАБОТКА ДОНАТОВ" Style="{StaticResource EyebrowTextStyle}" />
+                        <TextBlock Text="{Binding ProcessingStatus}" Foreground="{DynamicResource MutedBrush}"
+                                   FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0" />
+                    </StackPanel>
+                    <CheckBox Grid.Column="1" IsChecked="{Binding Armed, Mode=TwoWay}"
+                              IsEnabled="{Binding CanArm, Mode=OneWay}"
+                              Style="{StaticResource SwitchCheckBoxStyle}"
+                              ToolTip="{Binding ArmHint, Mode=OneWay}"
+                              VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <Grid Grid.Row="2">
+        <TabControl x:Name="MainSections" SelectedIndex="{Binding SelectedSectionIndex, Mode=TwoWay}"
+                    BorderThickness="0" Padding="0" Margin="0,0,0,12"
+                    Background="Transparent">
+            <TabControl.Template>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid KeyboardNavigation.TabNavigation="Local">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <Grid x:Name="SectionHeader" Margin="0,0,0,1">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <WrapPanel IsItemsHost="True" VerticalAlignment="Top" />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="8,5,10,0">
+                                <Border x:Name="TemplateSearchSurface" Height="34" VerticalAlignment="Top"
+                                        Background="{DynamicResource InputBrush}" BorderThickness="1" CornerRadius="3"
+                                        Visibility="{Binding ShowTemplateSearch, Converter={StaticResource BoolToVisibility}}">
+                                    <Border.Style><Style TargetType="Border">
+                                        <Setter Property="Width" Value="270" />
+                                        <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+                                        <Style.Triggers>
+                                            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                                            <DataTrigger Binding="{Binding HasTemplateSearchText}" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style></Border.Style>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <Button x:Name="TemplateSearchButton" Width="32" Height="32" MinHeight="0" Padding="0"
+                                                Style="{StaticResource GhostButtonStyle}" Click="TemplateSearch_Click"
+                                                ToolTip="Поиск шаблонов · Ctrl+F"
+                                                AutomationProperties.Name="Перейти к поиску шаблонов">
+                                            <TextBlock Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="15" />
+                                        </Button>
+                                        <Grid Grid.Column="1">
+                                            <TextBox x:Name="TemplateSearchTextBox" Text="{Binding TemplateSearchText, UpdateSourceTrigger=PropertyChanged}"
+                                                     MaxLength="160" Padding="2,4" BorderThickness="0" Background="Transparent"
+                                                     MinWidth="0" MinHeight="0" VerticalContentAlignment="Center"
+                                                     AutomationProperties.Name="Поиск по названию шаблона" />
+                                            <TextBlock Text="{Binding TemplateSearchHint}" Foreground="{DynamicResource MutedBrush}"
+                                                       IsHitTestVisible="False" VerticalAlignment="Center" Margin="4,0"
+                                                       TextTrimming="CharacterEllipsis">
+                                                <TextBlock.Style><Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers><DataTrigger Binding="{Binding TemplateSearchText}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers>
+                                                </Style></TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
+                                        <Button x:Name="ClearTemplateSearchButton" Grid.Column="2" Width="30" Height="32" MinHeight="0" Padding="0"
+                                                Style="{StaticResource GhostButtonStyle}" Click="ClearTemplateSearch_Click"
+                                                IsEnabled="{Binding HasTemplateSearchText}"
+                                                ToolTip="Очистить поиск · Esc" AutomationProperties.Name="Очистить поиск и сбросить фильтр">
+                                            <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="12" />
+                                        </Button>
+                                    </Grid>
+                                </Border>
+                                <Border x:Name="QueueStatusSurface" Margin="10,0,0,0" Height="34" MaxWidth="270"
+                                        Background="{DynamicResource TriggerChipBrush}" BorderBrush="{DynamicResource WarningBorderBrush}"
+                                        BorderThickness="1" CornerRadius="4" Padding="10,5"
+                                        Visibility="{Binding HasQueueStatus, Converter={StaticResource BoolToVisibility}}" ToolTip="{Binding QueueStatusText}">
+                                    <TextBlock Text="{Binding QueueStatusText}" Foreground="{DynamicResource AccentForegroundBrush}"
+                                               FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                        <Border Grid.Row="1" Background="{TemplateBinding Background}">
+                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" Margin="{TemplateBinding Padding}" />
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </TabControl.Template>
+            <TabItem Style="{StaticResource MainTabItemStyle}">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="16" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" />
+                        <TextBlock Text="Активные" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" FontWeight="SemiBold" />
+                        <Border Background="{DynamicResource CountBadgeBrush}" CornerRadius="3" Padding="7,1" Margin="8,0,0,0">
+                            <TextBlock Text="{Binding ActiveActions.Count, Mode=OneWay}" Foreground="{DynamicResource TextBrush}" FontSize="10" />
+                        </Border>
+                    </StackPanel>
+                </TabItem.Header>
+                <Border Background="Transparent" BorderThickness="0" Padding="0" TextElement.Foreground="{DynamicResource TextBrush}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Grid Margin="0,0,8,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ContentPresenter Content="{Binding ActiveBrowser}" ContentTemplate="{StaticResource CategoryTabsTemplate}" HorizontalAlignment="Left" />
+                            <Button Grid.Column="1" Content="Экспорт для стрима…"
+                                    HorizontalAlignment="Right" MinHeight="30" Padding="11,4" Margin="0,0,8,0"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    ToolTip="Сохранить TXT: порядковый номер, название и все назначенные цены в текущем порядке"
+                                    Command="{Binding ExportActivePresetsCommand}" />
+                            <Button Grid.Column="2" Content="Сортировка ▾"
+                                    HorizontalAlignment="Right" MinHeight="30" Padding="11,4"
+                                    Style="{StaticResource GhostButtonStyle}" Click="CardMenu_Click"
+                                    ToolTip="Сортировать по минимальной назначенной сумме; валюты сравниваются как числа без конвертации">
+                                <Button.ContextMenu>
+                                    <ContextMenu Placement="Bottom" VerticalOffset="6">
+                                        <MenuItem Header="По возрастанию цены"
+                                                  Command="{Binding PlacementTarget.DataContext.SortActiveByPriceCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                  CommandParameter="ascending" />
+                                        <MenuItem Header="По убыванию цены"
+                                                  Command="{Binding PlacementTarget.DataContext.SortActiveByPriceCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                  CommandParameter="descending" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+                            <ContentPresenter Grid.Column="3" Content="{Binding ActiveBrowser}" ContentTemplate="{StaticResource BrowserViewTemplate}" />
+                        </Grid>
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="ActiveActionsList" ItemsSource="{Binding ActiveBrowser.VisibleEntries, Mode=OneWay}"
+                                          HorizontalAlignment="Stretch" Margin="0,4,10,6" AlternationCount="2">
+                                <ItemsControl.Style>
+                                    <Style TargetType="ItemsControl">
+                                        <Setter Property="ItemTemplate" Value="{StaticResource ActiveActionListEntryTemplate}" />
+                                        <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate>
+                                            <local:ActionCardPanel MinimumColumnWidth="380" MaximumColumns="5" Columns="{Binding ActiveBrowser.EffectiveColumns}" />
+                                        </ItemsPanelTemplate></Setter.Value></Setter>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ActiveBrowser.CompactMode}" Value="True">
+                                                <Setter Property="ItemTemplate" Value="{StaticResource CompactActiveActionListEntryTemplate}" />
+                                                <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate></Setter.Value></Setter>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ItemsControl.Style>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="420">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding ElementName=ActiveActionsList, Path=HasItems}" Value="False">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <Border Width="48" Height="48" CornerRadius="24" Background="{DynamicResource PanelBrush}"
+                                    HorizontalAlignment="Center" Margin="0,0,0,12">
+                                <TextBlock Text="0" Foreground="{DynamicResource AccentForegroundBrush}" FontSize="20" FontWeight="SemiBold"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <TextBlock Tag="В этой категории нет активных вариантов" Style="{StaticResource SearchEmptyTitleStyle}" FontSize="17" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Tag="Выберите «Все» или добавьте вариант из раздела «Шаблоны»." Style="{StaticResource SearchEmptyHintStyle}"
+                                       Foreground="{DynamicResource MutedBrush}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,6,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </TabItem>
+
+            <TabItem Style="{StaticResource MainTabItemStyle}">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE734;" FontFamily="Segoe MDL2 Assets" FontSize="16" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" />
+                        <TextBlock Text="Пользовательские шаблоны" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" FontWeight="SemiBold" />
+                        <Border Background="{DynamicResource CountBadgeBrush}" CornerRadius="3" Padding="7,1" Margin="8,0,0,0">
+                            <TextBlock Text="{Binding UserPresets.Count, Mode=OneWay}" Foreground="{DynamicResource TextBrush}" FontSize="10" />
+                        </Border>
+                    </StackPanel>
+                </TabItem.Header>
+                <Border Background="Transparent" BorderThickness="0" Padding="0" TextElement.Foreground="{DynamicResource TextBrush}">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <Grid Margin="0,0,8,10">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <ContentPresenter Content="{Binding UserPresetBrowser}" ContentTemplate="{StaticResource CategoryTabsTemplate}" HorizontalAlignment="Left" VerticalAlignment="Center" />
+                            <ContentPresenter Grid.Column="1" Content="{Binding UserPresetBrowser}" ContentTemplate="{StaticResource BrowserViewTemplate}" />
+                        </Grid>
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="UserPresetsList" ItemsSource="{Binding UserPresetBrowser.VisibleActions, Mode=OneWay}"
+                                          HorizontalAlignment="Stretch" Margin="0,4,10,6" AlternationCount="2">
+                                <ItemsControl.Style>
+                                    <Style TargetType="ItemsControl">
+                                        <Setter Property="ItemTemplate" Value="{StaticResource PresetCardTemplateV2}" />
+                                        <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate>
+                                            <local:ActionCardPanel MinimumColumnWidth="380" MaximumColumns="5" Columns="{Binding UserPresetBrowser.EffectiveColumns}" />
+                                        </ItemsPanelTemplate></Setter.Value></Setter>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding UserPresetBrowser.CompactMode}" Value="True">
+                                                <Setter Property="ItemTemplate" Value="{StaticResource CompactUserPresetRowTemplate}" />
+                                                <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate></Setter.Value></Setter>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ItemsControl.Style>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
+                            <StackPanel.Style><Style TargetType="StackPanel">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers><DataTrigger Binding="{Binding ElementName=UserPresetsList, Path=HasItems}" Value="False">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger></Style.Triggers>
+                            </Style></StackPanel.Style>
+                            <TextBlock Tag="Пользовательских шаблонов пока нет" Style="{StaticResource SearchEmptyTitleStyle}" FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                            <TextBlock Tag="Настройте коробочный шаблон и нажмите «В пользовательские». Сумму назначьте уже здесь перед активацией." Style="{StaticResource SearchEmptyHintStyle}"
+                                       Foreground="{DynamicResource MutedBrush}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,6,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </TabItem>
+
+            <TabItem Style="{StaticResource MainTabItemStyle}">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE8F1;" FontFamily="Segoe MDL2 Assets" FontSize="16" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" />
+                        <TextBlock Text="Шаблоны" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" FontWeight="SemiBold" />
+                        <Border Background="{DynamicResource CountBadgeBrush}" CornerRadius="3" Padding="7,1" Margin="8,0,0,0">
+                            <TextBlock Text="{Binding Presets.Count, Mode=OneWay}" Foreground="{DynamicResource TextBrush}" FontSize="10" />
+                        </Border>
+                    </StackPanel>
+                </TabItem.Header>
+                <Border Background="Transparent" BorderThickness="0" Padding="0" TextElement.Foreground="{DynamicResource TextBrush}">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <ContentPresenter Content="{Binding PresetBrowser}" ContentTemplate="{StaticResource PresetToolbarTemplate}" />
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="PresetsList" ItemsSource="{Binding PresetBrowser.VisibleActions, Mode=OneWay}"
+                                          HorizontalAlignment="Stretch" Margin="0,4,10,6" AlternationCount="2">
+                                <ItemsControl.Style>
+                                    <Style TargetType="ItemsControl">
+                                        <Setter Property="ItemTemplate" Value="{StaticResource PresetCardTemplateV2}" />
+                                        <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate>
+                                            <local:ActionCardPanel MinimumColumnWidth="380" MaximumColumns="5" Columns="{Binding PresetBrowser.EffectiveColumns}" />
+                                        </ItemsPanelTemplate></Setter.Value></Setter>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding PresetBrowser.CompactMode}" Value="True">
+                                                <Setter Property="ItemTemplate" Value="{StaticResource CompactBuiltInPresetRowTemplate}" />
+                                                <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><StackPanel /></ItemsPanelTemplate></Setter.Value></Setter>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ItemsControl.Style>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="420">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding ElementName=PresetsList, Path=HasItems}" Value="False">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <TextBlock Tag="В этой категории нет шаблонов" Style="{StaticResource SearchEmptyTitleStyle}" FontSize="17" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Tag="Выберите вкладку «Все», чтобы увидеть доступные шаблоны." Style="{StaticResource SearchEmptyHintStyle}"
+                                       Foreground="{DynamicResource MutedBrush}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,6,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </TabItem>
+
+            <TabItem Style="{StaticResource MainTabItemStyle}">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE81C;" FontFamily="Segoe MDL2 Assets" FontSize="16" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" />
+                        <TextBlock Text="История" Foreground="{Binding RelativeSource={RelativeSource AncestorType=TabItem}, Path=Foreground}" FontWeight="SemiBold" />
+                        <Border Background="{DynamicResource CountBadgeBrush}" CornerRadius="3" Padding="7,1" Margin="8,0,0,0">
+                            <TextBlock Text="{Binding History.Count, Mode=OneWay}" Foreground="{DynamicResource TextBrush}" FontSize="10" />
+                        </Border>
+                    </StackPanel>
+                </TabItem.Header>
+                <Border Background="{DynamicResource ListWellBrush}" BorderThickness="0" CornerRadius="8" ClipToBounds="True">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                        <Grid Background="{DynamicResource ListWellBrush}" MinHeight="45">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal" Margin="13,0" VerticalAlignment="Center">
+                                <TextBlock Text="История событий" Style="{StaticResource SectionTitleStyle}" FontSize="15" />
+                                <TextBlock Text="  •  последние 500 записей" Foreground="{DynamicResource SubtleBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <WrapPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,8,6">
+                                <Button Content="Повторить" Command="{Binding RetryCommand}"
+                                        Style="{StaticResource AccentOutlineButtonStyle}" Padding="12,4"
+                                        ToolTip="Повтор доступен только для безопасных завершённых событий" />
+                                <Button Content="Применить мгновенно" Command="{Binding ApplyQueuedImmediatelyCommand}"
+                                        Style="{StaticResource AccentOutlineButtonStyle}" Margin="8,0,0,0" Padding="12,4"
+                                        ToolTip="Только выделенные события в очереди. Пропускает порядок и паузы; проверки готовности игры сохраняются." />
+                                <Button Content="В исключения" Command="{Binding AddHistoryExclusionCommand}"
+                                        Style="{StaticResource AccentOutlineButtonStyle}"
+                                        Margin="8,0,0,0" Padding="12,4"
+                                        ToolTip="Исключить выбранные в этой записи игровые секции из ручного и случайного выбора" />
+                                <Button Content="{Binding RefreshEventsButtonText}"
+                                        Command="{Binding RefreshEventsCommand}"
+                                        Style="{StaticResource AccentOutlineButtonStyle}"
+                                        Margin="8,0,0,0" Padding="12,4"
+                                        ToolTip="Переподключиться к игре и повторно запросить ответы на зависшие команды без повторного выполнения эффекта" />
+                                <Button Content="Очистить очередь" Command="{Binding ClearQueueCommand}"
+                                        Style="{StaticResource DangerButtonStyle}"
+                                        Margin="8,0,0,0" Padding="12,4"
+                                        ToolTip="Удалить все эффекты, которые ещё не были переданы игре" />
+                            </WrapPanel>
+                        </Grid>
+                        <Grid Grid.Row="1">
+                            <DataGrid x:Name="HistoryGrid" ItemsSource="{Binding History, Mode=OneWay}"
+                                      SelectionMode="Extended" SelectionUnit="FullRow" local:HistoryListBehavior.IsEnabled="True"
+                                      IsReadOnly="True" AlternationCount="2" BorderThickness="0"
+                                      Background="Transparent" GridLinesVisibility="None"
+                                      ColumnHeaderStyle="{StaticResource MainHistoryHeaderStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="ВРЕМЯ" Binding="{Binding DonationCreatedAt, StringFormat=dd.MM HH:mm:ss}" Width="112" />
+                                    <DataGridTextColumn Header="ДОНАТЕР" Binding="{Binding DisplayDonor}" Width="125" />
+                                    <DataGridTextColumn Header="СУММА" Binding="{Binding Amount}" Width="80" />
+                                    <DataGridTextColumn Header="ВАЛЮТА" Binding="{Binding Currency}" Width="70" />
+                                    <DataGridTextColumn Header="ДЕЙСТВИЕ" Binding="{Binding ActionName}" Width="175" />
+                                    <DataGridTemplateColumn Header="СТАТУС" Width="166">
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <Border Style="{StaticResource HistoryStatusBadgeStyle}" HorizontalAlignment="Left" ToolTip="{Binding Detail}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding State, Converter={StaticResource HistoryStatusMarker}}" FontWeight="Bold" Width="18" />
+                                                    <TextBlock Text="{Binding State, Converter={StaticResource FriendlyValueConverter}}" FontWeight="SemiBold" />
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="ПОДРОБНОСТИ" Binding="{Binding Detail}" Width="*" />
+                                    <DataGridTemplateColumn Header="" Width="138">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Button Style="{StaticResource HistoryQueueRemoveButtonStyle}"
+                                                        Command="{Binding DataContext.RemoveQueuedCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                        CommandParameter="{Binding}" />
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <StackPanel.Style>
+                                    <Style TargetType="StackPanel">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ElementName=HistoryGrid, Path=HasItems}" Value="False">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </StackPanel.Style>
+                                <TextBlock Text="Событий пока не было" Foreground="{DynamicResource MutedBrush}"
+                                           FontSize="14" HorizontalAlignment="Center" />
+                                <TextBlock Text="Тесты эффектов и обработанные донаты появятся здесь."
+                                           Foreground="{DynamicResource SubtleBrush}" FontSize="11" Margin="0,3,0,0" />
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </TabItem>
+        </TabControl>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="2,8,2,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock Text="{Binding Notice, Mode=OneWay}" Foreground="{DynamicResource AccentForegroundBrush}"
+                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding DataDirectory, Mode=OneWay}"
+                       Foreground="{DynamicResource SubtleBrush}" FontSize="10"
+                       TextTrimming="CharacterEllipsis" MaxWidth="420" VerticalAlignment="Center" />
+        </Grid>
+    </Grid>
+    <local:CompactMainView x:Name="CompactShell" Visibility="{Binding IsCompactLayout, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibility}}" />
+        <Popup x:Name="ThemePopup" PlacementTarget="{Binding ElementName=ThemeButton}"
+               Placement="Bottom" VerticalOffset="7" StaysOpen="False" AllowsTransparency="True"
+               DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
+               Opened="ThemePopup_Opened">
+            <Border x:Name="ThemePopupSurface" Width="284" Padding="16"
+                    Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                    BorderThickness="1" CornerRadius="5"
+                    TextElement.Foreground="{DynamicResource TextBrush}" TextElement.FontFamily="Segoe UI"
+                    TextElement.FontSize="13"
+                    KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="ThemePopup_PreviewKeyDown">
+                <StackPanel>
+                    <DockPanel Margin="0,0,0,14">
+                        <Button Content="×" Click="CloseThemePopup_Click" DockPanel.Dock="Right"
+                                Style="{StaticResource GhostButtonStyle}" Padding="5,0" FontSize="18"
+                                AutomationProperties.Name="Закрыть выбор темы" />
+                        <TextBlock Text="Оформление" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <StackPanel x:Name="ThemeChoices">
+                        <TextBlock Text="Цвет" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,0,0,7" />
+                        <UniformGrid Columns="2" Margin="0,0,-6,7">
+                            <RadioButton x:Name="ThemeRedChoice" GroupName="ApplicationThemeColor" Tag="red"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeColor_Checked"
+                                         IsChecked="{Binding IsRedTheme, Mode=OneWay}" AutomationProperties.Name="Красный цвет">
+                                <StackPanel Orientation="Horizontal"><Ellipse Width="14" Height="14" Fill="#C89E98" Margin="0,0,8,0" /><TextBlock Text="Красный" /></StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ThemeGreenChoice" GroupName="ApplicationThemeColor" Tag="green"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeColor_Checked"
+                                         IsChecked="{Binding IsGreenTheme, Mode=OneWay}" AutomationProperties.Name="Зелёный цвет">
+                                <StackPanel Orientation="Horizontal"><Ellipse Width="14" Height="14" Fill="#A4B59C" Margin="0,0,8,0" /><TextBlock Text="Зелёный" /></StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ThemeBlueChoice" GroupName="ApplicationThemeColor" Tag="blue"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeColor_Checked"
+                                         IsChecked="{Binding IsBlueTheme, Mode=OneWay}" AutomationProperties.Name="Синий цвет">
+                                <StackPanel Orientation="Horizontal"><Ellipse Width="14" Height="14" Fill="#9EAFC6" Margin="0,0,8,0" /><TextBlock Text="Синий" /></StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="ThemeYellowChoice" GroupName="ApplicationThemeColor" Tag="yellow"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeColor_Checked"
+                                         IsChecked="{Binding IsYellowTheme, Mode=OneWay}" AutomationProperties.Name="Жёлтый цвет">
+                                <StackPanel Orientation="Horizontal"><Ellipse Width="14" Height="14" Fill="#D6B25F" Margin="0,0,8,0" /><TextBlock Text="Жёлтый" /></StackPanel>
+                            </RadioButton>
+                        </UniformGrid>
+                        <TextBlock Text="Фон" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,0,0,7" />
+                        <UniformGrid Columns="2" Margin="0,0,-6,0">
+                            <RadioButton x:Name="ThemeBlackChoice" Content="Чёрный" GroupName="ApplicationThemeBackground" Tag="black"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeBackground_Checked"
+                                         IsChecked="{Binding IsBlackTheme, Mode=OneWay}" />
+                            <RadioButton x:Name="ThemeWhiteChoice" Content="Белый" GroupName="ApplicationThemeBackground" Tag="white"
+                                         Style="{StaticResource ThemeChoiceStyle}" Checked="ThemeBackground_Checked"
+                                         IsChecked="{Binding IsLightTheme, Mode=OneWay}" />
+                        </UniformGrid>
+                    </StackPanel>
+                    <TextBlock x:Name="ThemePopupError" TextWrapping="Wrap" Visibility="Collapsed"
+                               Foreground="{DynamicResource BadBrush}" Margin="0,7,0,0" />
+                    <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,10,0,0" Padding="0,12,0,0">
+                        <Button Content="Готово" Click="CloseThemePopup_Click" HorizontalAlignment="Right"
+                                Style="{StaticResource AccentOutlineButtonStyle}" Padding="12,6" />
+                    </Border>
+                </StackPanel>
+            </Border>
+        </Popup>
+    </Grid>
+</Window>

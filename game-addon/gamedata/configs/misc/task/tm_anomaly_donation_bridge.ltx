@@ -1,0 +1,427 @@
+; Runtime task slots used by Anomaly Donation Bridge's donor-boss template.
+; Each slot has its own callback parameter so several bosses may coexist.
+
+[adb_helicopter_boss_template]
+icon = ui_inGame2_Skat_1
+storyline = false
+prior = 80
+precondition = false
+title = adb_helicopter_boss_title
+title_functor = adb_helicopter_boss_text
+descr = adb_helicopter_boss_descr
+descr_functor = adb_helicopter_boss_text
+target_functor = adb_helicopter_boss_target
+status_functor = adb_helicopter_boss_status
+dont_send_update_news = true
+
+[adb_helicopter_boss_01]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_01)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_01)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_01)%
+[adb_helicopter_boss_02]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_02)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_02)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_02)%
+[adb_helicopter_boss_03]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_03)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_03)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_03)%
+[adb_helicopter_boss_04]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_04)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_04)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_04)%
+[adb_helicopter_boss_05]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_05)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_05)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_05)%
+[adb_helicopter_boss_06]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_06)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_06)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_06)%
+[adb_helicopter_boss_07]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_07)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_07)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_07)%
+[adb_helicopter_boss_08]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_08)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_08)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_08)%
+[adb_helicopter_boss_09]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_09)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_09)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_09)%
+[adb_helicopter_boss_10]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_10)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_10)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_10)%
+[adb_helicopter_boss_11]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_11)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_11)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_11)%
+[adb_helicopter_boss_12]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_12)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_12)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_12)%
+[adb_helicopter_boss_13]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_13)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_13)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_13)%
+[adb_helicopter_boss_14]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_14)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_14)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_14)%
+[adb_helicopter_boss_15]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_15)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_15)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_15)%
+[adb_helicopter_boss_16]:adb_helicopter_boss_template
+on_complete = %=adb_helicopter_boss_complete(adb_helicopter_boss_16)%
+on_fail = %=adb_helicopter_boss_cancel(adb_helicopter_boss_16)%
+on_cancel = %=adb_helicopter_boss_cancel(adb_helicopter_boss_16)%
+
+[adb_donor_boss_template]
+icon = ui_inGame2_Odin_vistrel
+storyline = false
+prior = 80
+precondition = false
+title = adb_donor_boss_title
+title_functor = adb_donor_boss_text
+descr = adb_donor_boss_descr
+descr_functor = adb_donor_boss_text
+target_functor = adb_donor_boss_target
+status_functor = adb_donor_boss_status
+dont_send_update_news = true
+
+[adb_donor_boss_01]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_01)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_01)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_01)%
+
+[adb_donor_boss_02]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_02)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_02)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_02)%
+
+[adb_donor_boss_03]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_03)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_03)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_03)%
+
+[adb_donor_boss_04]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_04)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_04)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_04)%
+
+[adb_donor_boss_05]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_05)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_05)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_05)%
+
+[adb_donor_boss_06]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_06)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_06)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_06)%
+
+[adb_donor_boss_07]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_07)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_07)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_07)%
+
+[adb_donor_boss_08]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_08)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_08)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_08)%
+
+[adb_donor_boss_09]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_09)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_09)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_09)%
+
+[adb_donor_boss_10]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_10)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_10)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_10)%
+
+[adb_donor_boss_11]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_11)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_11)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_11)%
+
+[adb_donor_boss_12]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_12)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_12)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_12)%
+
+[adb_donor_boss_13]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_13)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_13)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_13)%
+
+[adb_donor_boss_14]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_14)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_14)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_14)%
+
+[adb_donor_boss_15]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_15)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_15)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_15)%
+
+[adb_donor_boss_16]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_16)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_16)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_16)%
+
+[adb_donor_boss_17]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_17)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_17)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_17)%
+
+[adb_donor_boss_18]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_18)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_18)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_18)%
+
+[adb_donor_boss_19]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_19)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_19)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_19)%
+
+[adb_donor_boss_20]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_20)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_20)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_20)%
+
+[adb_donor_boss_21]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_21)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_21)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_21)%
+
+[adb_donor_boss_22]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_22)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_22)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_22)%
+
+[adb_donor_boss_23]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_23)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_23)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_23)%
+
+[adb_donor_boss_24]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_24)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_24)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_24)%
+
+[adb_donor_boss_25]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_25)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_25)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_25)%
+
+[adb_donor_boss_26]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_26)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_26)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_26)%
+
+[adb_donor_boss_27]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_27)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_27)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_27)%
+
+[adb_donor_boss_28]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_28)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_28)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_28)%
+
+[adb_donor_boss_29]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_29)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_29)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_29)%
+
+[adb_donor_boss_30]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_30)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_30)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_30)%
+
+[adb_donor_boss_31]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_31)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_31)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_31)%
+
+[adb_donor_boss_32]:adb_donor_boss_template
+on_complete = %=adb_donor_boss_complete(adb_donor_boss_32)%
+on_fail = %=adb_donor_boss_cleanup(adb_donor_boss_32)%
+on_cancel = %=adb_donor_boss_cleanup(adb_donor_boss_32)%
+
+; Runtime task slots for the donor-thief recovery objective.
+[adb_donor_thief_template]
+icon = ui_inGame2_Odin_vistrel
+storyline = false
+prior = 80
+precondition = false
+title = adb_donor_thief_title
+title_functor = adb_donor_thief_text
+descr = adb_donor_thief_descr
+descr_functor = adb_donor_thief_text
+target_functor = adb_donor_thief_target
+status_functor = adb_donor_thief_status
+dont_send_update_news = true
+
+[adb_donor_thief_01]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_01)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_01)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_01)%
+
+[adb_donor_thief_02]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_02)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_02)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_02)%
+
+[adb_donor_thief_03]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_03)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_03)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_03)%
+
+[adb_donor_thief_04]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_04)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_04)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_04)%
+
+[adb_donor_thief_05]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_05)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_05)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_05)%
+
+[adb_donor_thief_06]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_06)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_06)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_06)%
+
+[adb_donor_thief_07]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_07)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_07)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_07)%
+
+[adb_donor_thief_08]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_08)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_08)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_08)%
+
+[adb_donor_thief_09]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_09)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_09)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_09)%
+
+[adb_donor_thief_10]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_10)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_10)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_10)%
+
+[adb_donor_thief_11]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_11)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_11)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_11)%
+
+[adb_donor_thief_12]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_12)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_12)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_12)%
+
+[adb_donor_thief_13]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_13)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_13)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_13)%
+
+[adb_donor_thief_14]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_14)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_14)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_14)%
+
+[adb_donor_thief_15]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_15)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_15)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_15)%
+
+[adb_donor_thief_16]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_16)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_16)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_16)%
+
+[adb_donor_thief_17]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_17)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_17)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_17)%
+
+[adb_donor_thief_18]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_18)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_18)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_18)%
+
+[adb_donor_thief_19]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_19)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_19)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_19)%
+
+[adb_donor_thief_20]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_20)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_20)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_20)%
+
+[adb_donor_thief_21]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_21)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_21)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_21)%
+
+[adb_donor_thief_22]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_22)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_22)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_22)%
+
+[adb_donor_thief_23]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_23)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_23)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_23)%
+
+[adb_donor_thief_24]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_24)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_24)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_24)%
+
+[adb_donor_thief_25]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_25)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_25)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_25)%
+
+[adb_donor_thief_26]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_26)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_26)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_26)%
+
+[adb_donor_thief_27]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_27)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_27)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_27)%
+
+[adb_donor_thief_28]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_28)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_28)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_28)%
+
+[adb_donor_thief_29]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_29)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_29)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_29)%
+
+[adb_donor_thief_30]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_30)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_30)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_30)%
+
+[adb_donor_thief_31]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_31)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_31)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_31)%
+
+[adb_donor_thief_32]:adb_donor_thief_template
+on_complete = %=adb_donor_thief_task_closed(adb_donor_thief_32)%
+on_fail = %=adb_donor_thief_task_closed(adb_donor_thief_32)%
+on_cancel = %=adb_donor_thief_task_closed(adb_donor_thief_32)%

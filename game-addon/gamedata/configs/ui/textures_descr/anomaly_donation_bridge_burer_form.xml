@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<w>
+    <file name="ui\anomaly_donation_bridge_burer_form">
+        <texture id="adb_burer_aim_ring" x="0" y="256" width="256" height="256"/>
+    </file>
+</w>

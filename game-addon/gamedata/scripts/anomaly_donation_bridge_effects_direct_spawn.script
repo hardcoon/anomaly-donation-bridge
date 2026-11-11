@@ -1,0 +1,592 @@
+-- Shared game implementation for the two direct-spawn presets. No preset is registered here.
+
+local hostile_members = {}
+local HOSTILE_TRACK_MS = 60000
+local alife_object
+
+local function force_member_hostile(id, actor)
+	local client = nil
+	if level ~= nil and type(level.object_by_id) == "function" then
+		local ok, object = pcall(level.object_by_id, id)
+		if ok then client = object end
+	end
+	if client ~= nil and actor ~= nil then
+		pcall(function()
+			if game_relations ~= nil and type(game_relations.set_npcs_relation) == "function" then
+				game_relations.set_npcs_relation(client, actor, "enemy")
+			end
+		end)
+		pcall(function() client:force_set_goodwill(-5000, actor) end)
+		pcall(function() client:set_relation(game_object.enemy, actor) end)
+	end
+	local life = alife_object()
+	if life ~= nil and actor ~= nil then
+		local ok, server = pcall(function() return life:object(id, true) end)
+		if ok and server ~= nil then
+			pcall(function() server:force_set_goodwill(-5000, actor) end)
+			pcall(function() server:force_set_goodwill(-5000, 0) end)
+		end
+	end
+end
+
+function remember_hostile(ids, actor, now)
+	local until_ms = (tonumber(now) or 0) + HOSTILE_TRACK_MS
+	for _, id in ipairs(ids or {}) do
+		if tonumber(id) ~= nil and tonumber(id) > 0 then
+			hostile_members[id] = until_ms
+			force_member_hostile(id, actor)
+		end
+	end
+end
+
+function update_hostile(now)
+	now = tonumber(now) or (time_global and time_global() or 0)
+	local actor = db and db.actor or nil
+	for id, until_ms in pairs(hostile_members) do
+		if now >= until_ms or actor == nil then
+			hostile_members[id] = nil
+		else
+			force_member_hostile(id, actor)
+		end
+	end
+end
+
+function clear_hostile()
+	for id in pairs(hostile_members) do hostile_members[id] = nil end
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function catalog_api_supported()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+alife_object = function()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function create_server_object(section, position, level_vertex_id, game_vertex_id,
+	expected_kind)
+	-- alife_create is Anomaly's stock wrapper around alife():create.  Besides
+	-- validating the section it updates the game's ALife bookkeeping and fires
+	-- the normal callbacks expected by other addons.
+	-- Native entity constructors may assert before Lua regains control, so pcall
+	-- alone is not crash protection. Reclassify the merged section immediately
+	-- before entering C++.
+	if expected_kind ~= nil and
+		not anomaly_donation_bridge_catalog.is_spawn_safe(section, expected_kind) then
+		return nil, "spawn_section_unsafe"
+	end
+	if type(alife_create) ~= "function" then return nil, "alife_create_unavailable" end
+	local ok, object = pcall(alife_create, section, position, level_vertex_id,
+		game_vertex_id)
+	if not ok then return nil, "alife_create_failed" end
+	return object
+end
+
+local function parse_spawn_groups(value)
+	value = tostring(value or "")
+	if value == "" or #value > 4000 or value:sub(1, 1) == ";" or
+		value:sub(-1) == ";" or value:find(";;", 1, true) then
+		return nil, "spawn_group_bundle_invalid"
+	end
+	local rows, total = {}, 0
+	for encoded in value:gmatch("[^;]+") do
+		local section, strength, count_text = encoded:match(
+			"^([^%*]+)%*([^%*]+)%*(%d+)$")
+		local count = tonumber(count_text)
+		if section == nil or not anomaly_donation_bridge_common.valid_section_id(section) or
+			(strength ~= "any" and strength ~= "lite" and strength ~= "normal" and
+			 strength ~= "strong" and strength ~= "unclassified") or
+			count == nil or count < 1 or count > 99 or count ~= math.floor(count) then
+			return nil, "spawn_group_bundle_invalid"
+		end
+		total = total + count
+		if total > 200 or #rows >= 128 then return nil, "spawn_group_bundle_too_large" end
+		-- Strength is retained in the wire format for compatibility with old
+		-- application builds, but a concrete selected section is authoritative.
+		rows[#rows + 1] = { section = section, strength = "any", count = count }
+	end
+	return #rows > 0 and rows or nil, #rows > 0 and nil or "spawn_group_bundle_invalid"
+end
+
+-- Only the four direct-spawn presets use these jobs. The shared legacy
+-- spawn_points helper (companions/squads/etc.) and Donor Boss stay untouched.
+local point_jobs, point_counts = {}, {}
+local point_last_frame, point_callbacks
+local POINT_METHODS={legacy=true,boss_sample=true,graph=true,scan=true,coordinates=true}
+local function point_clock()
+	return type(time_continual)=="function" and time_continual() or
+		(type(time_global)=="function" and time_global() or 0)
+end
+local function point_number(value)
+	return type(value)=="number" and value==value and math.abs(value)<math.huge
+end
+local function point_level()
+	local ok,name=pcall(function() return level.name() end)
+	return ok and type(name)=="string" and name or nil
+end
+local function point_exists(id)
+	if not point_number(id) or id<0 or id~=math.floor(id) then return false end
+	local ok,value=pcall(level.vertex_in_direction,id,vector():set(1,0,0),0)
+	return ok and value==id
+end
+local function point_count(start,name)
+	local cached=point_counts[name]
+	if cached and point_exists(cached-1) and not point_exists(cached) then return cached end
+	if not point_exists(start) then return nil end
+	local low,high=start,math.max(1,start+1)
+	while high<2147483647 and point_exists(high) do low=high;high=math.min(2147483647,high*2+1) end
+	if point_exists(high) then return nil end
+	local left,right=low+1,high
+	while left<right do
+		local middle=math.floor((left+right)/2)
+		if point_exists(middle) then left=middle+1 else right=middle end
+	end
+	point_counts[name]=left;return left
+end
+local function point_anchor(actor)
+	local ok,p,id,gvid=pcall(function() return actor:position(),actor:level_vertex_id(),actor:game_vertex_id() end)
+	local name=point_level()
+	if not ok or not p or not name or not point_number(p.x) or not point_number(p.y) or
+		not point_number(p.z) or not point_exists(id) then return nil end
+	return {x=p.x,y=p.y,z=p.z,id=id,gvid=gvid,level=name}
+end
+local function point_position(job,id)
+	if not point_number(id) or id~=math.floor(id) or id<0 or id>=job.vertex_count then return nil end
+	local ok,p=pcall(level.vertex_position,id)
+	if not ok or not p or not point_number(p.x) or not point_number(p.y) or not point_number(p.z) then return nil end
+	local dx,dz=p.x-job.origin.x,p.z-job.origin.z
+	return {vertex_id=id,position=vector():set(p.x,p.y+.10,p.z),distance=math.sqrt(dx*dx+dz*dz)}
+end
+local function point_consider(job,p)
+	if not p then return end
+	if p.distance>=job.minimum and p.distance<=job.maximum and not job.used[p.vertex_id] then
+		job.used[p.vertex_id]=true;job.points[#job.points+1]=p
+	end
+	if job.method=="boss_sample" and p.distance>=10 then
+		local score=p.distance<job.minimum and job.minimum-p.distance or
+			p.distance>job.maximum and p.distance-job.maximum or 0
+		if not job.best_score or score<job.best_score then job.best=p;job.best_score=score end
+	end
+end
+local function point_finish(job)
+	if #job.points==0 and job.method=="boss_sample" and job.best then
+		job.points[1]=job.best;job.placement="closest_available_vertex"
+	end
+	if #job.points==0 then job.state="failed";job.reason="spawn_point_not_found_"..job.method;return end
+	local available=#job.points
+	for index=available+1,job.options.total do
+		local p=job.points[(index-1)%available+1]
+		job.points[index]={vertex_id=p.vertex_id,position=vector():set(p.position.x,p.position.y,p.position.z),distance=p.distance}
+	end
+	job.state="done";job.placement=job.placement or "requested_ring"
+end
+local function point_reanchor(job,origin)
+	local dx,dz=job.origin.x-origin.x,job.origin.z-origin.z
+	if dx*dx+dz*dz<.0001 and math.abs(job.origin.y-origin.y)<.01 then return end
+	-- Walking must not discard the scan cursor/graph frontier on each app
+	-- retry. Keep world vertices and re-evaluate their distance from the actor.
+	local old_points,old_best=job.points,job.best
+	job.origin=origin;job.points={};job.used={};job.best=nil;job.best_score=nil
+	local seen={}
+	local function reconsider(p)
+		if not p or seen[p.vertex_id] then return end
+		seen[p.vertex_id]=true
+		local x,z=p.position.x-origin.x,p.position.z-origin.z
+		point_consider(job,{vertex_id=p.vertex_id,position=p.position,distance=math.sqrt(x*x+z*z)})
+	end
+	for _,p in ipairs(old_points) do reconsider(p) end
+	reconsider(old_best)
+	if job.state=="done" then
+		if #job.points>0 or job.method=="boss_sample" and job.best then point_finish(job)
+		else job.state="stale" end
+	end
+end
+local function point_warped(job,origin)
+	local x,z=job.origin.x-origin.x,job.origin.z-origin.z
+	return x*x+z*z>math.max(25,job.options.radius*.5)^2 or math.abs(job.origin.y-origin.y)>20
+end
+local function point_gcd(a,b) while b~=0 do a,b=b,a%b end;return a end
+local function point_job(options,origin)
+	local count=point_count(origin.id,origin.level)
+	if not count then return nil,"level_vertex_range_unavailable" end
+	local method=options.point_method
+	if method=="graph" and type(level.vertex_link)~="function" then return nil,"spawn_vertex_link_unsupported" end
+	if method=="coordinates" and type(level.vertex_id)~="function" then return nil,"spawn_vertex_id_unsupported" end
+	local anchor_ok,anchor=pcall(level.vertex_position,origin.id)
+	if not anchor_ok or not anchor or not point_number(anchor.x) or not point_number(anchor.z) then
+		return nil,"actor_vertex_invalid"
+	end
+	local minimum=method=="boss_sample" and math.max(10,options.radius-math.max(10,options.radius*.10)) or math.max(1,options.radius-5)
+	local start=math.min(count-1,math.floor(math.random()*count))
+	local step=math.max(1,math.floor(count*.61803398875))
+	while step<count and point_gcd(step,count)~=1 do step=step+1 end
+	if step>=count then step=1 end
+	return {options=options,origin=origin,method=method,state="searching",points={},used={},minimum=minimum,
+		maximum=options.radius,vertex_count=count,start=start,step=step,cursor=0,
+		limit=method=="scan" and count or math.min(count,math.max(2400,options.radius*6)),
+		queue={origin.id},heading=math.random()*math.pi*2,visited={[origin.id]=true},visited_count=1,
+		-- Actor position may be outside the AI box (jumping/climbing). Only
+		-- real vertex centres may contribute to safe bounds for vertex_id.
+		bounds={minx=anchor.x,maxx=anchor.x,minz=anchor.z,maxz=anchor.z},bound_probes=0,
+		last_seen=point_clock()}
+end
+local function point_advance(job)
+	if job.method=="graph" then
+		local id=table.remove(job.queue)
+		if not id then point_finish(job);return end
+		local p=point_position(job,id);point_consider(job,p)
+		-- Allow detours around buildings outside the ring, but bound memory and
+		-- work on large maps. Every link index is one of the four native sides.
+		if p and p.distance<=job.maximum*2+25 and job.visited_count<262144 then
+			local neighbours={}
+			for side=0,3 do
+				local ok,next_id=pcall(level.vertex_link,id,side)
+				if ok and point_number(next_id) and next_id>=0 and next_id<job.vertex_count and
+					next_id==math.floor(next_id) and not job.visited[next_id] then
+					job.visited[next_id]=true;job.visited_count=job.visited_count+1
+					local next_point=point_position(job,next_id)
+					if next_point then
+						local dx,dz=next_point.position.x-job.origin.x,next_point.position.z-job.origin.z
+						neighbours[#neighbours+1]={id=next_id,score=next_point.distance+
+							.1*(dx*math.cos(job.heading)+dz*math.sin(job.heading))/math.max(1,job.maximum)}
+					end
+				end
+			end
+			-- Prefer outward branches. A breadth-first flood of a dense grid at
+			-- 500 m would visit millions of cells before reaching the ring.
+			table.sort(neighbours,function(a,b)return a.score<b.score end)
+			for _,next_point in ipairs(neighbours) do job.queue[#job.queue+1]=next_point.id end
+		end
+	elseif job.method=="coordinates" then
+		if job.bound_probes<math.min(512,job.vertex_count) then
+			local id=(job.start+job.bound_probes*job.step)%job.vertex_count
+			job.bound_probes=job.bound_probes+1
+			local p=point_position(job,id)
+			if p then
+				local b=job.bounds
+				b.minx=math.min(b.minx,p.position.x);b.maxx=math.max(b.maxx,p.position.x)
+				b.minz=math.min(b.minz,p.position.z);b.maxz=math.max(b.maxz,p.position.z)
+			end
+			return
+		end
+		if job.cursor>=2400 then point_finish(job);return end
+		job.cursor=job.cursor+1
+		local angle=math.random()*math.pi*2
+		local radius=math.sqrt(job.minimum^2+math.random()*(job.maximum^2-job.minimum^2))
+		local x,z=job.origin.x+math.cos(angle)*radius,job.origin.z+math.sin(angle)*radius
+		local b=job.bounds
+		-- vertex_id asserts on positions outside the AI bounding rectangle;
+		-- pcall cannot protect that native assert. Bounds formed by real vertex
+		-- centres are a conservative subset of the AI rectangle, never the
+		-- broader render/geometry bounding box.
+		if x>=b.minx+.001 and x<=b.maxx-.001 and z>=b.minz+.001 and z<=b.maxz-.001 then
+			local ok,id=pcall(level.vertex_id,vector():set(x,job.origin.y,z))
+			if ok then point_consider(job,point_position(job,id)) end
+		end
+	else
+		if job.cursor>=job.limit then point_finish(job);return end
+		local step=job.method=="scan" and 1 or job.step
+		local id=(job.start+job.cursor*step)%job.vertex_count
+		job.cursor=job.cursor+1
+		point_consider(job,point_position(job,id))
+	end
+	if #job.points>=job.options.total then point_finish(job) end
+end
+local function clear_point_jobs() point_jobs={};point_counts={};point_last_frame=nil end
+function update_point_searches()
+	if level==nil or type(level.vertex_position)~="function" then return end
+	if type(level.present)=="function" and not level.present() then return end
+	local now=point_clock()
+	local frame=type(device)=="function" and device().frame or now
+	if point_last_frame==frame then return end
+	point_last_frame=frame
+	local name=point_level();local running={}
+	local actor=db and db.actor
+	local btr=anomaly_donation_bridge_btr_ai
+	local in_btr=btr and btr.passenger_object()
+	local actor_origin
+	if in_btr then actor_origin=point_anchor(btr.spawn_anchor(actor))
+	else actor_origin=point_anchor(actor) end
+	for key,job in pairs(point_jobs) do
+		if job.origin.level~=name or now-job.last_seen>120000 then point_jobs[key]=nil
+		elseif actor_origin and point_warped(job,actor_origin) then point_jobs[key]=nil
+		else
+			if actor_origin then point_reanchor(job,actor_origin) end
+			if actor_origin and job.state=="searching" then running[#running+1]=job end
+		end
+	end
+	local budget=1024
+	while budget>0 and #running>0 do
+		for index=#running,1,-1 do
+			local job=running[index]
+			point_advance(job);budget=budget-1
+			if job.state~="searching" then table.remove(running,index) end
+			if budget<=0 then break end
+		end
+		-- Time budget supplements the call budget on slower modded engines.
+		if type(time_continual)=="function" and time_continual()-now>=3 then break end
+	end
+end
+local function prepare_point_search(context,params)
+	local options=context.options
+	-- The legacy placement can fall back to the starting node. A holder
+	-- occupies that node, so require a separate point during a BTR ride.
+	if context.spawn_anchor and options.point_method=="legacy" then options.point_method="boss_sample" end
+	if options.point_method=="legacy" then return true end
+	local origin=point_anchor(context.spawn_anchor or context.actor)
+	if not origin then return false,"deferred","actor_vertex_invalid" end
+	local command=context.command or {}
+	local key=command.donation_id and (command.donation_id..":"..tostring(command.batch_index or 1)..":"..tostring(command.action_id)) or tostring(context)
+	local source=context.spawn_source_params or command.params or params
+	local fields={};for field in pairs(source) do fields[#fields+1]=field end;table.sort(fields)
+	local fingerprint={options.point_method}
+	for _,field in ipairs(fields) do fingerprint[#fingerprint+1]=field.."="..tostring(source[field]) end
+	fingerprint=table.concat(fingerprint,"\n")
+	local job=point_jobs[key]
+	if job and (job.fingerprint~=fingerprint or job.origin.level~=origin.level or point_warped(job,origin)) then
+		point_jobs[key]=nil;job=nil
+	end
+	if job then
+		point_reanchor(job,origin)
+		if job.state=="stale" then point_jobs[key]=nil;job=nil end
+	end
+	if not job then
+		local count=0;for _ in pairs(point_jobs) do count=count+1 end
+		if count>=8 then return false,"deferred","spawn_point_search_busy" end
+		local reason;job,reason=point_job(options,origin)
+		if not job then return false,"rejected",reason end
+		job.fingerprint=fingerprint;point_jobs[key]=job
+	end
+	job.last_seen=point_clock()
+	if job.state=="failed" then point_jobs[key]=nil;return false,"rejected",job.reason end
+	if job.state~="done" then return false,"deferred","spawn_point_search_running" end
+	-- Preserve the random section/count selected for this request across
+	-- deferred retries. No world objects or automatic saves exist yet.
+	context.options=job.options;context.spawn_points=job.points;context.spawn_placement=job.placement
+	context.spawn_job_key=key
+	return true
+end
+
+local function direct_spawn_can(kind, context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		groups = true, section_id = true, strength = true, count = true,
+		catalog_revision = true, random_group = true, radius_meters = true,
+		force_hostile = true, use_donor_name = true, donor_name = true, spawn_point_method=true
+	})
+	if not valid then return false, "rejected", error_code end
+	local random_group = tostring(params.random_group or "false"):lower()
+	if random_group ~= "true" and random_group ~= "false" then
+		return false, "rejected", "random_group_invalid"
+	end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, 25, 10, 500, "spawn_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+	local method=params.spawn_point_method or "boss_sample"
+	if not POINT_METHODS[method] then return false,"rejected","spawn_point_method_invalid" end
+	local force_hostile = tostring(params.force_hostile or "false"):lower()
+	if force_hostile ~= "true" and force_hostile ~= "false" then
+		return false, "rejected", "force_hostile_invalid"
+	end
+	local use_donor_name = tostring(params.use_donor_name or "false"):lower()
+	if use_donor_name ~= "true" and use_donor_name ~= "false" then
+		return false, "rejected", "use_donor_name_invalid"
+	end
+	if use_donor_name == "true" and kind ~= "npc" then
+		return false, "rejected", "donor_name_only_supported_for_npcs"
+	end
+	local donor_name = tostring(params.donor_name or "")
+	donor_name = donor_name:match("^%s*(.-)%s*$") or ""
+	if use_donor_name == "true" and (donor_name == "" or #donor_name > 256 or
+		donor_name:find("[%z\1-\31\127]", 1) ~= nil) then
+		return false, "rejected", "npc_donor_name_invalid"
+	end
+	local revision_ok, revision_error =
+		anomaly_donation_bridge_catalog.validate_revision(params)
+	if not revision_ok then return false, "rejected", revision_error end
+	local requested_rows, rows_error
+	if params.groups ~= nil then
+		requested_rows, rows_error = parse_spawn_groups(params.groups)
+	else
+		local count, count_error = anomaly_donation_bridge_common.parse_integer(
+			params.count, 1, 1, 99, kind .. "_count_invalid")
+		if count == nil then return false, "rejected", count_error end
+		requested_rows = { { section = tostring(params.section_id or ""),
+			strength = "any", count = count } }
+	end
+	if requested_rows == nil then return false, "rejected", rows_error end
+	local rows = {}
+	for _, requested in ipairs(requested_rows) do
+		local entry, catalog_error = anomaly_donation_bridge_catalog.validate_section({
+			catalog_revision = params.catalog_revision, section_id = requested.section
+		}, "section_id", kind)
+		if entry == nil then return false, "rejected", catalog_error end
+		rows[#rows + 1] = { section = entry.section_id, count = requested.count,
+			strength = "any" }
+	end
+	if random_group == "true" then rows = { rows[math.random(#rows)] } end
+	local total = 0
+	for _, row in ipairs(rows) do total = total + row.count end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	context.options = { rows = rows, total = total, kind = kind,
+		radius = radius, random_group = random_group == "true", point_method=method,
+		force_hostile = force_hostile == "true",
+		use_donor_name = use_donor_name == "true", donor_name = donor_name }
+	return prepare_point_search(context,params)
+end
+
+local function direct_spawn_execute(context)
+	for _, row in ipairs(context.options.rows) do
+		if not anomaly_donation_bridge_catalog.is_spawn_safe(
+			row.section, context.options.kind) then
+			return "rejected", "spawn_section_unsafe"
+		end
+	end
+	local points,placement=context.spawn_points,context.spawn_placement
+	if context.options.point_method=="legacy" then
+		points,placement=anomaly_donation_bridge_common.spawn_points(
+			context.spawn_anchor or context.actor, context.options.total,
+			math.max(1, context.options.radius - 5), context.options.radius,
+			math.max(360, context.options.total * 20))
+	end
+	if points == nil then return "deferred", placement end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return (context.spawn_anchor or context.actor):game_vertex_id()
+	end)
+	if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+	-- Recheck actual coordinates immediately before spawning; the actor could
+	-- move while a deferred request was waiting in the application's queue.
+	if context.options.point_method~="legacy" then
+		local a=point_anchor(context.spawn_anchor or context.actor)
+		if not a then return "deferred","actor_vertex_invalid" end
+		local minimum=context.options.point_method=="boss_sample" and 10 or math.max(1,context.options.radius-5)
+		for _,p in ipairs(points) do
+			local dx,dz=p.position.x-a.x,p.position.z-a.z
+			local distance=math.sqrt(dx*dx+dz*dz)
+			if distance<minimum or context.options.point_method~="boss_sample" and distance>context.options.radius then
+				point_jobs[context.spawn_job_key]=nil;return "deferred","spawn_point_actor_moved"
+			end
+		end
+		point_jobs[context.spawn_job_key]=nil
+	end
+	local created, point_index = {}, 1
+	for _, row in ipairs(context.options.rows) do
+		for _ = 1, row.count do
+			local point = points[point_index]
+			local object, create_error = create_server_object(row.section,
+				point.position, point.vertex_id, game_vertex_id, context.options.kind)
+			if create_error ~= nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				if create_error == "spawn_section_unsafe" and rolled_back then
+					return "rejected", "spawn_section_unsafe"
+				end
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and context.options.kind .. "_spawn_failed_rolled_back" or
+					context.options.kind .. "_spawn_failed_state_unknown"
+			end
+			if object == nil then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and context.options.kind .. "_spawn_failed_rolled_back" or
+					context.options.kind .. "_spawn_failed_rollback_incomplete"
+			end
+			created[#created + 1] = object
+			point_index = point_index + 1
+		end
+	end
+	if context.options.use_donor_name then
+		local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(
+			context.options.donor_name)
+		if encoded_name == nil or encoded_name == "" then
+			local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+			return rolled_back and "rejected" or "uncertain",
+				rolled_back and "npc_name_encoding_invalid_rolled_back" or
+				"npc_name_encoding_invalid_state_unknown"
+		end
+		for _, object in ipairs(created) do
+			local named = pcall(function()
+				if type(object.set_character_name) ~= "function" then
+					error("npc_name_api_unavailable")
+				end
+				object:set_character_name(encoded_name)
+			end)
+			if not named then
+				local rolled_back = anomaly_donation_bridge_common.rollback_server_objects(created)
+				return rolled_back and "rejected" or "uncertain",
+					rolled_back and "npc_name_apply_failed_rolled_back" or
+					"npc_name_apply_failed_state_unknown"
+			end
+		end
+	end
+	context.spawned_ids = {}
+	for _, object in ipairs(created) do
+		local id = tonumber(object.id)
+		if id ~= nil and id > 0 then context.spawned_ids[#context.spawned_ids + 1] = id end
+	end
+	return "executed", "spawned_" .. context.options.kind .. "s_" ..
+		tostring(context.options.total) .. "_groups_" .. tostring(#context.options.rows) ..
+		(context.options.random_group and "_random_group" or "") ..
+		(context.options.use_donor_name and "_donor_named" or "") ..
+		(placement ~= "requested_ring" and "_" .. placement or "") ..
+		(context.options.point_method~="legacy" and "_method_"..context.options.point_method or "")
+end
+
+local function spawn_mutants_can(context, params)
+	return direct_spawn_can("mutant", context, params)
+end
+
+local function spawn_npcs_can(context, params)
+	return direct_spawn_can("npc", context, params)
+end
+
+
+local function navigation_supported()
+	return level ~= nil and type(level.vertex_in_direction) == "function" and
+		type(level.vertex_position) == "function" and type(vector) == "function"
+end
+
+local function direct_spawn_supported(context)
+	local life = alife_object()
+	local supported = catalog_api_supported() and navigation_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "level_vertex_id", "game_vertex_id", "position" }) and
+		object_has_methods(life, { "release" }) and type(alife_create) == "function"
+	return supported, supported and nil or "direct_spawn_api_unsupported"
+end
+
+
+function descriptor(kind)
+	if kind ~= "npc" and kind ~= "mutant" then return nil end
+	if not point_callbacks and type(RegisterScriptCallback)=="function" then
+		point_callbacks=true
+		RegisterScriptCallback("actor_on_update",update_point_searches)
+		RegisterScriptCallback("actor_on_net_destroy",clear_point_jobs)
+	end
+	return {
+		can_execute = function(context, params)
+			return direct_spawn_can(kind, context, params)
+		end,
+		execute = direct_spawn_execute,
+		update=update_point_searches,on_game_load=clear_point_jobs,on_level_changing=clear_point_jobs,
+		is_supported = direct_spawn_supported,
+		support_probe_is_hint = true
+	}
+end

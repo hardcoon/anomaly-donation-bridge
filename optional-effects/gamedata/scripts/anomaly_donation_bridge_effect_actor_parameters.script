@@ -1,0 +1,286 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "actor_parameters",
+  "displayName": "Постоянно изменить параметры героя",
+  "description": "Навсегда для текущего сохранения увеличивает или уменьшает высоту прыжка, скорость и переносимый вес. Повторные срабатывания складываются, но рост скорости ограничен безопасным пределом.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"jump_percent","displayName":"Высота прыжка, %","kind":"Integer","minimum":-90,"maximum":300,"defaultValue":"50"},
+    {"key":"speed_percent","displayName":"Скорость перемещения, %","kind":"Integer","minimum":-90,"maximum":50,"defaultValue":"50"},
+    {"key":"carry_weight_kg","displayName":"Переносимый вес, кг","kind":"Integer","minimum":-500,"maximum":500,"defaultValue":"50"}
+  ],
+  "parameters": {"jump_percent":"50","speed_percent":"50","carry_weight_kg":"50"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local SAVE_KEY = "adb_actor_parameters_v1"
+local STATE_KEY = "__anomaly_donation_bridge_actor_parameters_v1"
+-- Actor_Movement multiplies walk_accel, run_coef and sprint_koef and passes
+-- the result to physics as maximum velocity divided by 10. Stock Anomaly
+-- starts collision damage at 15 m/s, so keep a margin below that threshold.
+local SAFE_SPRINT_VELOCITY = 13
+local FALLBACK_WALK_ACCEL = 11.5
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { load_pending = false, target = nil }
+	rawset(_G, STATE_KEY, state)
+end
+
+local METHOD_NAMES = {
+	"get_actor_max_weight", "set_actor_max_weight",
+	"get_actor_max_walk_weight", "set_actor_max_walk_weight",
+	"get_actor_jump_speed", "set_actor_jump_speed",
+	"get_actor_sprint_koef", "set_actor_sprint_koef",
+	"get_actor_run_coef", "set_actor_run_coef"
+}
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function actor_id(actor)
+	if actor == nil then return nil end
+	local ok, id = pcall(function() return actor:id() end)
+	id = tonumber(id)
+	return ok and id and id >= 0 and id or nil
+end
+
+local function values_valid(values)
+	if type(values) ~= "table" then return false end
+	for _, key in ipairs({ "max_weight", "max_walk_weight", "jump_speed",
+		"sprint_koef", "run_coef" }) do
+		local value = tonumber(values[key])
+		if value == nil or value ~= value or value <= 0 then return false end
+	end
+	return true
+end
+
+local function actor_walk_accel(actor)
+	local ok, value = pcall(function()
+		if type(actor.get_actor_walk_accel) ~= "function" then return nil end
+		return actor:get_actor_walk_accel()
+	end)
+	value = tonumber(value)
+	if not ok or value == nil or value ~= value or value <= 0 then
+		return FALLBACK_WALK_ACCEL
+	end
+	return value
+end
+
+local function clamp_speed_values(actor, values)
+	local result = {
+		max_weight = tonumber(values.max_weight),
+		max_walk_weight = tonumber(values.max_walk_weight),
+		jump_speed = tonumber(values.jump_speed),
+		sprint_koef = tonumber(values.sprint_koef),
+		run_coef = tonumber(values.run_coef)
+	}
+	if not values_valid(result) then return nil, false end
+	local product = result.run_coef * result.sprint_koef
+	local maximum_product = SAFE_SPRINT_VELOCITY * 10 / actor_walk_accel(actor)
+	if product <= maximum_product then return result, false end
+	local factor = math.sqrt(maximum_product / product)
+	result.run_coef = result.run_coef * factor
+	result.sprint_koef = result.sprint_koef * factor
+	return result, true
+end
+
+local function read_values(actor)
+	local ok, values = pcall(function()
+		return {
+			max_weight = actor:get_actor_max_weight(),
+			max_walk_weight = actor:get_actor_max_walk_weight(),
+			jump_speed = actor:get_actor_jump_speed(),
+			sprint_koef = actor:get_actor_sprint_koef(),
+			run_coef = actor:get_actor_run_coef()
+		}
+	end)
+	return ok and values_valid(values) and values or nil
+end
+
+local function write_values(actor, values)
+	if not values_valid(values) then return false end
+	local ok = pcall(function()
+		actor:set_actor_max_weight(values.max_weight)
+		actor:set_actor_max_walk_weight(values.max_walk_weight)
+		actor:set_actor_jump_speed(values.jump_speed)
+		actor:set_actor_sprint_koef(values.sprint_koef)
+		actor:set_actor_run_coef(values.run_coef)
+	end)
+	if not ok then return false end
+	local after = read_values(actor)
+	if after == nil then return false end
+	for _, key in ipairs({ "max_weight", "max_walk_weight", "jump_speed",
+		"sprint_koef", "run_coef" }) do
+		local expected = values[key]
+		if math.abs(tonumber(after[key]) - tonumber(expected)) > 0.0001 then return false end
+	end
+	return true
+end
+
+local function actor_parameters_supported(context)
+	local actor = actor_for_probe(context)
+	if actor == nil or type(se_save_var) ~= "function" or
+		type(se_load_var) ~= "function" or actor_id(actor) == nil then
+		return false, "actor_parameters_persistence_unavailable"
+	end
+	for _, method_name in ipairs(METHOD_NAMES) do
+		local ok, method = pcall(function() return actor[method_name] end)
+		if not ok or type(method) ~= "function" then
+			return false, "actor_parameters_api_unsupported"
+		end
+	end
+	return true
+end
+
+local function temporary_boost_active()
+	local boost = rawget(_G, "__anomaly_donation_bridge_actor_boost_v1")
+	return type(boost) == "table" and boost.active == true
+end
+
+local function persist(actor, target)
+	local id = actor_id(actor)
+	if id == nil then return false end
+	return pcall(se_save_var, id, nil, SAVE_KEY, {
+		version = 2, target = target
+	})
+end
+
+local function normalized_values(actor, values)
+	if type(values) ~= "table" then return nil end
+	local result = {
+		max_weight = tonumber(values.max_weight),
+		max_walk_weight = tonumber(values.max_walk_weight),
+		jump_speed = tonumber(values.jump_speed),
+		sprint_koef = tonumber(values.sprint_koef),
+		run_coef = tonumber(values.run_coef)
+	}
+	return clamp_speed_values(actor, result)
+end
+
+local function load_saved(actor)
+	local id = actor_id(actor)
+	if id == nil then return nil end
+	local ok, saved = pcall(se_load_var, id, nil, SAVE_KEY)
+	if not ok or type(saved) ~= "table" then return nil end
+	local version = tonumber(saved.version)
+	if version ~= 1 and version ~= 2 then return nil end
+	return normalized_values(actor, saved.target)
+end
+
+local function pda_tip(actor, text)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	text = anomaly_donation_bridge_common.game_text_cp1251(text)
+	if text == nil then return false end
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function actor_parameters_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		jump_percent = true, speed_percent = true,
+		-- Accepted only so presets saved by 1.0.63 keep working. The unsupported
+		-- max-health value is deliberately ignored.
+		carry_weight_kg = true, max_health_percent = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local jump, jump_error = anomaly_donation_bridge_common.parse_integer(
+		params.jump_percent, 50, -90, 300, "actor_parameters_jump_invalid")
+	if jump == nil then return false, "rejected", jump_error end
+	local speed, speed_error = anomaly_donation_bridge_common.parse_integer(
+		params.speed_percent, 50, -90, 300, "actor_parameters_speed_invalid")
+	if speed == nil then return false, "rejected", speed_error end
+	local weight, weight_error = anomaly_donation_bridge_common.parse_integer(
+		params.carry_weight_kg, 50, -500, 500, "actor_parameters_weight_invalid")
+	if weight == nil then return false, "rejected", weight_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if temporary_boost_active() then
+		return false, "deferred", "actor_temporary_parameters_active"
+	end
+	local supported, reason = actor_parameters_supported(context)
+	if not supported then return false, "rejected", reason end
+	local current = read_values(context.actor)
+	if current == nil then return false, "deferred", "actor_parameters_state_unavailable" end
+	local before, baseline_capped = clamp_speed_values(context.actor, current)
+	local target = {
+		max_weight = before.max_weight + weight,
+		max_walk_weight = before.max_walk_weight + weight,
+		jump_speed = before.jump_speed * (1 + jump / 100),
+		sprint_koef = before.sprint_koef * (1 + speed / 100),
+		run_coef = before.run_coef * (1 + speed / 100)
+	}
+	local speed_capped
+	target, speed_capped = clamp_speed_values(context.actor, target)
+	if not values_valid(target) then
+		return false, "rejected", "actor_parameters_target_invalid"
+	end
+	context.options = {
+		before = before, target = target, jump = jump, speed = speed,
+		weight = weight, speed_capped = baseline_capped or speed_capped
+	}
+	return true
+end
+
+local function actor_parameters_execute(context)
+	if temporary_boost_active() then
+		return "deferred", "actor_temporary_parameters_active"
+	end
+	if not write_values(context.actor, context.options.target) then
+		write_values(context.actor, context.options.before)
+		return "uncertain", "actor_parameters_apply_failed"
+	end
+	state.target = context.options.target
+	if not persist(context.actor, state.target) then
+		write_values(context.actor, context.options.before)
+		return "uncertain", "actor_parameters_persist_failed_rolled_back"
+	end
+	local cap_notice = context.options.speed_capped and
+		" Скорость ограничена безопасным пределом." or ""
+	pda_tip(context.actor, "Параметры героя изменены и сохранены: прыжок " ..
+		tostring(context.options.jump) .. "%, скорость " ..
+		tostring(context.options.speed) .. "%, вес " ..
+		tostring(context.options.weight) .. " кг." .. cap_notice)
+	return "executed", "actor_parameters_jump_" .. tostring(context.options.jump) ..
+		"_speed_" .. tostring(context.options.speed) ..
+		"_weight_" .. tostring(context.options.weight) ..
+		(context.options.speed_capped and "_speed_capped" or "")
+end
+
+local function actor_parameters_update()
+	if not state.load_pending or temporary_boost_active() then return end
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	state.load_pending = false
+	local target = load_saved(actor)
+	if target == nil then
+		state.target = nil
+		return
+	end
+	state.target = target
+	write_values(actor, target)
+	persist(actor, target)
+end
+
+local function actor_parameters_load()
+	state.load_pending = true
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"actor_parameters", {
+			can_execute = actor_parameters_can,
+			execute = actor_parameters_execute,
+			update = actor_parameters_update,
+			on_game_load = actor_parameters_load,
+			is_supported = actor_parameters_supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] actor_parameters registration failed: %s", tostring(reason))
+	end
+end

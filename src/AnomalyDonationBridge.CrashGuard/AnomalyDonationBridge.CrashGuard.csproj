@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>AnomalyDonationBridge.CrashGuard</AssemblyName>
+    <AssemblyTitle>Anomaly Donation Bridge — Защита от вылетов</AssemblyTitle>
+    <Product>Anomaly Donation Bridge</Product>
+    <Description>Защита от вылетов — наблюдатель Anomaly Donation Bridge</Description>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>link</TrimMode>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <ApplicationIcon>..\AnomalyDonationBridge.App\Assets\AnomalyDonationBridge.ico</ApplicationIcon>
+    <Version>1.2.1-burer7</Version>
+  </PropertyGroup>
+</Project>

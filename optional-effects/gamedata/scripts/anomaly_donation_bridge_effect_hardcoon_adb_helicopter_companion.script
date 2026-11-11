@@ -1,0 +1,494 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.helicopter_companion",
+  "displayName": "Вертолёт-напарник",
+  "description": "Вызывает вертолёт поддержки: он следует за игроком и атакует его врагов. Начальное здоровье — 50%: вертолёт можно сбить. Его огонь не наносит урон игроку, дружественным и нейтральным NPC. По окончании времени вертолёт прекращает бой и улетает. Остаток времени и здоровье сохраняются; после перехода на другую открытую локацию сопровождение продолжается. В подземельях вертолёт ждёт возвращения на поверхность.",
+  "category": "npc_mutants", "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"helicopter_sections","displayName":"Допустимые модели вертолётов","kind":"MultiChoice","catalogKind":"Helicopter","minimumSelections":1,"defaultValue":""},
+    {"key":"duration_seconds","displayName":"Время патрулирования, сек.","kind":"Integer","minimum":10,"maximum":99999999,"defaultValue":"60"},
+    {"key":"follow_distance","displayName":"Расстояние следования за игроком, м","kind":"Integer","minimum":30,"maximum":1000,"defaultValue":"100"},
+    {"key":"use_rockets","displayName":"Использовать ракеты","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"engine_sound","displayName":"Звук вертолёта","kind":"Choice","options":["false","true"],"defaultValue":"true"}
+  ],
+  "parameters":{"helicopter_sections":"","duration_seconds":"60","follow_distance":"100","use_rockets":"false","engine_sound":"true"},
+  "itemSpawns":[], "spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+-- A separate native helicopter/binder. Never changes the boss, stock heli AI,
+-- global relations, immunities, actor health or the ordinary companion system.
+local HANDLER="hardcoon.adb.helicopter_companion"
+local SECTION="adb_helicopter_companion"
+local MODULE="anomaly_donation_bridge_effect_hardcoon_adb_helicopter_companion"
+local SAVE="adb_helicopter_companion_v1"
+local SLOTS=16
+local registered,loading=false,false
+local last_tick,last_running,next_tick=nil,false,0
+local retry,motion_cache={},{}
+local function call(o,m,...)
+    if not o then return nil end
+    local args={...};local ok,v=pcall(function() return o[m](o,unpack(args)) end)
+    if ok then return v end
+end
+local function actor() return db and db.actor end
+local function sim() return type(alife)=="function" and alife() end
+local function online(id) return id and level.object_by_id(id) end
+local function server(id) return id and call(sim(),"object",id,true) end
+local function stamp() return time_global() end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e12 end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function distance(a,b) return math.sqrt((a.x-b.x)^2+(a.y-b.y)^2+(a.z-b.z)^2) end
+local function records(create)
+    local data=alife_storage_manager and alife_storage_manager.get_state()
+    if type(data)~="table" then return nil end
+    if create and type(data[SAVE])~="table" then data[SAVE]={} end
+    return data[SAVE]
+end
+local function identity(o,r,is_server)
+    return o and call(o,is_server and "section_name" or "section")==SECTION and call(o,"name")==r.identity
+end
+local function entry(o)
+    local id=call(o,"id")
+    for _,r in pairs(records(false) or {}) do
+        if r.id==id and identity(o,r,false) then return r end
+    end
+end
+local function ini_value(ini,s,k)
+    if ini and ini:section_exist(s) and ini:line_exist(s,k) then return ini:r_string(s,k) end
+end
+local function surface() return level_weathers and level_weathers.bLevelUnderground==false end
+local function ready()
+    if loading or call(actor(),"alive")~=true then return false end
+    if type(app_ready)=="function" and not app_ready() then return false end
+    local d=device()
+    return not d:is_paused() and (tonumber(d.precache_frame) or 0)==0
+end
+local function text(v) return anomaly_donation_bridge_common.game_text_cp1251_lossy(v) or "?" end
+local function notice(v)
+    if news_manager and type(news_manager.send_tip)=="function" and actor() then
+        pcall(news_manager.send_tip,actor(),text(v),nil,nil,8000)
+    end
+end
+local function stop_attack(h)
+    h:ClearEnemy();h.m_use_mgun_on_attack=false;h.m_use_rocket_on_attack=false
+    h:LookAtPoint(vector():set(0,0,0),false)
+end
+local function clock(now)
+    local running=ready() and surface()
+    local elapsed=last_tick and now>=last_tick and now-last_tick or 0
+    if running and last_running then
+        for _,r in pairs(records(false) or {}) do
+            if r.stage=="active" and r.level==level.name() and identity(online(r.id),r,false) then
+                r.remaining_ms=math.max(0,(tonumber(r.remaining_ms) or 0)-elapsed)
+            elseif r.stage=="leaving" and r.level==level.name() then
+                r.depart_ms=math.max(0,(tonumber(r.depart_ms) or 0)-elapsed)
+            elseif r.stage=="retired" then
+                r.grace_ms=math.max(0,(tonumber(r.grace_ms) or 0)-elapsed)
+            end
+        end
+    end
+    last_tick,last_running=now,running
+end
+local function asset_exists(alias,path,ext)
+    if path:lower():sub(-#ext)~=ext then path=path..ext end
+    local ok,v=pcall(function() return getFS():exist(alias,path) end)
+    return ok and not not v
+end
+local function profile(source)
+    local ini=system_ini()
+    if ini_value(ini,source,"class")~="C_HLCP_S" then return nil end
+    local visual=ini_value(ini,source,"visual")
+    local anim=ini_value(ini,source,"startup_animation")
+    if not anim or anim=="" or anim=="$editor" then anim="idle" end
+    if not visual or visual=="" then return nil end
+    local key=visual.."|"..anim
+    if motion_cache[key]==nil then
+        local ok,v=pcall(function() return asset_exists("$game_meshes$",visual,".ogf") and game.motion_exists(visual,anim) end)
+        motion_cache[key]=ok and v==true
+    end
+    if not motion_cache[key] then return nil end
+    local sound=ini_value(ini,source,"engine_sound")
+    if not sound or sound=="" then sound=[[vehicles\helicopter\helicopter]] end
+    if not asset_exists("$game_sounds$",sound,".ogg") then return nil end
+    return {visual=visual,animation=anim,sound=sound,motion=ini_value(ini,source,"motion_name") or [[helicopter\aaa.anm]]}
+end
+local function prepare_server(s,p)
+    local d=utils_stpk.get_heli_data(s)
+    if type(d)~="table" then error("helicopter_packet_unavailable") end
+    d.visual_name=p.visual;d.startup_animation=p.animation
+    if not d.skeleton_name or d.skeleton_name=="" or d.skeleton_name=="$editor" then d.skeleton_name=p.animation end
+    if not d.motion_name or d.motion_name=="" then d.motion_name=p.motion end
+    if not d.engine_sound or d.engine_sound=="" then d.engine_sound=p.sound end
+    utils_stpk.set_heli_data(d,s)
+    local c=utils_stpk.get_heli_data(s)
+    if not c or c.visual_name~=p.visual or c.startup_animation~=p.animation or
+        not c.engine_sound or c.engine_sound=="" or not c.motion_name or c.motion_name=="" or
+        not c.skeleton_name or c.skeleton_name=="" or c.skeleton_name=="$editor" then error("helicopter_packet_verification_failed") end
+end
+local function ray_clear(a,b,ignore)
+    local len=distance(a,b);if len<0.01 then return true end
+    return not level.ray_pick(vec(a),vector():set((b.x-a.x)/len,(b.y-a.y)/len,(b.z-a.z)/len),
+        len,rq_target.rqtStatic,rq_result(),ignore)
+end
+local function corridor(a,b,ignore)
+    for _,v in ipairs({{0,0,0},{8,0,0},{-8,0,0},{0,0,8},{0,0,-8},{0,5,0},{0,-5,0}}) do
+        if not ray_clear({x=a.x+v[1],y=a.y+v[2],z=a.z+v[3]},
+            {x=b.x+v[1],y=b.y+v[2],z=b.z+v[3]},ignore) then return false end
+    end
+    return true
+end
+local function air_point(radius,from,ignore,phase)
+    local a=actor();if not a then return nil end
+    local p=a:position();local b=level.get_bounding_volume();if not b or not b.min or not b.max then return nil end
+    local center={x=p.x,y=p.y+55,z=p.z}
+    if center.y-10<=b.min.y or not ray_clear({x=p.x,y=p.y+2,z=p.z},center,a) then return nil end
+    for i=0,11 do
+        local angle=((phase or 0)+i*30)*math.pi/180
+        local q={x=p.x+math.cos(angle)*radius,y=center.y,z=p.z+math.sin(angle)*radius}
+        if q.x>b.min.x+20 and q.x<b.max.x-20 and q.z>b.min.z+20 and q.z<b.max.z-20 and
+            corridor(from or center,q,ignore or a) then return q end
+    end
+end
+local function departure_point(from,ignore)
+    -- The actor may be indoors now. Departure starts at the helicopter's own
+    -- safe altitude; it must not require open sky directly above the actor.
+    local p=actor():position();local b=level.get_bounding_volume()
+    if not b or not b.min or not b.max then return nil end
+    local angle=math.atan2(from.z-p.z,from.x-p.x)
+    local best,best_distance=nil,distance(from,p)+50
+    for _,radius in ipairs({600,300,150}) do
+        for i=0,11 do
+            local a=angle+i*math.pi/6
+            local q={x=from.x+math.cos(a)*radius,y=from.y+30,z=from.z+math.sin(a)*radius}
+            local d=distance(q,p)
+            if d>best_distance and q.x>b.min.x+20 and q.x<b.max.x-20 and q.z>b.min.z+20 and q.z<b.max.z-20 and
+                corridor(from,q,ignore) then best,best_distance=q,d end
+        end
+        if best then return best end
+    end
+end
+local function creature(o)
+    -- GetRelationType requires CEntityAlive, not arbitrary CEntity/vehicle.
+    return call(o,"is_entity_alive")==true and call(o,"alive")==true
+end
+local function hostile(o)
+    -- luabind game_object does not implement __eq. Compare numeric object IDs,
+    -- including when Lua supplies a different wrapper for the same actor.
+    local id=call(o,"id")
+    if type(id)~="number" or id==call(actor(),"id") or not creature(o) or call(o,"has_info","npcx_is_companion")==true then return false end
+    local rel=call(o,"relation",actor())
+    return type(rel)=="number" and game_object and rel==game_object.enemy
+end
+local function creatures()
+    local found={};if actor() then found[call(actor(),"id") or 0]=actor() end
+    for id,st in pairs(db.storage or {}) do
+        local o=st.object
+        if o and creature(o) then found[id]=o end
+    end
+    return found
+end
+local function own_source(h)
+    -- Native MGun bullets and missile blast/fragments carry the helicopter as
+    -- draftsman. Check ID AND section/name; recycled IDs never confer immunity.
+    return h and entry(h.draftsman)~=nil
+end
+local function actor_hit(h,_,flags)
+    if type(flags)=="table" and own_source(h) then flags.ret_value=false end
+end
+local function creature_hit(o,h,_,flags)
+    if type(flags)=="table" and own_source(h) and not hostile(o) then flags.ret_value=false end
+end
+local function rocket_clear(from,target,all)
+    local ini=system_ini();local rocket=ini_value(ini,SECTION,"rocket_class")
+    local blast=tonumber(rocket and ini_value(ini,rocket,"blast_r"))
+    local shards=tonumber(rocket and ini_value(ini,rocket,"frags_r")) or 0
+    if not finite(blast) or blast<=0 or not finite(shards) or shards<0 then return false end
+    local radius=math.max(blast,shards)+20
+    local p=target:position();local dx,dy,dz=p.x-from.x,p.y-from.y,p.z-from.z
+    local len=dx*dx+dy*dy+dz*dz;if len<1 then return false end
+    for _,o in pairs(all) do
+        if not hostile(o) then
+            local q=o:position()
+            local t=math.max(0,math.min(1,((q.x-from.x)*dx+(q.y-from.y)*dy+(q.z-from.z)*dz)/len))
+            local closest={x=from.x+dx*t,y=from.y+dy*t,z=from.z+dz*t}
+            if distance(q,p)<=radius or distance(q,closest)<=radius then return false end
+        end
+    end
+    return true
+end
+local function target_for(h,all)
+    local nearest,best=nil,math.huge;local p=actor():position()
+    local maximum=tonumber(h.m_max_mgun_dist) or 300
+    maximum=math.max(30,math.min(500,maximum))
+    for _,o in pairs(all) do
+        if hostile(o) then
+            local d=distance(o:position(),p)
+            local ignored=false
+            if xr_combat_ignore and type(xr_combat_ignore.ignore_enemy_by_overrides)=="function" then
+                -- Respect scripted non-combat scenes and ceasefires.
+                local ok,v=pcall(xr_combat_ignore.ignore_enemy_by_overrides,actor(),o)
+                ignored=not ok or v==true
+            end
+            if not ignored and d<best and d<=maximum and h:isVisible(o)==true then nearest,best=o,d end
+        end
+    end
+    return nearest
+end
+local function snapshot(o)
+    local r=entry(o);if not r then return end
+    local h=call(o,"get_helicopter");local hp=call(h,"GetfHealth")
+    if finite(hp) then r.health=hp end
+    if hp and hp<=0.005 or h and h.m_dead then r.dead=true end
+    local s=server(r.id);if identity(s,r,true) then s.position=o:position() end
+end
+local function release(r)
+    local s=server(r.id)
+    if identity(s,r,true) then
+        anomaly_donation_bridge_common.rollback_server_objects({s})
+        if identity(server(r.id),r,true) then return false end
+    end
+    return true
+end
+local function retire(r)
+    r.stage="retired";r.grace_ms=60000
+end
+local function leave(r)
+    if r.stage=="leaving" or r.stage=="retired" then return end
+    r.stage="leaving";r.remaining_ms=0;r.depart_ms=20000
+    local o=online(r.id);if identity(o,r,false) then stop_attack(o:get_helicopter()) end
+    if not r.depart_announced then
+        r.depart_announced=true
+        notice("Вертолёт закончил патрулирование")
+    end
+end
+local function supported()
+    return object_binder~=nil and CHelicopter~=nil and callback and callback.helicopter_on_hit~=nil and
+        game_object and game_object.enemy~=nil and type(alife_create)=="function" and type(system_ini)=="function" and
+        alife_storage_manager and type(alife_storage_manager.get_state)=="function" and
+        utils_stpk and type(utils_stpk.get_heli_data)=="function" and type(utils_stpk.set_heli_data)=="function" and
+        game and type(game.motion_exists)=="function" and type(getFS)=="function" and
+        level and type(level.ray_pick)=="function" and type(level.get_bounding_volume)=="function" and
+        rq_result~=nil and rq_target and rq_target.rqtStatic~=nil and type(RegisterScriptCallback)=="function"
+end
+local function free_slot()
+    local data=records(false) or {}
+    for i=1,SLOTS do local key=tostring(i);if not data[key] then return key end end
+end
+local function can_execute(ctx,params)
+    local valid,why=anomaly_donation_bridge_common.params_only(params,
+        {duration_seconds=true,follow_distance=true,use_rockets=true,engine_sound=true,helicopter_sections=true,catalog_revision=true})
+    if not valid then return false,"rejected",why end
+    if not supported() then return false,"deferred","helicopter_companion_api_unavailable" end
+    if not ready() then return false,"deferred","actor_unavailable" end
+    if not surface() then return false,"deferred","helicopter_companion_requires_surface" end
+    local ini=system_ini()
+    if ini_value(ini,SECTION,"class")~="C_HLCP_S" or ini_value(ini,SECTION,"adb_heli_profile")~="1" or
+        ini_value(ini,SECTION,"script_binding")~=MODULE..".bind" then
+        return false,"deferred","helicopter_companion_update_addon_restart_game"
+    end
+    local p={}
+    for key,b in pairs({duration_seconds={60,10,99999999},follow_distance={100,30,1000}}) do
+        p[key],why=anomaly_donation_bridge_common.parse_integer(params[key],b[1],b[2],b[3],"helicopter_companion_"..key.."_invalid")
+        if not p[key] then return false,"rejected",why end
+    end
+    for _,key in ipairs({"use_rockets","engine_sound"}) do
+        if params[key]~=nil and params[key]~="true" and params[key]~="false" then return false,"rejected","helicopter_companion_"..key.."_invalid" end
+    end
+    p.rockets=params.use_rockets=="true";p.sound=params.engine_sound~="false"
+    local cat=anomaly_donation_bridge_catalog
+    if not cat or not cat.capable() then return false,"deferred","catalog_unavailable" end
+    local entries,reason=cat.validate_sections(params,"helicopter_sections","helicopter")
+    if not entries then return false,(reason=="catalog_unavailable" or reason=="catalog_revision_mismatch") and "deferred" or "rejected",reason end
+    if #entries==0 then return false,"rejected","selection_empty" end
+    p.source=entries[math.random(1,#entries)].section_id
+    if not profile(p.source) then return false,"deferred","helicopter_companion_model_unavailable" end
+    p.slot=free_slot();if not p.slot then return false,"deferred","helicopter_companion_slots_busy" end
+    if not air_point(p.follow_distance) then return false,"deferred","helicopter_companion_open_sky_required" end
+    ctx.options=p;return true
+end
+local function execute(ctx)
+    local p=ctx.options
+    if not p or not ready() or not surface() then return "deferred","actor_unavailable" end
+    local data=records(true)
+    if not data or free_slot()~=p.slot then return "deferred","helicopter_companion_slots_busy" end
+    clock(stamp())
+    data[p.slot]={stage="waiting",remaining_ms=p.duration_seconds*1000,follow_distance=p.follow_distance,
+        rockets=p.rockets,sound=p.sound,source_section=p.source,health=0.5,level=level.name()}
+    return "executed","helicopter_companion_patrol_"..p.duration_seconds.."s"
+end
+local function spawn(r,key,now)
+    if now<(retry[key] or 0) then return end
+    retry[key]=now+5000
+    local cat=anomaly_donation_bridge_catalog
+    if not cat or not cat.is_available(r.source_section,"helicopter") then return end
+    local p=profile(r.source_section);local point=air_point(r.follow_distance)
+    if not p or not point then return end
+    local ok,s=pcall(alife_create,SECTION,vec(point),actor():level_vertex_id(),actor():game_vertex_id())
+    if not ok or not s then return end
+    -- Block online switching and repair native visual/motion/sound before the
+    -- renderer can see a $editor skeleton. No sound/light calls in net_spawn.
+    local prepared,why=pcall(function()
+        sim():set_switch_online(s.id,false);prepare_server(s,p)
+        r.id,r.identity,r.level,r.stage=s.id,call(s,"name"),level.name(),"arriving"
+        sim():set_switch_online(s.id,true);sim():set_switch_offline(s.id,false)
+    end)
+    if not prepared then
+        anomaly_donation_bridge_common.rollback_server_objects({s})
+        r.id,r.identity,r.stage=nil,nil,"waiting"
+        if type(printf)=="function" then printf("[ADB] helicopter companion spawn failed: %s",tostring(why)) end
+    else retry[key]=nil end
+end
+local function update(now)
+    now=tonumber(now) or stamp();clock(now)
+    if now<next_tick then return end
+    next_tick=now+250
+    if not ready() then return end
+    local remove={}
+    for key,r in pairs(records(false) or {}) do
+        local o=online(r.id)
+        if r.stage=="retired" then
+            -- Wrecks retain native ownership. Our identity tombstone need only
+            -- outlive their blast/in-flight projectiles, not the entire save.
+            if (r.grace_ms or 0)<=0 then remove[#remove+1]=key end
+        elseif r.dead then
+            -- Keep the native wreck; never release an exploding physics shell.
+            if r.stage~="retired" then retire(r) end
+        elseif r.level~=level.name() and r.id then
+            -- The old level must finish unloading BEFORE touching its server.
+            -- Never carry client pointers/physics across F9 or level changes.
+            if not identity(o,r,false) and release(r) then
+                r.id,r.identity=nil,nil
+                if r.stage=="leaving" then retire(r) else r.stage="waiting";r.level=level.name() end
+            end
+        elseif r.stage=="active" and (not finite(r.remaining_ms) or r.remaining_ms<=0) then
+            leave(r)
+        elseif r.stage=="leaving" then
+            if (r.depart_ms or 0)<=0 or not identity(o,r,false) then
+                if release(r) then retire(r) end
+            end
+        elseif r.stage=="waiting" and surface() then
+            r.level=level.name();spawn(r,key,now)
+        elseif (r.stage=="active" or r.stage=="arriving") and not identity(server(r.id),r,true) then
+            -- Destroyed/despawned by another mod: never resurrect it for free.
+            retire(r)
+        end
+    end
+    local data=records(false);for _,key in ipairs(remove) do data[key]=nil end
+end
+local function on_load()
+    loading=false;last_tick=nil;last_running=false;next_tick=0;retry={};motion_cache={}
+end
+local function on_changing()
+    clock(stamp());loading=true;last_tick=nil;last_running=false
+    for _,r in pairs(records(false) or {}) do
+        local o=online(r.id)
+        if identity(o,r,false) then snapshot(o);stop_attack(o:get_helicopter()) end
+        if identity(server(r.id),r,true) then
+            sim():set_switch_online(r.id,true);sim():set_switch_offline(r.id,true)
+        end
+    end
+end
+local function on_destroy() loading=true;last_tick=nil;last_running=false end
+local function save_state() clock(stamp()) end
+
+class "adb_helicopter_companion_binder" (object_binder)
+function adb_helicopter_companion_binder:__init(obj)
+    super(obj);self.native_initial_health=obj:get_helicopter():GetfHealth()
+end
+function adb_helicopter_companion_binder:reinit()
+    object_binder.reinit(self)
+    db.storage[self.object:id()]={object=self.object,heliObject=self.object:get_helicopter()}
+    self.object:set_callback(callback.helicopter_on_hit,self.on_hit,self)
+end
+function adb_helicopter_companion_binder:net_spawn(s)
+    if not object_binder.net_spawn(self,s) then return false end
+    db.add_obj(self.object)
+    -- Deliberately absent from db.heli: stock faction-based heli AI must not
+    -- make friendly stalkers flee from or open fire on this companion.
+    return true
+end
+function adb_helicopter_companion_binder:net_save_relevant() return true end
+function adb_helicopter_companion_binder:save(packet)
+    object_binder.save(self,packet);self:initialize_health(false);snapshot(self.object)
+    packet:w_u8(1);packet:w_float(self.object:get_helicopter():GetfHealth())
+end
+function adb_helicopter_companion_binder:load(packet)
+    object_binder.load(self,packet)
+    local version=packet:r_u8();local hp=packet:r_float()
+    if version==1 and finite(hp) then self.loaded_health=hp end
+    self.initialized=false;self.native_initial_health=self.object:get_helicopter():GetfHealth()
+end
+function adb_helicopter_companion_binder:net_destroy()
+    self:initialize_health(false);snapshot(self.object)
+    self.object:set_callback(callback.helicopter_on_hit,nil)
+    db.del_obj(self.object);object_binder.net_destroy(self)
+end
+function adb_helicopter_companion_binder:initialize_health(after_hit)
+    local r=entry(self.object);if not r or self.initialized then return end
+    local h=self.object:get_helicopter();local hp=self.loaded_health or r.health or 1
+    if after_hit then hp=hp+h:GetfHealth()-(self.native_initial_health or 1) end
+    h:SetfHealth(hp);self.loaded_health=nil;self.initialized=true
+end
+function adb_helicopter_companion_binder:on_hit()
+    self:initialize_health(true);snapshot(self.object)
+end
+function adb_helicopter_companion_binder:update(delta)
+    object_binder.update(self,delta)
+    local r=entry(self.object);local h=self.object:get_helicopter()
+    if not r then stop_attack(h);return end
+    self:initialize_health(false)
+    if not self.effects_started then
+        h:TurnEngineSound(r.sound==true);h:TurnLighting(true);self.effects_started=true
+    end
+    snapshot(self.object)
+    if r.dead then stop_attack(h);if not h.m_dead then h:Die() end;return end
+    if not ready() or not surface() or r.level~=level.name() then stop_attack(h);return end
+    local now=stamp();local pos=self.object:position()
+    if r.stage=="arriving" then r.stage="active" end
+    if r.stage=="active" and (not finite(r.remaining_ms) or r.remaining_ms<=0) then leave(r) end
+    if r.stage=="leaving" then
+        stop_attack(h)
+        if not self.departure then
+            -- Fly to the farthest clear point inside THIS map's bounds.
+            -- No native teleport, deleting binder, or detonating at expiry.
+            self.departure=departure_point(pos,self.object)
+        end
+        if self.departure then
+            h:SetMaxVelocity(40);h:SetSpeedInDestPoint(40);h:SetDestPosition(vec(self.departure))
+            if distance(pos,self.departure)<25 then r.depart_ms=0 end
+        end
+        return
+    elseif r.stage~="active" then stop_attack(h);return end
+    if now<(self.next_combat or 0) then return end
+    self.next_combat=now+250
+    local all=creatures();local target=target_for(h,all)
+    if target then
+        h:UseFireTrail(false);h:LookAtPoint(vec(target:position()),true)
+        h.m_use_mgun_on_attack=true
+        h.m_use_rocket_on_attack=r.rockets==true and rocket_clear(pos,target,all)
+        h:SetEnemy(target)
+    else stop_attack(h) end
+    if now>=(self.next_move or 0) then
+        self.orbit=((self.orbit or 0)+35)%360
+        local q=air_point(r.follow_distance,pos,self.object,self.orbit)
+        if q then
+            local speed=target and 15 or 30
+            h:SetMaxVelocity(speed);h:SetSpeedInDestPoint(speed);h:SetDestPosition(vec(q))
+        end
+        self.next_move=now+2000
+    end
+end
+function bind(object) object:bind_object(adb_helicopter_companion_binder(object)) end
+function on_game_start()
+    if registered then return end
+    registered=true
+    RegisterScriptCallback("actor_on_before_hit",actor_hit)
+    RegisterScriptCallback("npc_on_before_hit",creature_hit)
+    RegisterScriptCallback("monster_on_before_hit",creature_hit)
+    RegisterScriptCallback("actor_on_net_destroy",on_destroy)
+    RegisterScriptCallback("save_state",save_state)
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=function() return supported()==true end,
+        can_execute=can_execute,execute=execute,update=update,on_game_load=on_load,on_level_changing=on_changing})
+end

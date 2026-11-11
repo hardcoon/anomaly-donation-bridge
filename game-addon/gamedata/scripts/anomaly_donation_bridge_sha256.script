@@ -1,0 +1,87 @@
+-- Small LuaJIT-compatible SHA-256 implementation used for catalog integrity.
+
+local bit_ok, bit = pcall(require, "bit")
+local MOD = 4294967296
+local K = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+	0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+	0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+	0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+	0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+	0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+}
+
+local function add(...)
+	local sum = 0
+	for index = 1, select("#", ...) do sum = (sum + select(index, ...)) % MOD end
+	return bit.tobit(sum)
+end
+
+local function word(byte1, byte2, byte3, byte4)
+	return bit.bor(bit.lshift(byte1, 24), bit.lshift(byte2, 16),
+		bit.lshift(byte3, 8), byte4)
+end
+
+local function be32(value)
+	value = value % MOD
+	return string.char(math.floor(value / 16777216) % 256,
+		math.floor(value / 65536) % 256, math.floor(value / 256) % 256, value % 256)
+end
+
+local function hex_word(value)
+	if value < 0 then value = value + MOD end
+	return string.format("%08x", value)
+end
+
+function available()
+	return bit_ok == true
+end
+
+function digest(message)
+	if not bit_ok then return nil, "bit_library_unavailable" end
+	message = tostring(message or "")
+	local bit_length = #message * 8
+	local high = math.floor(bit_length / MOD)
+	local low = bit_length % MOD
+	local zero_count = (56 - ((#message + 1) % 64)) % 64
+	local data = message .. string.char(0x80) .. string.rep("\0", zero_count) ..
+		be32(high) .. be32(low)
+	local h0, h1, h2, h3 = bit.tobit(0x6a09e667), bit.tobit(0xbb67ae85),
+		bit.tobit(0x3c6ef372), bit.tobit(0xa54ff53a)
+	local h4, h5, h6, h7 = bit.tobit(0x510e527f), bit.tobit(0x9b05688c),
+		bit.tobit(0x1f83d9ab), bit.tobit(0x5be0cd19)
+	for offset = 1, #data, 64 do
+		local w = {}
+		for index = 0, 15 do
+			local position = offset + index * 4
+			w[index] = word(data:byte(position), data:byte(position + 1),
+				data:byte(position + 2), data:byte(position + 3))
+		end
+		for index = 16, 63 do
+			local x, y = w[index - 15], w[index - 2]
+			local s0 = bit.bxor(bit.ror(x, 7), bit.ror(x, 18), bit.rshift(x, 3))
+			local s1 = bit.bxor(bit.ror(y, 17), bit.ror(y, 19), bit.rshift(y, 10))
+			w[index] = add(w[index - 16], s0, w[index - 7], s1)
+		end
+		local a, b, c, d = h0, h1, h2, h3
+		local e, f, g, h = h4, h5, h6, h7
+		for index = 0, 63 do
+			local sum1 = bit.bxor(bit.ror(e, 6), bit.ror(e, 11), bit.ror(e, 25))
+			local choice = bit.bxor(bit.band(e, f), bit.band(bit.bnot(e), g))
+			local temp1 = add(h, sum1, choice, K[index + 1], w[index])
+			local sum0 = bit.bxor(bit.ror(a, 2), bit.ror(a, 13), bit.ror(a, 22))
+			local majority = bit.bxor(bit.band(a, b), bit.band(a, c), bit.band(b, c))
+			local temp2 = add(sum0, majority)
+			h, g, f, e, d, c, b, a = g, f, e, add(d, temp1), c, b, a, add(temp1, temp2)
+		end
+		h0, h1, h2, h3 = add(h0, a), add(h1, b), add(h2, c), add(h3, d)
+		h4, h5, h6, h7 = add(h4, e), add(h5, f), add(h6, g), add(h7, h)
+	end
+	return hex_word(h0) .. hex_word(h1) .. hex_word(h2) .. hex_word(h3) ..
+		hex_word(h4) .. hex_word(h5) .. hex_word(h6) .. hex_word(h7)
+end

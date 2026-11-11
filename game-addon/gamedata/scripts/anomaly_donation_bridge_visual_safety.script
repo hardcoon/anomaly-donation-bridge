@@ -1,0 +1,178 @@
+-- Validate files BEFORE the native visual setter: C++ fatal assertions cannot
+-- be caught with pcall. Reads the installed build's merged NPC damage/bone keys
+-- and the actual OMF bone partitions, not a whitelist of character names.
+local models,motions,requirements={},{},{}
+local serial=0
+local function fail(reason) error("special_visual_"..reason,0) end
+local function path_ok(p)
+    return type(p)=="string" and #p<=180 and not p:find("..",1,true) and p:match("^[%w_][%w_%.%-%/\\]*$")~=nil
+end
+local function u16(s,p) local a,b=s:byte(p,p+1);if not b then fail("truncated_data") end;return a+b*256 end
+local function u32(s,p) return u16(s,p)+u16(s,p+2)*65536 end
+local function zstr(s,p)
+    local e=s:find("\0",p,true);if not e or e-p>255 then fail("invalid_string") end
+    return s:sub(p,e-1),e+1
+end
+local function chunk_index(file,max_size)
+    local size=file:seek("end");if not size or size<8 or size>max_size then fail("file_size_invalid") end
+    local out,p,count={},0,0
+    while p<size do
+        if p+8>size then fail("truncated_chunk") end
+        file:seek("set",p);local h=file:read(8);local id,n=u32(h,1),u32(h,5)
+        if out[id] or p+8+n>size then fail("invalid_chunk") end
+        out[id]={offset=p+8,size=n};p=p+8+n;count=count+1
+        if count>20000 then fail("chunk_limit") end
+    end
+    return out
+end
+local function chunk(file,index,id,limit)
+    local c=index[id];if not c or c.size>limit then fail("missing_or_large_chunk_"..id) end
+    file:seek("set",c.offset);local s=file:read(c.size);if not s or #s~=c.size then fail("truncated_chunk") end;return s
+end
+local function with_file(alias,path,fn)
+    if not path_ok(path) then fail("path_invalid") end
+    local fs=getFS();if not fs:exist(alias,path) then fail("resource_missing") end
+    local full=fs:update_path(alias,path);local file=io.open(full,"rb");local temporary
+    if not file then
+        serial=serial+1;temporary=fs:update_path("$app_data_root$","adb_skeleton_probe_"..time_global().."_"..serial..".tmp")
+        if fs:exist(temporary) then fail("temporary_file_exists") end
+        local ok=pcall(fs.file_copy,fs,full,temporary);if ok then file=io.open(temporary,"rb") end
+    end
+    local ok,result=pcall(function() if not file then fail("resource_unreadable") end;return fn(file) end)
+    if file then file:close() end;if temporary then fs:file_delete(temporary) end
+    if not ok then error(result,0) end;return result
+end
+local function skeleton(data)
+    local count=u32(data,1);if count<25 or count>256 then fail("bone_count_invalid") end
+    local names,parents,p,roots={},{},5,0
+    for i=1,count do
+        local name,parent;name,p=zstr(data,p);parent,p=zstr(data,p);name=name:lower();parent=parent:lower()
+        if name=="" or names[name] or name==parent then fail("bone_hierarchy_invalid") end
+        names[name]=true;parents[name]=parent;p=p+60
+        if p>#data+1 then fail("bone_data_truncated") end
+        if parent=="" then roots=roots+1 end
+    end
+    if p~=#data+1 or roots~=1 then fail("bone_hierarchy_invalid") end
+    for name in pairs(names) do
+        local visited={};local parent=name
+        while parent~="" do
+            if not names[parent] or visited[parent] then fail("bone_hierarchy_invalid") end
+            visited[parent]=true;parent=parents[parent]
+        end
+    end
+    return {count=count,names=names}
+end
+local function motion_params(data)
+    local version,parts=u16(data,1),u16(data,3)
+    if version<3 or version>4 or parts<1 or parts>4 then fail("animation_version_or_partitions") end
+    local names,indices,count,p={},{},0,5
+    for _=1,parts do
+        local name;name,p=zstr(data,p);local n=u16(data,p);p=p+2
+        if n>256 then fail("animation_bone_count_invalid") end
+        for _=1,n do
+            name,p=zstr(data,p);name=name:lower();local index=u32(data,p);p=p+4
+            if names[name] or indices[index] or index>=256 then fail("animation_bone_map_invalid") end
+            names[name]=true;indices[index]=true;count=count+1
+        end
+    end
+    for i=0,count-1 do if not indices[i] then fail("animation_bone_map_invalid") end end
+    local n=u16(data,p);p=p+2;if n<1 or n>=16383 then fail("animation_count_invalid") end
+    local cycles={}
+    for _=1,n do
+        local name;name,p=zstr(data,p);name=name:lower();local flags=u32(data,p);local part=u16(data,p+4);p=p+24
+        if flags%2==0 then
+            if part~=65535 and part>=parts then fail("animation_part_invalid") end
+            cycles[name]=true
+        end
+        if version>=4 then
+            local marks=u32(data,p);p=p+4;if marks>256 then fail("animation_marks_invalid") end
+            for _=1,marks do
+                local ending=data:find("\n",p,true);if not ending or ending-p>255 then fail("animation_marks_invalid") end
+                p=ending+1;local intervals=u32(data,p);p=p+4+intervals*8
+                if p>#data+1 then fail("animation_marks_invalid") end
+            end
+        end
+        if p>#data+1 then fail("animation_data_truncated") end
+    end
+    if p~=#data+1 then fail("animation_data_size") end
+    return {names=names,count=count,cycles=cycles,motion_count=n}
+end
+local function load_motion_file(file)
+    local index=chunk_index(file,128*1024*1024)
+    local info=motion_params(chunk(file,index,15,4*1024*1024));local c=index[14]
+    if not c or c.size<12 then fail("animation_keys_missing") end
+    file:seek("set",c.offset);local h=file:read(12)
+    if u32(h,1)~=0 or u32(h,5)~=4 or u32(h,9)~=info.motion_count then fail("animation_key_count_mismatch") end
+    return info
+end
+local function load_motion(ref)
+    ref=ref:lower():gsub("/","\\")
+    if motions[ref] then return motions[ref] end
+    if ref:find("*",1,true) then fail("animation_wildcard_unverified") end
+    local fs=getFS();local alias=fs:exist("$game_meshes$",ref..".omf") and "$game_meshes$" or "$level$"
+    local result=with_file(alias,ref..".omf",load_motion_file);motions[ref]=result;return result
+end
+local function inspect_model(file)
+    local index=chunk_index(file,32*1024*1024);local header=chunk(file,index,1,44)
+    if #header~=44 or header:byte(1)~=4 or header:byte(2)~=3 then fail("not_animated_skeleton") end
+    local model=skeleton(chunk(file,index,13,65536))
+    if not index[16] or not (index[9] or index[10]) then fail("skeleton_resources_missing") end
+    local refs={}
+    if index[24] then
+        local data=chunk(file,index,24,65536);local n,p=u32(data,1),5;if n<1 or n>256 then fail("animation_reference_count") end
+        for _=1,n do local ref;ref,p=zstr(data,p);refs[#refs+1]=ref end
+        if p~=#data+1 then fail("animation_reference_size") end
+    elseif index[19] then
+        local data=chunk(file,index,19,65536);local text=zstr(data,1)
+        for ref in text:gmatch("[^,%s]+") do refs[#refs+1]=ref end
+    end
+    local packs={}
+    for _,ref in ipairs(refs) do packs[#packs+1]=load_motion(ref) end
+    if index[14] then packs[#packs+1]=load_motion_file(file) end
+    if #packs==0 then fail("animations_missing") end
+    local cycles={}
+    for _,pack in ipairs(packs) do
+        if pack.count~=model.count then fail("animation_bone_count_mismatch") end
+        for name in pairs(pack.names) do if not model.names[name] then fail("animation_bone_missing_"..name) end end
+        for name in pairs(pack.cycles) do cycles[name]=true end
+    end
+    -- Required locomotion/head cycles and representative unarmed, pistol and
+    -- rifle actions. A trader's sitting/talking OMF is not a stalker move set.
+    for _,name in ipairs({"head_idle_0","head_talk_0","norm_idle_0","norm_walk_fwd_0","norm_run_fwd_0",
+        "cr_idle_0","norm_torso_0_idle_0","norm_torso_1_aim_0","norm_torso_2_aim_0"}) do
+        if not cycles[name] then fail("missing_animation_"..name) end
+    end
+    return model
+end
+local function required_bones(ini,section)
+    if requirements[section] then return requirements[section] end
+    if not ini or not ini:section_exist(section) or not ini:line_exist(section,"damage") then fail("npc_config_unavailable") end
+    local needed={bip01_head=true,bip01_spine1=true,bip01_spine2=true,bip01_l_hand=true,bip01_r_hand=true,
+        bip01_l_foot=true,bip01_r_foot=true,bip01_tail=true}
+    for _,key in ipairs({"bone_head","bone_shoulder","bone_spin","bone_model","weapon_bone0","weapon_bone1","weapon_bone2"}) do
+        if not ini:line_exist(section,key) then fail("npc_bone_config_missing_"..key) end
+        local value=ini:r_string(section,key):lower():match("^%s*(.-)%s*$");needed[value]=true
+    end
+    local damage=ini:r_string(section,"damage")
+    if not ini:section_exist(damage) then fail("npc_damage_config_missing") end
+    local count=ini:line_count(damage);if count<1 or count>257 then fail("npc_damage_config_invalid") end
+    for i=0,count-1 do local ok,name=ini:r_line(damage,i,"","");if not ok or type(name)~="string" then fail("npc_damage_config_invalid") end
+        if name~="default" then needed[name:lower()]=true end
+    end
+    requirements[section]=needed;return needed
+end
+function clear_cache() models={};motions={};requirements={} end
+function check(path,ini,section,force)
+    local ok,result=pcall(function()
+        if not path_ok(path) then fail("path_invalid") end
+        if type(section)~="string" or section=="" then fail("npc_config_unavailable") end
+        local model=not force and models[path] or nil
+        if not model then model=with_file("$game_meshes$",path,inspect_model);models[path]=model end
+        for name in pairs(required_bones(ini,section)) do
+            if not model.names[name] then fail("missing_bone_"..name) end
+        end
+        return true
+    end)
+    if not ok then return false,tostring(result):match("special_visual_[%w_%.%-]+") or "special_visual_validation_failed" end
+    return true
+end

@@ -1,0 +1,177 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "tell_joke",
+  "displayName": "Рассказать анекдот",
+  "description": "Находит реальные звуковые реплики анекдотов в установленной игре и модах и проигрывает случайную реплику от лица героя.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [],
+  "parameters": {},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_joke_v2"
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+    state = { paths = nil, sound = nil }
+    rawset(_G, STATE_KEY, state)
+end
+
+local function object_has_method(object, name)
+    if object == nil then return false end
+    local ok, method = pcall(function() return object[name] end)
+    return ok and type(method) == "function"
+end
+
+local function list_names(filesystem, folder, flags)
+    local list_ok, list = pcall(function()
+        return filesystem:file_list_open("$game_sounds$", folder, flags)
+    end)
+    if not list_ok or list == nil or not object_has_method(list, "Size") or
+        not object_has_method(list, "GetAt") then return nil end
+    local size_ok, size = pcall(function() return tonumber(list:Size()) end)
+    if not size_ok or size == nil or size < 0 or size > 100000 then
+        if object_has_method(list, "Free") then pcall(function() list:Free() end) end
+        return nil
+    end
+    local names = {}
+    for index = 0, size - 1 do
+        local item_ok, item = pcall(function() return list:GetAt(index) end)
+        if item_ok and type(item) == "string" and item ~= "" then
+            names[#names + 1] = item:gsub("/", "\\"):gsub("^\\+", "")
+        end
+    end
+    if object_has_method(list, "Free") then pcall(function() list:Free() end) end
+    return names
+end
+
+local function append_folder(parent, child)
+    if parent:sub(-1) ~= "\\" then parent = parent .. "\\" end
+    if child:sub(-1) ~= "\\" then child = child .. "\\" end
+    if child:lower():sub(1, #parent) == parent:lower() then return child end
+    return parent .. child
+end
+
+local function joke_paths()
+    if type(state.paths) == "table" then return state.paths end
+    if type(getFS) ~= "function" then return nil, "joke_sound_scan_unavailable" end
+    local fs_ok, filesystem = pcall(getFS)
+    if not fs_ok or not object_has_method(filesystem, "file_list_open") then
+        return nil, "joke_sound_scan_unavailable"
+    end
+    local file_flags = (FS and FS.FS_ListFiles or 1) + (FS and FS.FS_RootOnly or 8)
+    local folder_flags = (FS and FS.FS_ListFolders or 2) + (FS and FS.FS_RootOnly or 8)
+    local queue, head, visited = { "characters_voice\\" }, 1, {}
+    local paths, seen = {}, {}
+    while head <= #queue and head <= 10000 do
+        local folder = queue[head]
+        head = head + 1
+        local folder_key = folder:lower()
+        if not visited[folder_key] then
+            visited[folder_key] = true
+            if folder_key:sub(-11) == "talk\\jokes\\" then
+                local files = list_names(filesystem, folder, file_flags)
+                if files ~= nil then
+                    for _, name in ipairs(files) do
+                        local lower = name:lower()
+                        if lower:match("^joke_.+%.ogg$") then
+                            local path = (folder .. name):sub(1, -5)
+                            local key = path:lower()
+                            if not seen[key] then
+                                seen[key] = true
+                                paths[#paths + 1] = path
+                            end
+                        end
+                    end
+                end
+            else
+                local folders = list_names(filesystem, folder, folder_flags)
+                if folders ~= nil then
+                    for _, name in ipairs(folders) do
+                        queue[#queue + 1] = append_folder(folder, name)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(paths, function(left, right) return left:lower() < right:lower() end)
+    if #paths == 0 then return nil, "joke_sounds_unavailable" end
+    state.paths = paths
+    return paths
+end
+
+local function sound_is_playing()
+    if state.sound == nil or not object_has_method(state.sound, "playing") then return false end
+    local ok, playing = pcall(function() return state.sound:playing() end)
+    return ok and playing == true
+end
+
+local function tell_joke_can(context, params)
+    local valid, reason = anomaly_donation_bridge_common.params_only(params, {})
+    if not valid then return false, "rejected", reason end
+    if context.actor == nil then return false, "deferred", "actor_unavailable" end
+    if sound_is_playing() then return false, "deferred", "actor_joke_already_playing" end
+    local paths, scan_error = joke_paths()
+    if paths == nil then return false, "rejected", scan_error end
+    context.options = { path = paths[math.random(1, #paths)], available = #paths }
+    return true
+end
+
+local function tell_joke_execute(context)
+    local created, sound = pcall(function() return sound_object(context.options.path) end)
+    if not created or sound == nil or not object_has_method(sound, "play") then
+        return "rejected", "joke_sound_create_failed"
+    end
+    local played = pcall(function()
+        -- The actor is also the first-person listener. Stock Anomaly actor
+        -- sounds use s2d here; a 3D source attached to the listener can have
+        -- valid playback feedback while remaining inaudible.
+        sound:play(context.actor, 0, sound_object.s2d)
+    end)
+    if not played then return "uncertain", "joke_sound_play_failed" end
+    state.sound = sound
+    return "executed", "actor_joke_played_2d_pool_" .. tostring(context.options.available)
+end
+
+local function tell_joke_update()
+    if state.sound ~= nil and not sound_is_playing() then state.sound = nil end
+end
+
+local function tell_joke_level_changing()
+    if state.sound ~= nil then
+        if object_has_method(state.sound, "stop_deffered") then
+            pcall(function() state.sound:stop_deffered() end)
+        elseif object_has_method(state.sound, "stop") then
+            pcall(function() state.sound:stop() end)
+        end
+    end
+    state.sound = nil
+end
+
+local function tell_joke_supported(context)
+    local actor = context and context.actor or (db and db.actor or nil)
+    local sound_type = type(sound_object)
+    local fs_ok, filesystem = false, nil
+    if type(getFS) == "function" then fs_ok, filesystem = pcall(getFS) end
+    local supported = actor ~= nil and fs_ok and
+        object_has_method(filesystem, "file_list_open") and
+        (sound_type == "function" or sound_type == "table")
+    return supported, supported and nil or "joke_sound_api_unsupported"
+end
+
+function on_game_start()
+    local ok, reason = anomaly_donation_bridge_registry.register_builtin("tell_joke", {
+        can_execute = tell_joke_can,
+        execute = tell_joke_execute,
+        update = tell_joke_update,
+        on_level_changing = tell_joke_level_changing,
+        is_supported = tell_joke_supported,
+        support_probe_is_hint = true
+    })
+    if not ok and type(printf) == "function" then
+        printf("[ADB] tell_joke registration failed: %s", tostring(reason))
+    end
+end

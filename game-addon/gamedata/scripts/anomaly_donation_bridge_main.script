@@ -1,0 +1,28 @@
+-- Auto-loaded Anomaly entry point. No addon.init and no base-script override is used.
+
+local initialized = false
+
+function actor_on_update()
+	anomaly_donation_bridge_runtime.update()
+end
+
+function on_game_load()
+	anomaly_donation_bridge_runtime.on_game_load()
+end
+
+function on_level_changing()
+	anomaly_donation_bridge_runtime.on_level_changing()
+end
+
+function actor_on_before_death(who_id, flags)
+	anomaly_donation_bridge_runtime.on_actor_before_death(who_id, flags)
+end
+
+function on_game_start()
+	if initialized then return end
+	initialized = true
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("on_game_load", on_game_load)
+	RegisterScriptCallback("on_level_changing", on_level_changing)
+	RegisterScriptCallback("actor_on_before_death", actor_on_before_death)
+end

@@ -1,0 +1,7 @@
+Voting material: Hardcoon, MIT (see LICENSE).
+
+anomaly_donation_bridge_voting_material.dds is a lossless radial UV repack of
+the existing casino inset material in anomaly_donation_bridge_roulette_atlas.dds.
+No new artwork or lighting was generated. The original atlas is unchanged.
+Reproducible tool: scripts/pack-voting-material.py.
+Source atlas SHA-256: d406f7831b91498d201810ac066b4404a533b4955a51bfcd11e156788efa4cac

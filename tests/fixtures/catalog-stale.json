@@ -1,0 +1,16 @@
+{
+  "revision": "modpack-session-9",
+  "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "entries": [
+    {
+      "sectionId": "mod_chimera_beta",
+      "kind": "Mutant",
+      "displayName": "Бета-химера",
+      "category": "Добавленные мутанты",
+      "strength": "Strong",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    }
+  ]
+}

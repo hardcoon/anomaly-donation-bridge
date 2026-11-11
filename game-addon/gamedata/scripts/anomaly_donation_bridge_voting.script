@@ -1,0 +1,345 @@
+-- Private voting presentation only. Never rolls item roulette or executes a preset.
+-- The program persists the weighted winner; this modal only presents/acknowledges it.
+GUI=nil
+local UI_NAME="ADBVotingRoulette"
+local pending,active
+local completed,completed_order={},{}
+local initialized=false
+local pause_owned=false
+local last_ui_error
+local hud_payload,hud_received,hud_error
+local hud_loading=false
+local tick_sound,tick_bucket,tick_next,audio_error_logged
+local function now() return type(time_continual)=="function" and time_continual() or time_global() end
+local function stop_audio()
+    if tick_sound then pcall(function()tick_sound:stop()end)end
+    tick_bucket=nil;tick_next=nil
+end
+local function update_audio(state)
+    if not state or state.finished then stop_audio();return end
+    local bucket=math.floor(math.abs(state.angle)/12);local stamp=now()
+    if tick_bucket==nil then tick_bucket=bucket;tick_next=stamp;return end
+    if bucket==tick_bucket then return end
+    tick_bucket=bucket
+    if stamp<(tick_next or 0) then return end
+    tick_next=stamp+40
+    if not sound_object or not db or not db.actor then return end
+    local ok,why=pcall(function()
+        tick_sound=tick_sound or sound_object("ui\\anomaly_donation_bridge_roulette_tick")
+        tick_sound:play(db.actor,0,sound_object.s2d);tick_sound.volume=.30
+    end)
+    if not ok and not audio_error_logged then
+        audio_error_logged=true
+        if type(printf)=="function" then printf("[ADB voting] Roulette sound: %s",tostring(why))end
+    end
+end
+local function acquire_pause()
+    local ok,paused=pcall(function() return device():is_paused() end)
+    if not ok or paused then return false end
+    local changed=pcall(function() device():pause(true) end)
+    local checked,is_paused=pcall(function() return device():is_paused() end)
+    pause_owned=checked and is_paused==true
+    return changed and pause_owned
+end
+local function release_pause()
+    if not pause_owned then return true end
+    local ok,paused=pcall(function() return device():is_paused() end)
+    if not ok then return false end
+    if paused then
+        if not pcall(function() device():pause(false) end) then return false end
+        local checked,still_paused=pcall(function() return device():is_paused() end)
+        if not checked or still_paused then return false end
+    end
+    pause_owned=false;return true
+end
+local function id(value) return type(value)=="string" and #value==32 and value:match("^[0-9a-f]+$")~=nil end
+local function finite(value) return type(value)=="number" and value==value and math.abs(value)<math.huge end
+local function integer(value,low,high)
+    local n=tonumber(value);return finite(n) and n==math.floor(n) and n>=low and n<=high and n or nil
+end
+local function fraction(value)
+    if type(value)~="string" or #value>32 or not value:match("^%d+%.?%d*$") then return nil end
+    local n=tonumber(value);return finite(n) and n>=0 and n<=1 and n or nil
+end
+local function text(value)
+    return type(value)=="string" and #value>0 and #value<=640 and not value:find("[%z\1-\31\127]") and
+        anomaly_donation_bridge_common.is_valid_utf8(value)
+end
+local function hash(value) return type(value)=="string" and #value==64 and value:match("^[0-9a-f]+$")~=nil end
+local function canonical(s)
+    local lines={s.title,"\n",s.auto and "1" or "0","\n",tostring(s.winner),"\n",s.fraction,"\n",tostring(s.count),"\n"}
+    for index,option in ipairs(s.options) do
+        lines[#lines+1]=tostring(index-1).."\t"..option.finish.."\t"..option.title.."\n"
+    end
+    return table.concat(lines)
+end
+local function valid_payload(s)
+    if type(s)~="table" or not id(s.id) or not text(s.title) or type(s.auto)~="boolean" or not hash(s.hash) or
+        not integer(s.count,1,200) or not integer(s.winner,0,s.count-1) or not fraction(s.fraction) or
+        type(s.options)~="table" or #s.options~=s.count then return false end
+    local before=0
+    for index,option in ipairs(s.options) do
+        if type(option)~="table" or not text(option.title) then return false end
+        local ending=fraction(option.finish)
+        -- Decimal weights can be smaller than double precision; zero-width
+        -- visual slices are allowed, while the exact winner remains explicit.
+        if not ending or ending<before then return false end
+        if index==s.winner+1 and (tonumber(s.fraction)<before-1e-12 or tonumber(s.fraction)>ending+1e-12) then return false end
+        before=ending
+    end
+    return math.abs(before-1)<1e-12 and anomaly_donation_bridge_sha256.digest(canonical(s))==s.hash
+end
+function supported()
+    return type(Register_UI)=="function" and type(Unregister_UI)=="function" and
+        type(RegisterScriptCallback)=="function" and type(time_continual)=="function" and anomaly_donation_bridge_sha256.available()
+end
+function hud_supported()
+    return CUITextWnd~=nil and CUIScriptWnd~=nil and type(get_hud)=="function"
+end
+local function refresh_hud()
+    local ui=anomaly_donation_bridge_voting_ui
+    if not ui or type(ui.update_hud)~="function" then return end
+    local payload=not hud_loading and not active and not (pending and pending.complete) and hud_payload or nil
+    if payload and now()-(hud_received or 0)>8000 then payload=nil;hud_payload=nil end
+    local ok,why=pcall(ui.update_hud,payload)
+    if not ok and tostring(why)~=hud_error then
+        hud_error=tostring(why)
+        if type(printf)=="function" then printf("[ADB voting] Progress HUD: %s",hud_error)end
+    end
+end
+local function receive_hud(fields)
+    if #fields~=4 or not id(fields[2]) then return true end
+    if hud_loading then return true end
+    if fields[3]=="hidden" and fields[4]=="" then
+        hud_payload=nil;hud_received=now();refresh_hud();return true
+    end
+    local x,y=fields[3]:match("^xy,(%d+%.?%d*),(%d+%.?%d*)$")
+    if x then x,y=fraction(x),fraction(y);if not x or not y then return true end
+    elseif fields[3]~="left" and fields[3]~="right" and fields[3]~="top" and fields[3]~="bottom" then return true end
+    local value=fields[4]
+    if type(value)~="string" or #value==0 or #value>3200 then return true end
+    local lines={}
+    for line in (value.."\n"):gmatch("([^\n]*)\n") do
+        if (line~="" and not text(line)) or #line>160 or #lines>=24 then return true end
+        lines[#lines+1]=line
+    end
+    if #lines<2 or lines[1]=="" or lines[2]=="" then return true end
+    hud_payload={position=fields[3],x=x,y=y,lines=lines};hud_received=now();refresh_hud();return true
+end
+function is_active() return active~=nil end
+function snapshot() return active end
+function at_fraction(s,value)
+    value=value%1
+    for index,option in ipairs(s.options) do if value<tonumber(option.finish) then return index end end
+    return #s.options
+end
+function view()
+    if not active then return nil end
+    local progress=math.min(1,math.max(0,(active.elapsed or 0)/4300))
+    local angle=(1-(1-progress)^3)*(1800+tonumber(active.fraction)*360)
+    local selected=progress>=1 and active.winner+1 or at_fraction(active,(angle%360)/360)
+    return {angle=angle,selected=selected,title=active.options[selected].title,
+        finished=progress>=1,automatic=active.auto}
+end
+local function ui_free()
+    if not db or not db.actor or not db.actor:alive() then return false end
+    if level and type(level.present)=="function" and not level.present() then return false end
+    if type(app_ready)=="function" and app_ready()==false then return false end
+    local ok,precache=pcall(function() return device().precache_frame end)
+    if ok and tonumber(precache) and precache>0 then return false end
+    if type(Check_UI)=="function" and Check_UI() then return false end
+    if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return false end
+    if level and type(level.main_input_receiver)=="function" and level.main_input_receiver() then return false end
+    return true
+end
+local function open_ui()
+    if GUI then return true end
+    if not ui_free() then return false,"ui_busy" end
+    if not anomaly_donation_bridge_voting_ui.prepare_modal() then return false,"ui_retiring_hud" end
+    local stage="class"
+    local ok,why=pcall(function()
+        anomaly_donation_bridge_voting_ui.ensure_class()
+        stage="construct"
+        GUI=anomaly_donation_bridge_voting_ui.adb_voting_window()
+        if type(anomaly_donation_bridge_voting_ui.hide_hud)=="function" then anomaly_donation_bridge_voting_ui.hide_hud() end
+        stage="register"
+        Register_UI(UI_NAME,"anomaly_donation_bridge_voting")
+        stage="show"
+        GUI:ShowDialog(true)
+        stage="pause"
+        if not acquire_pause() then error("pause_api_unavailable") end
+    end)
+    if not ok then
+        local failed=GUI;GUI=nil
+        if failed then
+            pcall(function() failed:HideDialog() end)
+            anomaly_donation_bridge_voting_ui.retire_window(failed)
+        end
+        pcall(Unregister_UI,UI_NAME)
+        release_pause()
+        local detail=stage..": "..tostring(why)
+        if detail~=last_ui_error and type(printf)=="function" then
+            printf("[ADB voting] Cannot open roulette UI: %s",detail)
+        end
+        last_ui_error=detail
+        return false,"ui_unavailable_"..stage
+    end
+    last_ui_error=nil
+    active.started=now()-(active.elapsed or 0)
+    return true
+end
+local function close_ui()
+    stop_audio()
+    if GUI then
+        local ok=pcall(function() GUI:HideDialog() end)
+        if not ok then return false end
+        anomaly_donation_bridge_voting_ui.retire_window(GUI)
+    end
+    GUI=nil
+    local unlocked=pcall(Unregister_UI,UI_NAME)
+    return release_pause() and unlocked
+end
+local function remember(s)
+    if not completed[s.id] then completed_order[#completed_order+1]=s.id end
+    completed[s.id]=s.hash
+    while #completed_order>128 do local oldest=table.remove(completed_order,1);completed[oldest]=nil end
+end
+local function finish()
+    if not active or not close_ui() then return false end
+    remember(active);active=nil
+    return true
+end
+function apply()
+    if not active or active.auto or (active.elapsed or 0)<4300 then return false end
+    return finish()
+end
+function update()
+    refresh_hud()
+    if pending and now()-pending.stamp>15000 then pending=nil end
+    if not active then return end
+    if not GUI then local opened=open_ui();if not opened then return end end
+    active.elapsed=math.max(0,now()-(active.started or now()))
+    update_audio(view())
+    if GUI then GUI:Sync() end
+    -- Keep the winner readable briefly, close native input first, acknowledge
+    -- only afterwards. The program then queues the actual winning effect.
+    if active and active.auto and active.elapsed>=6300 then finish() end
+end
+local function reply(send,request_id,state,reason)
+    if id(request_id) then return send({"VOTING_STATUS",request_id,state,reason or ""}) end
+    return true
+end
+local function commit(send,can_start)
+    local s=pending
+    if not s or not s.complete then return true end
+    if completed[s.id] then
+        local same=completed[s.id]==s.hash;pending=nil
+        return reply(send,s.id,same and "done" or "rejected",same and "closed" or "snapshot_changed")
+    end
+    if active then
+        if active.id==s.id then
+            local same=active.hash==s.hash;pending=nil
+            return reply(send,s.id,same and "active" or "rejected",same and "showing" or "snapshot_changed")
+        end
+        return reply(send,s.id,"busy","another_vote")
+    end
+    local ready,why=can_start()
+    if not ready then return reply(send,s.id,"busy",why or "actor_busy") end
+    active=s;active.elapsed=0
+    local opened,error_code=open_ui()
+    if not opened then active=nil;return reply(send,s.id,"busy",error_code) end
+    pending=nil
+    return reply(send,s.id,"active","showing")
+end
+function handle(fields,send,can_start)
+    local kind,request_id=fields[1],fields[2]
+    if kind=="VOTING_HUD" then return receive_hud(fields) end
+    if not id(request_id) then return true end
+    if kind=="VOTING_CANCEL" and #fields==2 then
+        if pending and pending.id==request_id then pending=nil end
+        if active and active.id==request_id and not finish() then return reply(send,request_id,"busy","closing") end
+        return reply(send,request_id,"done","cancelled")
+    elseif kind=="VOTING_QUERY" and #fields==2 then
+        if completed[request_id] then return reply(send,request_id,"done","closed") end
+        if active and active.id==request_id then return reply(send,request_id,"active","showing") end
+        if pending and pending.id==request_id and pending.complete then return commit(send,can_start) end
+        return reply(send,request_id,"unknown","not_received")
+    elseif kind=="VOTING_BEGIN" and #fields==8 then
+        local count=integer(fields[7],1,200);local winner=count and integer(fields[5],0,count-1)
+        if not text(fields[3]) or fields[4]~="0" and fields[4]~="1" or not count or not winner or not fraction(fields[6]) or not hash(fields[8]) then
+            return reply(send,request_id,"rejected","invalid_header")
+        end
+        pending={id=request_id,title=fields[3],auto=fields[4]=="1",winner=winner,fraction=fields[6],count=count,
+            hash=fields[8],options={},stamp=now()}
+        return true
+    elseif kind=="VOTING_OPTION" and #fields==5 then
+        if not pending or pending.id~=request_id then return true end
+        if integer(fields[3],0,pending.count-1)~=#pending.options or not fraction(fields[4]) or not text(fields[5]) then
+            pending=nil;return reply(send,request_id,"rejected","invalid_option")
+        end
+        pending.options[#pending.options+1]={finish=fields[4],title=fields[5]};pending.stamp=now()
+        return true
+    elseif kind=="VOTING_END" and #fields==3 then
+        if not pending or pending.id~=request_id then return reply(send,request_id,"unknown","not_received") end
+        if fields[3]~=pending.hash or not valid_payload(pending) then pending=nil;return reply(send,request_id,"rejected","invalid_snapshot") end
+        pending.complete=true
+        return commit(send,can_start)
+    end
+    return reply(send,request_id,"rejected","invalid_message")
+end
+local function save(data)
+    anomaly_donation_bridge_voting_ui.hide_hud(true)
+    data.adb_voting_game_v1={version=1,active=active,completed=completed,order=completed_order}
+end
+local function load(data)
+    stop_audio();tick_sound=nil;hud_loading=false
+    hud_payload=nil;hud_received=nil
+    if anomaly_donation_bridge_voting_ui and type(anomaly_donation_bridge_voting_ui.hide_hud)=="function" then anomaly_donation_bridge_voting_ui.hide_hud(true) end
+    -- Do not hide a dialog owned by the previous native level holder.
+    anomaly_donation_bridge_voting_ui.retire_window(GUI)
+    GUI=nil;active=nil;pending=nil;pcall(Unregister_UI,UI_NAME);release_pause()
+    local saved=type(data)=="table" and data.adb_voting_game_v1
+    if type(saved)~="table" or saved.version~=1 then return end
+    for _,key in ipairs(type(saved.order)=="table" and saved.order or {}) do
+        if id(key) and type(saved.completed)=="table" and hash(saved.completed[key]) then remember({id=key,hash=saved.completed[key]}) end
+    end
+    if valid_payload(saved.active) and not completed[saved.active.id] then
+        active=saved.active;active.started=nil
+        active.elapsed=finite(active.elapsed) and math.max(0,math.min(6300,active.elapsed)) or 0
+    end
+end
+local function modal(key,bind,disabled,flags)
+    if not GUI then return end
+    if DIK_keys and (key==DIK_keys.MOUSE_1 or key==DIK_keys.MOUSE_2 or key==DIK_keys.MOUSE_3) then return end
+    flags.ret_value=false
+end
+function on_game_start()
+    if initialized then return end;initialized=true
+    anomaly_donation_bridge_registry.register("hardcoon.adb.voting_presentation",{
+        execute=function() return "rejected","internal_presentation_only" end,
+        is_supported=function() return false end,is_blocking=is_active,update=update})
+    RegisterScriptCallback("on_before_key_press",modal)
+    RegisterScriptCallback("on_before_key_hold",modal)
+    RegisterScriptCallback("on_before_key_release",modal)
+    RegisterScriptCallback("on_before_save_input",function(flags)
+        if GUI then flags.ret=true;return end
+        anomaly_donation_bridge_voting_ui.hide_hud(true)
+    end)
+    RegisterScriptCallback("on_before_load_input",function(key,bind,flags)
+        if GUI then flags.ret=true;return end
+        hud_loading=true;hud_payload=nil;hud_received=nil
+        anomaly_donation_bridge_voting_ui.hide_hud(true)
+    end)
+    RegisterScriptCallback("save_state",save);RegisterScriptCallback("load_state",load)
+    RegisterScriptCallback("actor_on_first_update",function()
+        -- A new game/level may not have a load_state callback at all.
+        hud_loading=false;hud_payload=nil;hud_received=nil
+        anomaly_donation_bridge_voting_ui.hide_hud(true)
+    end)
+    RegisterScriptCallback("actor_on_net_destroy",function()
+        stop_audio();tick_sound=nil;hud_loading=true;hud_payload=nil;hud_received=nil
+        if anomaly_donation_bridge_voting_ui and type(anomaly_donation_bridge_voting_ui.hide_hud)=="function" then anomaly_donation_bridge_voting_ui.hide_hud(true) end
+        anomaly_donation_bridge_voting_ui.retire_window(GUI)
+        GUI=nil;pending=nil;if active then active.started=nil end;pcall(Unregister_UI,UI_NAME);release_pause()
+    end)
+end

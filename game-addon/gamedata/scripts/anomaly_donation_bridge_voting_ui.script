@@ -1,0 +1,278 @@
+-- Voting presentation reuses the shipped casino atlas; item roulette is unchanged.
+local function v(x,y) return vector2():set(x,y) end
+local function rect(x,y,w,h) return Frect():set(x,y,x+w,y+h) end
+local colors={0xffbe7167,0xff91ac75,0xffd0bb77,0xff86afc0,0xffab91be,0xffcc9b6d}
+local function logic() return anomaly_donation_bridge_voting end
+local function native(text) return anomaly_donation_bridge_common.game_text_cp1251_lossy(text) or "" end
+-- Same annulus as the original 160x160 casino sectors: 28.75/50 and
+-- 39.9/50 of the 80-unit radius. The gold frame is OUTSIDE this band.
+local ring_inner,ring_outer=46,63.84
+local ring_radius=(ring_inner+ring_outer)/2
+local ring_thickness=ring_outer-ring_inner
+local function skin(control,selected)
+    control:InitTexture(selected and "adb_roulette_casino_risk_selected" or "adb_roulette_casino_risk_normal")
+    -- Remove the source sprite's transparent/glow gutters, not its casino art.
+    -- All text is laid out within this same visible rectangle afterwards.
+    control:SetTextureRect(rect(22,(selected and 1728 or 1494)+16,944,200))
+end
+function geometry(width,height)
+    local k=(height/width)/(768/1024)
+    -- InitScrollView owns a private scrollbar whose X is fixed by XML. Choose
+    -- a matching viewport instead of resizing it behind the native holder.
+    local target=math.min(320,320*k);local legend_width=240
+    for _,candidate in ipairs({120,144,160,180,200,213,240,267,284,300,320})do
+        if math.abs(candidate-target)<math.abs(legend_width-target)then legend_width=candidate end
+    end
+    local scale=math.min(2,(512-legend_width-36*k)/(86*k))
+    return {k=k,scale=scale,cx=512,cy=384,inner=ring_inner*scale,outer=ring_outer*scale,
+        legend_x=512+(86*scale+18)*k,legend_y=384-80*scale,legend_w=legend_width,legend_h=330,
+        legend_node="legend_"..tostring(legend_width)}
+end
+function ensure_class()
+    if adb_voting_window then return end
+    class "adb_voting_window" (CUIScriptWnd)
+    function adb_voting_window:__init() super()
+        self:SetAutoDelete(false);self:SetWndRect(rect(0,0,1024,768));self:AllowWorkInPause(true)
+        local d=device();self.layout=geometry(d.width,d.height);self.k=self.layout.k;self.scale=self.layout.scale
+        -- Anchor the WHEEL centre, not the whole header/button stack.
+        self.x=512-110*self.scale*self.k;self.y=384-80*self.scale
+        self.segments={};self.odds={};self.legend_rows={};self.legend_windows={};self.legend_items={}
+        local s=logic().snapshot()
+        self.heading=self:Label(20,-34,180,22,s.title,0xffffedb3)
+        if type(GetFontGraffiti22Russian)=="function" then self.heading:SetFont(GetFontGraffiti22Russian()) end
+        -- Original casino material UV-repacked into radial strips, not flat ink.
+        for index=0,359 do
+            local angle=(index+.5)*math.pi/180
+            local thickness=ring_thickness
+            local tangent=2*ring_outer*math.sin(math.pi/360)+.15
+            local segment=self:HeadingArt(110+math.sin(angle)*ring_radius-tangent/2,
+                80-math.cos(angle)*ring_radius-thickness/2,tangent,thickness,"adb_voting_material")
+            segment:SetTextureRect(rect(index*8+2,2,4,64))
+            segment:EnableHeading(true);segment:SetHeading(-angle)
+            local option=logic().at_fraction(s,(index+.5)/360)
+            segment:SetTextureColor(colors[(option-1)%#colors+1])
+            self.segments[#self.segments+1]=segment
+        end
+        self.divisions=self:Art(30,0,160,160,"adb_roulette_divisions")
+        local frame=anomaly_donation_bridge_roulette_art.frame
+        self.frame=self:Art(frame.x,frame.y,frame.w,frame.h,frame.texture)
+        self.frame:SetTextureColor(0xc8ffffff)
+        local before=0
+        for index,option in ipairs(s.options) do
+            local ending=tonumber(option.finish);local share=ending-before
+            if share>=.08 then
+                local angle=(before+share/2)*2*math.pi
+                self.odds[#self.odds+1]={label=self:Label(110+math.sin(angle)*ring_radius-20,80-math.cos(angle)*ring_radius-7,40,14,
+                    string.format("%.0f%%",share*100),0xffffedb3),
+                    fraction=before+share/2}
+            end
+            before=ending
+        end
+        -- Original casino mechanism: fixed sectors and rotating ruby/gold pointer.
+        self.marker=self:HeadingArt(30,0,160,160,"adb_roulette_casino_pointer")
+        self.marker:EnableHeading(true);self.marker:SetHeading(0)
+        self.button=CUIButton();self.button:SetAutoDelete(true);self:AttachChild(self.button)
+        self:Place(self.button,64,174,92,20)
+        skin(self.button,false);self.button:SetStretchTexture(true)
+        self.button_caption=self:Label(64,174,92,20,"Применить",0xffffedb3)
+        self:Register(self.button,"apply");self:AddCallback("apply",ui_events.BUTTON_CLICKED,function()logic().apply()end,self)
+        self.button:Show(false);self.button:Enable(false);self.button_caption:Show(false)
+        self:BuildLegend(s)
+        self:Sync()
+    end
+    function adb_voting_window:Place(control,x,y,w,h)
+        control:SetWndPos(v(self.x+x*self.scale*self.k,self.y+y*self.scale))
+        control:SetWndSize(v(w*self.scale*self.k,h*self.scale));return control
+    end
+    function adb_voting_window:Art(x,y,w,h,texture)
+        local control=CUIStatic();control:SetAutoDelete(true);self:AttachChild(control)
+        self:Place(control,x,y,w,h);control:InitTexture(texture);control:SetStretchTexture(true);return control
+    end
+    function adb_voting_window:HeadingArt(x,y,w,h,texture)
+        local control=self:Art(x,y,w,h,texture)
+        control:SetWndPos(v(self.x+(x+w/2)*self.scale*self.k-w/2*self.scale,self.y+y*self.scale))
+        control:SetWndSize(v(w*self.scale,h*self.scale));return control
+    end
+    function adb_voting_window:Label(x,y,w,h,value,color)
+        return self:Text(self,self.x+x*self.scale*self.k,self.y+y*self.scale,w*self.scale*self.k,h*self.scale,value,color,2,false)
+    end
+    function adb_voting_window:Text(parent,x,y,w,h,value,color,alignment,complex,font)
+        local labels={}
+        for index=1,2 do
+            local label=CUITextWnd();label:SetAutoDelete(true);parent:AttachChild(label)
+            label:SetWndPos(v(x+(index==1 and .7*self.k or 0),y+(index==1 and .7 or 0)));label:SetWndSize(v(w,h))
+            label:SetFont(font or GetFontLetterica16Russian());label:SetTextComplexMode(complex);label:SetTextAlignment(alignment)
+            label:SetVTextAlignment(complex and 0 or 1);label:SetEllipsis(not complex)
+            label:SetTextColor(index==1 and 0xff000000 or color)
+            label:SetText(native(value));labels[index]=label
+        end
+        return {
+            controls=labels,
+            SetText=function(_,value)for _,label in ipairs(labels)do label:SetText(native(value))end end,
+            Show=function(_,value)for _,label in ipairs(labels)do label:Show(value)end end,
+            SetFont=function(_,font)for _,label in ipairs(labels)do label:SetFont(font)end end,
+            Measure=function()
+                local height=0
+                for _,label in ipairs(labels)do label:AdjustHeightToText();height=math.max(height,label:GetHeight())end
+                return math.max(1,height)
+            end,
+            Box=function(_,bx,by,bw,bh)
+                for index,label in ipairs(labels)do
+                    label:SetWndPos(v(bx+(index==1 and .7*self.k or 0),by+(index==1 and .7 or 0)))
+                    label:SetWndSize(v(bw,bh))
+                end
+            end
+        }
+    end
+    function adb_voting_window:BuildLegend(s)
+        local xml=CScriptXmlInit();xml:ParseFile("anomaly_donation_bridge_voting.xml")
+        self.legend=xml:InitScrollView(self.layout.legend_node,self)
+        self.legend:SetWndPos(v(self.layout.legend_x,self.layout.legend_y))
+        self.legend_heading=self:Text(self,self.layout.legend_x,self.layout.legend_y-30,self.layout.legend_w,22,"Эффекты:",0xffffedb3,0,false)
+        local before=0
+        for index,option in ipairs(s.options) do
+            local ending=tonumber(option.finish);local share=ending-before;before=ending
+            local width,padding=self.layout.legend_w-20*self.k,12
+            local text_x=26*self.k;local text_width=width-text_x-12*self.k
+            local row=CUIWindow();row:SetAutoDelete(false)
+            local background=CUIStatic();background:SetAutoDelete(true);row:AttachChild(background)
+            background:SetWndPos(v(0,0));skin(background,false);background:SetStretchTexture(true)
+            local swatch=CUIStatic();swatch:SetAutoDelete(true);row:AttachChild(swatch)
+            swatch:SetWndPos(v(12*self.k,padding+3));swatch:SetWndSize(v(8*self.k,8))
+            swatch:InitTexture("adb_roulette_pixel");swatch:SetStretchTexture(true)
+            swatch:SetTextureColor(colors[(index-1)%#colors+1])
+            local title=self:Text(row,text_x,padding,text_width,1,option.title,0xfff2eadb,0,true)
+            local title_height=title:Measure()
+            local odds=self:Text(row,text_x,padding+title_height+6,text_width,1,string.format("%.1f%%",share*100),0xffffedb3,0,false)
+            local odds_height=odds:Measure()
+            -- The casino glow/border has an inset even after cropping. Reserve
+            -- it proportionally so large fonts/long names stay INSIDE the skin.
+            local height=math.max(64,(2*padding+title_height+6+odds_height)/.88)
+            local inner_padding=padding+.06*height
+            title:Box(text_x,inner_padding,text_width,title_height)
+            odds:Box(text_x,inner_padding+title_height+6,text_width,odds_height)
+            swatch:SetWndPos(v(12*self.k,inner_padding+3))
+            row:SetWndSize(v(width,height));background:SetWndSize(v(width,height))
+            self.legend:AddWindow(row,false)
+            -- AddWindow has NO luabind adopt policy (unlike AttachChild).
+            -- Lua alone owns the row, the pad does NOT auto-delete it. Retain
+            -- it through the parent's lifetime, avoiding both early GC and a
+            -- second deletion when the scroll view and Lua are later collected.
+            self.legend_windows[index]=row
+            self.legend_rows[index]=background
+            self.legend_items[index]={row=row,background=background,title=title,odds=odds,height=height}
+        end
+    end
+    function adb_voting_window:Sync()
+        local state=logic().view();if not state then return end
+        self.marker:SetHeading(-state.angle*math.pi/180)
+        if self.last_selected~=state.selected then
+            if self.last_selected and self.legend_rows[self.last_selected] then skin(self.legend_rows[self.last_selected],false)end
+            if self.legend_rows[state.selected] then skin(self.legend_rows[state.selected],true)end
+            self.last_selected=state.selected
+        end
+        local show=state.finished and not state.automatic
+        self.button:Show(show);self.button:Enable(show);self.button_caption:Show(show)
+    end
+    function adb_voting_window:Update()
+        if logic().GUI~=self then return end
+        CUIScriptWnd.Update(self)
+        logic().update()
+        if anomaly_donation_bridge_runtime and type(anomaly_donation_bridge_runtime.update_voting_ui)=="function" then
+            anomaly_donation_bridge_runtime.update_voting_ui()
+        end
+    end
+    function adb_voting_window:OnKeyboard(key,event)
+        if event==ui_events.WINDOW_KEY_PRESSED and type(dik_to_bind)=="function" and key_bindings and
+            dik_to_bind(key)==key_bindings.kJUMP then logic().apply() end
+        return true
+    end
+    function adb_voting_window:Close() return false end
+end
+
+-- Non-modal text HUD. Same Letterica16 and eight black outline
+-- offsets as companion V2 nicknames; unlike names, every line is left aligned.
+HUD=nil
+local hud_retired={}
+local hud_resume_frame=0
+local modal_resume_frame=0
+local last_hud_frame
+local function hud_frame()
+    local d=type(device)=="function" and device()
+    local frame=d and d.frame or (type(time_global)=="function" and time_global() or 0)
+    if last_hud_frame and frame<last_hud_frame then
+        -- Some forks reset their frame counter on a level/F9 transition.
+        hud_resume_frame=frame+8;modal_resume_frame=frame+2
+        for _,item in ipairs(hud_retired)do item.frame=frame+8 end
+    end
+    last_hud_frame=frame;return frame
+end
+function hide_hud(loading)
+    if loading then hud_resume_frame=hud_frame()+8 end
+    local window=HUD;HUD=nil
+    if not window then return end
+    retire_window(window)
+    pcall(function()window:Show(false);window:Enable(false)end)
+    pcall(function()local hud=get_hud();if hud then hud:RemoveDialogToRender(window)end end)
+end
+function retire_window(window)
+    if window then hud_retired[#hud_retired+1]={window=window,frame=hud_frame()+8}end
+end
+function prepare_modal()
+    if HUD then hide_hud();modal_resume_frame=hud_frame()+2;return false end
+    return hud_frame()>=modal_resume_frame and hud_frame()>=hud_resume_frame
+end
+local function hud_class()
+    if adb_voting_progress_hud then return end
+    class "adb_voting_progress_hud" (CUIScriptWnd)
+    function adb_voting_progress_hud:__init()super()
+        self:SetAutoDelete(false);self:SetWndRect(rect(0,0,1024,768));self:Enable(false);self.rows={}
+    end
+    function adb_voting_progress_hud:Update()
+        if HUD~=self then return end
+        CUIScriptWnd.Update(self)
+    end
+end
+local function hud_row_height(line)return line=="" and 8 or 20 end
+function update_hud(payload)
+    local frame=hud_frame()
+    for i=#hud_retired,1,-1 do if frame>=hud_retired[i].frame then table.remove(hud_retired,i)end end
+    if frame<hud_resume_frame or not payload or logic().GUI or not db or not db.actor or not db.actor:alive() or
+        type(get_hud)~="function" or device():is_paused() or
+        (tonumber(device().precache_frame) or 0)>0 or
+        type(Check_UI)=="function" and Check_UI() or
+        type(app_ready)=="function" and not app_ready() or
+        level and type(level.present)=="function" and not level.present() then hide_hud();return end
+    local hud=get_hud();if not hud then hide_hud();return end
+    if not HUD then hud_class();HUD=adb_voting_progress_hud();hud:AddDialogToRender(HUD);HUD:Show(true)end
+    local d=device();local aspect=(d.height/d.width)/(768/1024)
+    local width,height=450*aspect,0
+    for _,line in ipairs(payload.lines)do height=height+hud_row_height(line)end
+    local x,y=18*aspect,(768-height)/2
+    if payload.x then x=math.max(0,math.min(1024-width,payload.x*1024));y=math.max(0,math.min(768-height,payload.y*768))
+    elseif payload.position=="right" then x=1024-width-18*aspect
+    elseif payload.position=="top" then x=(1024-width)/2;y=40
+    elseif payload.position=="bottom" then x=(1024-width)/2;y=768-height-48 end
+    local row_y=0
+    for index,line in ipairs(payload.lines)do
+        local row=HUD.rows[index]
+        if not row then row={controls={}};HUD.rows[index]=row end
+        if line~="" and #row.controls==0 then
+            for _,offset in ipairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1},{0,0}})do
+                local c=CUITextWnd();c:SetAutoDelete(true);HUD:AttachChild(c)
+                c:SetFont(GetFontLetterica16Russian());c:SetTextAlignment(0);c:SetTextComplexMode(false)
+                c:SetTextColor(#row.controls==8 and 0xffbebebe or 0xff000000)
+                row.controls[#row.controls+1]={control=c,dx=offset[1],dy=offset[2]}
+            end
+        end
+        if row.text~=line then
+            row.text=line;for _,item in ipairs(row.controls)do item.control:SetText(native(line))end
+        end
+        for _,item in ipairs(row.controls)do
+            item.control:SetWndPos(v(x+item.dx*aspect,y+row_y+item.dy))
+            item.control:SetWndSize(v(width,20));item.control:Show(line~="")
+        end
+        row_y=row_y+hud_row_height(line)
+    end
+    for index=#payload.lines+1,#HUD.rows do for _,item in ipairs(HUD.rows[index].controls)do item.control:Show(false)end end
+end

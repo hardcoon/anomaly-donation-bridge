@@ -1,0 +1,46 @@
+{
+  "revision": "quarantine-session-3",
+  "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "entries": [
+    {
+      "sectionId": "medkit",
+      "kind": "Item",
+      "displayName": "Аптечка",
+      "category": "Медицина",
+      "strength": "Unclassified",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "quest_case_unique",
+      "kind": "Item",
+      "displayName": "Сюжетный кейс",
+      "category": "Сюжетные",
+      "strength": "Unclassified",
+      "faction": "",
+      "isAvailable": false,
+      "quarantineReason": "StoryOrUnique"
+    },
+    {
+      "sectionId": "scripted_actor_double",
+      "kind": "Npc",
+      "displayName": "Скриптовый персонаж",
+      "category": "Скриптовые",
+      "strength": "Unclassified",
+      "faction": "stalker",
+      "isAvailable": false,
+      "quarantineReason": "Scripted"
+    },
+    {
+      "sectionId": "broken_squad",
+      "kind": "StalkerSquad",
+      "displayName": "Повреждённый отряд",
+      "category": "Без классификации",
+      "strength": "Unclassified",
+      "faction": "bandit",
+      "isAvailable": false,
+      "quarantineReason": "InvalidStructure"
+    }
+  ]
+}

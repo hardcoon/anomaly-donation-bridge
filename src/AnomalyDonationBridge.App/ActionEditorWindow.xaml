@@ -1,0 +1,47 @@
+<Window x:Class="AnomalyDonationBridge.App.ActionEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:AnomalyDonationBridge.App"
+        Title="Настройка действия — Anomaly Donation Bridge"
+        Width="980" SizeToContent="Height" MinWidth="760" MinHeight="330" MaxHeight="780"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
+    <Grid Margin="24,20">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="НАСТРОЙКА ДЕЙСТВИЯ" FontSize="11" Foreground="{DynamicResource AccentForegroundBrush}" Margin="0,0,0,7" />
+            <TextBlock Text="{Binding Draft.DisplayName}" FontSize="21" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <local:TemplateDescriptionTextBlock Description="{Binding Draft.Description}" HandlerId="{Binding Draft.HandlerId}" Foreground="{DynamicResource MutedBrush}" Margin="0,7,0,0" />
+            <ItemsControl ItemsSource="{Binding SourceLinks}" Visibility="{Binding ShowSourceLinks, Converter={StaticResource BoolToVisibility}}" Margin="0,9,0,0">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock TextWrapping="Wrap" FontSize="12" Margin="0,2,0,0">
+                            <Run Text="{Binding Label, Mode=OneWay}" Foreground="{DynamicResource MutedBrush}" />
+                            <Hyperlink Click="SourceLink_Click" Foreground="{DynamicResource AccentForegroundBrush}" ToolTip="{Binding RelativePath}"><Run Text="{Binding FileName, Mode=OneWay}" /></Hyperlink>
+                        </TextBlock>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBooleanConverter}}">
+            <ContentPresenter x:Name="EditorContent" Content="{Binding Draft}" Margin="0,0,12,12" />
+        </ScrollViewer>
+        <StackPanel Grid.Row="2" Visibility="{Binding ShowActorBoostReset, Converter={StaticResource BoolToVisibility}}" Margin="0,8,0,0">
+            <Button Content="Сбросить параметры к базовым" Click="ResetActorBoost_Click" IsEnabled="{Binding CanResetActorBoost}" HorizontalAlignment="Left" Padding="14,7" />
+            <TextBlock Text="Сбросит прыжок, скорость и переносимый вес к значениям конфигов игры, остановит эффект и очистит старые записи этих параметров ADB." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,0" />
+            <TextBlock Text="{Binding ResetStatus}" Foreground="{DynamicResource GoodBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
+        </StackPanel>
+        <TextBlock Grid.Row="3" Text="{Binding Error}" Foreground="{DynamicResource BadBrush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+        <Border Grid.Row="4" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,14,0,0" Margin="0,10,0,0">
+            <DockPanel IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBooleanConverter}}">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button Content="Отмена" IsCancel="True" MinWidth="96" Margin="0,0,8,0" />
+                    <Button Content="Сохранить и закрыть" Click="Save_Click" IsDefault="True" MinWidth="182" Style="{StaticResource PrimaryButtonStyle}" />
+                </StackPanel>
+                <TextBlock Text="{Binding SaveHint}" Foreground="{DynamicResource SubtleBrush}" TextWrapping="Wrap" FontSize="11" VerticalAlignment="Center" Margin="0,0,14,0" />
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

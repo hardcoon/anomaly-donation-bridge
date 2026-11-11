@@ -1,0 +1,762 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_mutant_companion",
+  "displayName": "Напарник-мутант (legacy)",
+  "description": "Создаёт одного настоящего мутанта без симуляционного отряда. Мутант получает имя донатчика, следует за игроком, помогает в бою и переходит между локациями.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"mutant_sections","displayName":"Допустимые мутанты","kind":"MultiChoice","catalogKind":"Mutant","minimumSelections":1,"defaultValue":""},
+    {"key":"radius_meters","displayName":"Радиус появления, м","kind":"Integer","minimum":10,"maximum":100,"defaultValue":"25"}
+  ],
+  "parameters": {"mutant_sections":"","radius_meters":"25"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+-- A mutant companion is deliberately a single ALife object. It is not placed
+-- in an online_offline_group and is not registered in axr_companions: both
+-- systems assume human stalkers and are unsafe for real monster entities.
+
+local PERSIST_KEY = "adb_mutant_companions_v1"
+local UPDATE_INTERVAL_MS = 250
+local FOLLOW_START_DISTANCE = 12
+local FOLLOW_STOP_DISTANCE = 5
+local FORCE_FOLLOW_DISTANCE = 100
+local FOLLOW_RETRY_MS = 1500
+local REST_ORDER_MS = 8000
+local MARKER_UPDATE_MS = 1000
+local MAP_SPOT = "ui_pda2_companion_location"
+local INVALID_LEVEL_VERTEX_ID = 4294967295
+-- Stock Anomaly HUD uses a virtual 1024x768 canvas. bar_measurement is a
+-- text-only stock static, so the companion label does not create a frame or
+-- a health progress bar and still needs no custom XML.
+local AIM_LABEL_STATIC = "bar_measurement"
+local AIM_LABEL_CENTER_X = 512
+local AIM_LABEL_TOP_Y = 424
+local STATE_KEY = "__anomaly_donation_bridge_mutant_companion_v1"
+local runtime = rawget(_G, STATE_KEY)
+if type(runtime) ~= "table" then
+	runtime = {
+		captured = {}, next_update = 0, next_relations = 0,
+		next_marker_update = 0,
+		shown_id = nil, display_names = {}, last_order = {}, last_mode = {},
+		last_target = {}, last_follow_vertex = {}, navigation_prepared = {},
+		managed = {}
+	}
+	rawset(_G, STATE_KEY, runtime)
+end
+if type(runtime.captured) ~= "table" then runtime.captured = {} end
+if type(runtime.display_names) ~= "table" then runtime.display_names = {} end
+if type(runtime.last_order) ~= "table" then runtime.last_order = {} end
+if type(runtime.last_mode) ~= "table" then runtime.last_mode = {} end
+if type(runtime.last_target) ~= "table" then runtime.last_target = {} end
+if type(runtime.last_follow_vertex) ~= "table" then runtime.last_follow_vertex = {} end
+if type(runtime.navigation_prepared) ~= "table" then runtime.navigation_prepared = {} end
+if type(runtime.managed) ~= "table" then runtime.managed = {} end
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function saved_companions(create)
+	if alife_storage_manager == nil or
+		type(alife_storage_manager.get_state) ~= "function" then return nil end
+	local ok, state = pcall(alife_storage_manager.get_state)
+	if not ok or type(state) ~= "table" then return nil end
+	if type(state[PERSIST_KEY]) ~= "table" and create then state[PERSIST_KEY] = {} end
+	return type(state[PERSIST_KEY]) == "table" and state[PERSIST_KEY] or nil
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function supported(context)
+	local life = life_object()
+	local actor = actor_for_probe(context)
+	local catalog_ok = anomaly_donation_bridge_catalog ~= nil and
+		type(anomaly_donation_bridge_catalog.capable) == "function" and
+		anomaly_donation_bridge_catalog.capable() == true
+	local ok = catalog_ok and saved_companions(true) ~= nil and
+		type(alife_create) == "function" and
+		object_has_methods(actor, {
+			"id", "position", "level_vertex_id", "game_vertex_id", "team"
+		}) and
+		object_has_methods(life, { "actor", "object", "release", "teleport_object" })
+	return ok, ok and nil or "mutant_companion_api_unsupported"
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		-- random_mutant is accepted only for templates saved by older builds.
+		-- Selection is now always random within the explicit allowlist.
+		mutant_sections = true, random_mutant = true, radius_meters = true,
+		donor_name = true, catalog_revision = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local radius, radius_error = anomaly_donation_bridge_common.parse_integer(
+		params.radius_meters, 25, 10, 100, "mutant_companion_radius_invalid")
+	if radius == nil then return false, "rejected", radius_error end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "mutant_sections", "mutant")
+	if entries == nil then return false, "rejected", catalog_error end
+	if #entries < 1 then return false, "rejected", "mutant_companion_pool_empty" end
+	local donor_name = tostring(params.donor_name or "")
+	donor_name = donor_name:match("^%s*(.-)%s*$") or ""
+	if donor_name == "" or #donor_name > 256 or
+		donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return false, "rejected", "mutant_companion_donor_name_invalid"
+	end
+	local available, support_reason = supported(context)
+	if not available then return false, "rejected", support_reason end
+	local entry = entries[math.random(#entries)]
+	context.options = {
+		section = entry.section_id, radius = radius, donor_name = donor_name
+	}
+	return true
+end
+
+local function object_id(object)
+	if object == nil then return nil end
+	local ok, id = pcall(function() return object:id() end)
+	id = ok and tonumber(id) or nil
+	return id ~= nil and id >= 0 and id or nil
+end
+
+local function byte_value(value)
+	value = tonumber(value)
+	if value == nil or value < 0 or value > 255 then return nil end
+	return math.floor(value)
+end
+
+local function object_team_component(object, method_name)
+	if object == nil then return nil end
+	local ok, value = pcall(function() return object[method_name](object) end)
+	return ok and byte_value(value) or nil
+end
+
+-- Goodwill and set_relation only work for InventoryOwner objects (stalkers).
+-- A real mutant decides hostility through monster species and engine teams.
+-- Matching the actor's team is the native per-object way to make the mutant
+-- ignore the actor and actor-team companions without changing global configs.
+local function apply_actor_team(server, mutant, actor)
+	local actor_team = object_team_component(actor, "team")
+	if actor_team == nil then return false end
+	local squad = object_team_component(mutant, "squad") or
+		byte_value(server and server.squad) or 0
+	local group = object_team_component(mutant, "group") or
+		byte_value(server and server.group) or 0
+	if mutant ~= nil then
+		local current_team = object_team_component(mutant, "team")
+		if current_team ~= actor_team then
+			local changed = pcall(function()
+				mutant:change_team(actor_team, squad, group)
+			end)
+			if not changed then return false end
+		end
+	end
+	if server ~= nil then
+		local assigned = pcall(function() server.team = actor_team end)
+		if not assigned then return false end
+	end
+	return true
+end
+
+local function release_control(id, mutant)
+	if not runtime.captured[id] then return end
+	if xr_logic ~= nil and type(xr_logic.mob_release) == "function" then
+		pcall(xr_logic.mob_release, mutant)
+	end
+	runtime.captured[id], runtime.last_order[id], runtime.last_mode[id],
+		runtime.last_target[id], runtime.last_follow_vertex[id],
+		runtime.navigation_prepared[id] = nil, nil, nil, nil, nil, nil
+end
+
+-- A companion has to cross the level freely. Spawn logic and old saves may
+-- leave native in/out restrictors or a home point on the object; when a game
+-- path reaches such a restricted graph vertex, X-Ray repeatedly reports
+-- dest_level_vertex_id = u32(-1). Clear those constraints once after every
+-- load/online transition, before issuing any movement action.
+local function prepare_navigation(id, mutant)
+	if runtime.navigation_prepared[id] then return true end
+	if xr_logic == nil or type(xr_logic.mob_capture) ~= "function" then return false end
+	local ok = pcall(function()
+		if not runtime.captured[id] then xr_logic.mob_capture(mutant, true) end
+		mutant:remove_all_restrictions()
+		mutant:remove_home()
+	end)
+	if ok then
+		runtime.captured[id] = true
+		runtime.navigation_prepared[id] = true
+	end
+	return ok
+end
+
+local function valid_level_vertex_id(vertex_id)
+	vertex_id = tonumber(vertex_id)
+	return vertex_id ~= nil and vertex_id >= 0 and
+		vertex_id < INVALID_LEVEL_VERTEX_ID and math.floor(vertex_id) == vertex_id
+end
+
+-- Capture the actor's last valid navigation vertex, not the actor's exact
+-- continuously moving position. The engine accessibility check still rejects
+-- vertices which are not part of this monster's usable navigation graph.
+local function actor_follow_point(mutant, actor)
+	if level == nil or type(level.vertex_position) ~= "function" then return nil end
+	local actor_vertex_ok, actor_vertex = pcall(function()
+		return actor:level_vertex_id()
+	end)
+	if actor_vertex_ok and valid_level_vertex_id(actor_vertex) then
+		local accessible_ok, accessible = pcall(function()
+			return mutant:accessible(actor_vertex)
+		end)
+		if accessible_ok and accessible == true then
+			local position_ok, position = pcall(level.vertex_position, actor_vertex)
+			if position_ok and position ~= nil then return actor_vertex, position end
+		end
+	end
+
+	if type(vector) ~= "function" then return nil end
+	local nearest_ok, nearest_vertex, nearest_position = pcall(function()
+		local buffer = vector()
+		local vertex_id, position = mutant:accessible_nearest(actor:position(), buffer)
+		return vertex_id, position or buffer
+	end)
+	if not nearest_ok or not valid_level_vertex_id(nearest_vertex) then return nil end
+	local accessible_ok, accessible = pcall(function()
+		return mutant:accessible(nearest_vertex)
+	end)
+	if not accessible_ok or accessible ~= true then return nil end
+	local position_ok, position = pcall(level.vertex_position, nearest_vertex)
+	if position_ok and position ~= nil then return nearest_vertex, position end
+	return nearest_position ~= nil and nearest_vertex or nil, nearest_position
+end
+
+local function order_follow(id, mutant, actor, now)
+	if xr_logic == nil or type(xr_logic.mob_capture) ~= "function" or
+		action == nil or move == nil or cond == nil then return false end
+	if not prepare_navigation(id, mutant) then return false end
+	if runtime.captured[id] and runtime.last_mode[id] == "follow" then
+		local active_ok, active = pcall(function() return mutant:action() end)
+		if active_ok and active ~= nil then return true end
+		if not active_ok and now - (runtime.last_order[id] or 0) <
+			FOLLOW_RETRY_MS then return true end
+	end
+	local vertex_id, position = actor_follow_point(mutant, actor)
+	if vertex_id == nil or position == nil then return false end
+	local ok = pcall(function()
+		-- Stock mob_camp and sr_monster use run_fwd with an explicit vertex.
+		-- This builds a normal monster path to the last recorded actor point.
+		action(mutant, move(move.run_fwd, vertex_id, position), cond(cond.move_end))
+	end)
+	if ok then
+		runtime.captured[id] = true
+		runtime.last_order[id] = now
+		runtime.last_mode[id] = "follow"
+		runtime.last_target[id] = nil
+		runtime.last_follow_vertex[id] = vertex_id
+	end
+	return ok
+end
+
+local function order_rest(id, mutant, actor, now)
+	if xr_logic == nil or type(xr_logic.mob_capture) ~= "function" or
+		action == nil or act == nil or cond == nil then return false end
+	if not prepare_navigation(id, mutant) then return false end
+	if runtime.captured[id] and runtime.last_mode[id] == "rest" and
+		now - (runtime.last_order[id] or 0) < REST_ORDER_MS - 500 then
+		return true
+	end
+	local ok = pcall(function()
+		-- The native monster rest state selects the species' own idle, sleep,
+		-- look-around and short-walk substates. Keeping script control prevents
+		-- the original smart-terrain/home logic from sending the pet away.
+		action(mutant, act(act.rest), cond(cond.time_end, REST_ORDER_MS))
+	end)
+	if ok then
+		runtime.captured[id] = true
+		runtime.last_order[id] = now
+		runtime.last_mode[id] = "rest"
+		runtime.last_target[id] = nil
+	end
+	return ok
+end
+
+local function order_attack(id, mutant, enemy, now)
+	if xr_logic == nil or type(xr_logic.mob_capture) ~= "function" or
+		action == nil or act == nil or cond == nil then return false end
+	if not prepare_navigation(id, mutant) then return false end
+	local target_id = object_id(enemy)
+	if target_id == nil then return false end
+	if runtime.captured[id] and runtime.last_mode[id] == "attack" and
+		runtime.last_target[id] == target_id and
+		now - (runtime.last_order[id] or 0) < 750 then return true end
+	local ok = pcall(function()
+		-- Unlike game_object:set_enemy (bloodsucker-only), the generic monster
+		-- script action calls CBaseMonster::EnemyMan.force_enemy for every real
+		-- mutant class and therefore can attack the actor's current enemy.
+		action(mutant, act(act.attack, enemy), cond(cond.time_end, 1000))
+	end)
+	if ok then
+		runtime.captured[id] = true
+		runtime.last_order[id] = now
+		runtime.last_mode[id] = "attack"
+		runtime.last_target[id] = target_id
+	end
+	return ok
+end
+
+local function object_distance(first, second)
+	local ok, distance = pcall(function()
+		return first:position():distance_to(second:position())
+	end)
+	return ok and tonumber(distance) or nil
+end
+
+local function alive(object)
+	local ok, value = pcall(function() return object:alive() end)
+	if ok then return value == true end
+	ok, value = pcall(function() return object.health end)
+	return ok and tonumber(value) ~= nil and tonumber(value) > 0.005
+end
+
+local function report_death(actor, donor_name)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	local name = anomaly_donation_bridge_common.game_text_cp1251(
+		anomaly_donation_bridge_common.truncate_utf8(
+			tostring(donor_name or "Мутант"), 256))
+	local suffix = anomaly_donation_bridge_common.game_text_cp1251(" погиб")
+	if name == nil then name = "Mutant" end
+	if suffix == nil then suffix = " died" end
+	local text = "%c[255,238,153,26]" .. name .. "%c[default]" .. suffix
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function marker_hint(entry)
+	local encoded_ok, encoded = pcall(
+		anomaly_donation_bridge_common.game_text_cp1251,
+		anomaly_donation_bridge_common.truncate_utf8(
+			tostring(entry and entry.donor_name or "Мутант"), 256))
+	return encoded_ok and encoded or "Mutant companion"
+end
+
+local function has_map_spot(id)
+	if level == nil or type(level.map_has_object_spot) ~= "function" then return false end
+	local ok, value = pcall(level.map_has_object_spot, id, MAP_SPOT)
+	if not ok then return false end
+	return value == true or (tonumber(value) or 0) ~= 0
+end
+
+local function ensure_map_spot(id, entry)
+	if level == nil or type(level.map_add_object_spot) ~= "function" then return false end
+	if has_map_spot(id) then return true end
+	local ok = pcall(level.map_add_object_spot, id, MAP_SPOT, marker_hint(entry))
+	return ok
+end
+
+local function remove_map_spot(id)
+	if level == nil or type(level.map_remove_object_spot) ~= "function" then return end
+	if type(level.map_has_object_spot) == "function" and not has_map_spot(id) then return end
+	pcall(level.map_remove_object_spot, id, MAP_SPOT)
+end
+
+local function actor_enemy(actor)
+	local ok, enemy = pcall(function() return actor:best_enemy() end)
+	return ok and enemy ~= nil and alive(enemy) and enemy or nil
+end
+
+local function mutant_enemy(mutant)
+	local ok, enemy = pcall(function() return mutant:get_enemy() end)
+	return ok and enemy ~= nil and alive(enemy) and enemy or nil
+end
+
+local function leave_combat(mutant)
+	local enemy = mutant_enemy(mutant)
+	if enemy == nil then return end
+	-- This is the monster's own memory, so it is safe to clear here. At long
+	-- range following the actor has priority over every remembered target.
+	pcall(function() mutant:enable_memory_object(enemy, false) end)
+end
+
+local function is_player_companion(object, actor)
+	local id, actor_id = object_id(object), object_id(actor)
+	if id == nil or id == actor_id then return false end
+	if type(IsStalker) == "function" then
+		local stalker_ok, is_stalker = pcall(IsStalker, object)
+		if not stalker_ok or not is_stalker then return false end
+	end
+	if axr_companions ~= nil and type(axr_companions.non_task_companions) == "table" and
+		axr_companions.non_task_companions[id] ~= nil then return true end
+	local info_ok, has_info = pcall(function() return object:has_info("npcx_is_companion") end)
+	if info_ok and has_info == true then return true end
+	if axr_companions ~= nil and type(axr_companions.companion_squads) == "table" and
+		type(get_object_squad) == "function" then
+		local squad_ok, squad = pcall(get_object_squad, object)
+		if squad_ok and squad ~= nil and
+			axr_companions.companion_squads[squad.id] ~= nil then return true end
+	end
+	return false
+end
+
+local function is_managed_mutant(object)
+	local id = object_id(object)
+	if id == nil then return false end
+	if runtime.managed[id] == true then return true end
+	local saved = saved_companions(false)
+	if saved ~= nil and (saved[id] ~= nil or saved[tostring(id)] ~= nil) then
+		runtime.managed[id] = true
+		return true
+	end
+	return false
+end
+
+local function is_stalker_object(object)
+	if object == nil or type(IsStalker) ~= "function" then return false end
+	local ok, value = pcall(IsStalker, object)
+	return ok and value == true
+end
+
+-- Returns true only for a stalker who is currently hostile to the actor,
+-- false for the actor, companions, friends and neutrals, and nil when the
+-- object has no stalker relation that can safely be evaluated.
+local function hostile_to_actor(object, actor)
+	local id, actor_id = object_id(object), object_id(actor)
+	if id == nil or actor_id == nil then return nil end
+	if id == actor_id or is_player_companion(object, actor) then return false end
+	if not is_stalker_object(object) or game_object == nil or
+		game_object.enemy == nil then return nil end
+	if runtime.evaluating_actor_relation then return nil end
+	runtime.evaluating_actor_relation = true
+	local ok, relation = pcall(function() return object:relation(actor) end)
+	runtime.evaluating_actor_relation = false
+	if not ok or tonumber(relation) == nil then return nil end
+	return tonumber(relation) >= tonumber(game_object.enemy)
+end
+
+-- xr_combat_ignore calls this stock extension point before accepting an
+-- enemy. It lets us change the relation for one saved pet instead of making
+-- an entire mutant species globally friendly in game_relations.ltx.
+local function mutant_companion_enemy_eval(object, enemy, flags)
+	if object == nil or enemy == nil or type(flags) ~= "table" then return end
+	local object_is_pet, enemy_is_pet = is_managed_mutant(object),
+		is_managed_mutant(enemy)
+	if not object_is_pet and not enemy_is_pet then return end
+	if object_is_pet and enemy_is_pet then
+		flags.override, flags.result = true, false
+		return
+	end
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	local other = object_is_pet and enemy or object
+	if hostile_to_actor(other, actor) == false then
+		flags.override, flags.result = true, false
+	end
+end
+
+local function protect_allies(mutant, actor)
+	local protected = {}
+	local actor_id = object_id(actor)
+	if actor_id ~= nil then protected[actor_id] = true end
+	if runtime.protecting_allies then return protected end
+	runtime.protecting_allies = true
+	local enemy_ok, current_enemy = pcall(function() return mutant:get_enemy() end)
+	local current_enemy_id = enemy_ok and object_id(current_enemy) or nil
+	-- Only the mutant's own stale hostile memory is safe to clear. Calling
+	-- enable_memory_object on a stalker from inside its enemy-evaluation pass
+	-- recursively enters Busy Hands and is treated as a critical Lua failure.
+	if actor_id ~= nil and current_enemy_id == actor_id then
+		pcall(function() mutant:enable_memory_object(actor, false) end)
+	end
+	if db == nil or type(db.storage) ~= "table" then
+		runtime.protecting_allies = false
+		return protected
+	end
+	for _, storage in pairs(db.storage) do
+		local stalker = type(storage) == "table" and storage.object or nil
+		local hostility = hostile_to_actor(stalker, actor)
+		if stalker ~= nil and hostility == false then
+			local id = object_id(stalker)
+			if id ~= nil and not protected[id] then
+				protected[id] = true
+				if current_enemy_id == id then
+					pcall(function() mutant:enable_memory_object(stalker, false) end)
+				end
+			end
+		end
+	end
+	runtime.protecting_allies = false
+	return protected
+end
+
+local function allowed_enemy(enemy, protected)
+	if enemy == nil then return nil end
+	local id = object_id(enemy)
+	return id ~= nil and not protected[id] and enemy or nil
+end
+
+local function hide_our_label()
+	if runtime.shown_id == nil then return end
+	runtime.shown_id = nil
+	pcall(function()
+		local hud = get_hud()
+		if hud ~= nil and hud:GetCustomStatic(AIM_LABEL_STATIC) ~= nil then
+			hud:RemoveCustomStatic(AIM_LABEL_STATIC)
+		end
+	end)
+end
+
+local function position_aim_label(custom)
+	if custom == nil then return false end
+	local ok = pcall(function()
+		local wnd = custom:wnd()
+		local width = tonumber(wnd:GetWidth()) or 325
+		local position = vector2()
+		position:set(AIM_LABEL_CENTER_X - width * 0.5, AIM_LABEL_TOP_Y)
+		wnd:SetWndPos(position)
+	end)
+	return ok
+end
+
+local function update_aim_label(saved)
+	if level == nil or type(level.get_target_obj) ~= "function" then return end
+	local ok, target = pcall(level.get_target_obj)
+	if not ok or target == nil then hide_our_label() return end
+	local id_ok, id = pcall(function() return target:id() end)
+	local entry = id_ok and saved[id] or nil
+	if type(entry) ~= "table" then hide_our_label() return end
+	if type(get_hud) ~= "function" then return end
+	local health_ok, health = pcall(function() return target.health end)
+	local name = runtime.display_names[id]
+	if name == nil then
+		local encoded_ok, encoded = pcall(
+			anomaly_donation_bridge_common.game_text_cp1251,
+			tostring(entry.donor_name or "Мутант"))
+		name = encoded_ok and encoded or "Mutant"
+		runtime.display_names[id] = name
+	end
+	local percent = health_ok and math.max(0, math.min(100,
+		math.floor((tonumber(health) or 0) * 100 + 0.5))) or 0
+	pcall(function()
+		local hud = get_hud()
+		if hud == nil then return end
+		local custom = hud:GetCustomStatic(AIM_LABEL_STATIC)
+		if custom == nil then
+			hud:AddCustomStatic(AIM_LABEL_STATIC, true)
+			custom = hud:GetCustomStatic(AIM_LABEL_STATIC)
+		end
+		if custom ~= nil then
+			position_aim_label(custom)
+			local text = custom:wnd():TextControl()
+			pcall(function()
+				text:SetTextColor(GetARGB(255, 240, 217, 182))
+			end)
+			text:SetText(name .. ": " .. tostring(percent) .. "% HP")
+		end
+	end)
+	runtime.shown_id = id
+end
+
+local function companion_update(now)
+	now = tonumber(now) or (type(time_global) == "function" and time_global() or 0)
+	if now < (runtime.next_update or 0) then return end
+	runtime.next_update = now + UPDATE_INTERVAL_MS
+	local refresh_markers = now >= (runtime.next_marker_update or 0)
+	if refresh_markers then runtime.next_marker_update = now + MARKER_UPDATE_MS end
+	local saved = saved_companions(false)
+	local actor = db and db.actor or nil
+	if saved == nil or actor == nil then hide_our_label() return end
+	local life = life_object()
+	if life == nil then return end
+	-- Refresh the donor label before AI maintenance. Even if a third-party
+	-- monster section rejects a later optional AI operation, aiming at the pet
+	-- must continue to show its saved name and current health.
+	update_aim_label(saved)
+	for id, entry in pairs(saved) do
+		id = tonumber(id)
+		local server_ok, server = pcall(function() return life:object(id, true) end)
+		if not server_ok or server == nil then
+			remove_map_spot(id)
+				saved[id], runtime.captured[id], runtime.display_names[id], runtime.last_order[id],
+				runtime.last_mode[id], runtime.last_target[id], runtime.last_follow_vertex[id],
+				runtime.navigation_prepared[id], runtime.managed[id] =
+				nil, nil, nil, nil, nil, nil, nil, nil, nil
+		else
+			runtime.managed[id] = true
+			if refresh_markers then ensure_map_spot(id, entry) end
+			apply_actor_team(server, nil, actor)
+			local object_ok, mutant = pcall(level.object_by_id, id)
+			if object_ok and mutant ~= nil then
+				if not alive(mutant) then
+					report_death(actor, entry and entry.donor_name)
+					remove_map_spot(id)
+					saved[id], runtime.captured[id], runtime.display_names[id], runtime.last_order[id],
+						runtime.last_mode[id], runtime.last_target[id], runtime.last_follow_vertex[id],
+						runtime.navigation_prepared[id], runtime.managed[id] =
+						nil, nil, nil, nil, nil, nil, nil, nil, nil
+				else
+					apply_actor_team(server, mutant, actor)
+					local distance = object_distance(mutant, actor)
+					if distance ~= nil and distance > FORCE_FOLLOW_DISTANCE then
+						leave_combat(mutant)
+						order_follow(id, mutant, actor, now)
+					else
+						local protected = protect_allies(mutant, actor)
+						local enemy = allowed_enemy(actor_enemy(actor), protected) or
+							allowed_enemy(mutant_enemy(mutant), protected)
+						if enemy ~= nil then
+							order_attack(id, mutant, enemy, now)
+						else
+							local already_following = runtime.captured[id] and
+								runtime.last_mode[id] == "follow"
+							if already_following then
+								if distance ~= nil and distance <= FOLLOW_STOP_DISTANCE then
+									order_rest(id, mutant, actor, now)
+								else
+									order_follow(id, mutant, actor, now)
+								end
+							elseif distance ~= nil and distance > FOLLOW_START_DISTANCE then
+								order_follow(id, mutant, actor, now)
+							else
+								order_rest(id, mutant, actor, now)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function companion_load()
+	runtime.captured, runtime.display_names, runtime.last_order, runtime.last_mode,
+		runtime.last_target, runtime.last_follow_vertex, runtime.navigation_prepared,
+		runtime.managed = {}, {}, {}, {}, {}, {}, {}, {}
+	runtime.next_update, runtime.next_relations, runtime.next_marker_update,
+		runtime.shown_id = 0, 0, 0, nil
+	local saved = saved_companions(false)
+	if saved ~= nil then
+		for id in pairs(saved) do
+			local numeric_id = tonumber(id)
+			if numeric_id ~= nil then runtime.managed[numeric_id] = true end
+		end
+	end
+end
+
+local function monster_on_update(mutant)
+	local id = object_id(mutant)
+	if id == nil or runtime.managed[id] ~= true then return end
+	local actor = db and db.actor or nil
+	if actor == nil or not alive(mutant) then return end
+	local life = life_object()
+	local server = life and life:object(id, true) or nil
+	apply_actor_team(server, mutant, actor)
+	prepare_navigation(id, mutant)
+	protect_allies(mutant, actor)
+end
+
+local function companion_level_changing()
+	hide_our_label()
+	runtime.captured, runtime.last_order, runtime.navigation_prepared = {}, {}, {}
+	runtime.next_marker_update = 0
+	local saved, life = saved_companions(false), life_object()
+	if saved == nil or life == nil then return end
+	local actor_ok, server_actor = pcall(function() return life:actor() end)
+	if not actor_ok or server_actor == nil then return end
+	local destination_ok, gvid, lvid, position = pcall(function()
+		local graph_vertex = game_graph():vertex(server_actor.m_game_vertex_id)
+		return server_actor.m_game_vertex_id, graph_vertex:level_vertex_id(),
+			graph_vertex:level_point()
+	end)
+	if not destination_ok then return end
+	for id in pairs(saved) do
+		id = tonumber(id)
+		remove_map_spot(id)
+		if db ~= nil then
+			if type(db.offline_objects) == "table" and db.offline_objects[id] then
+				db.offline_objects[id].level_vertex_id = nil
+			end
+			if type(db.spawned_vertex_by_id) == "table" then db.spawned_vertex_by_id[id] = nil end
+		end
+		pcall(function() life:teleport_object(id, gvid, lvid, position) end)
+	end
+end
+
+local function execute(context)
+	local section = context.options.section
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(section, "mutant") then
+		return "rejected", "spawn_section_unsafe"
+	end
+	local points, placement = anomaly_donation_bridge_common.spawn_points(
+		context.actor, 1, math.max(1, context.options.radius - 5),
+		context.options.radius, 720)
+	if points == nil then return "deferred", placement end
+	local gvid_ok, gvid = pcall(function() return context.actor:game_vertex_id() end)
+	if not gvid_ok then return "deferred", "actor_vertex_invalid" end
+	local object_ok, server = pcall(alife_create, section, points[1].position,
+		points[1].vertex_id, gvid)
+	if not object_ok or server == nil then
+		return "rejected", "mutant_companion_spawn_failed"
+	end
+	local id = tonumber(server.id)
+	if id == nil or id <= 0 then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "mutant_companion_id_invalid_rolled_back" or
+			"mutant_companion_id_invalid_state_unknown"
+	end
+	local setup_ok = pcall(function()
+		assert(apply_actor_team(server, nil, context.actor),
+			"mutant_companion_team_assignment_failed")
+		local saved = assert(saved_companions(true), "mutant_companion_state_unavailable")
+		saved[id] = { donor_name = context.options.donor_name, section = section }
+		runtime.managed[id] = true
+		ensure_map_spot(id, saved[id])
+	end)
+	if not setup_ok then
+		local rolled_back = anomaly_donation_bridge_common.rollback_server_objects({ server })
+		return rolled_back and "rejected" or "uncertain",
+			rolled_back and "mutant_companion_setup_failed_rolled_back" or
+			"mutant_companion_setup_failed_state_unknown"
+	end
+	runtime.next_update = 0
+	return "executed", "spawned_mutant_companion_" .. tostring(id) .. "_" .. section ..
+		"_random" ..
+		(placement ~= "requested_ring" and "_" .. placement or "")
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"spawn_mutant_companion", {
+			can_execute = can_execute, execute = execute, update = companion_update,
+			on_game_load = companion_load, on_level_changing = companion_level_changing,
+			is_supported = supported, support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_mutant_companion registration failed: %s", tostring(reason))
+	end
+	if not runtime.callback_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("monster_on_update", monster_on_update)
+		runtime.callback_registered = true
+	end
+	if not runtime.enemy_eval_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("on_enemy_eval", mutant_companion_enemy_eval)
+		runtime.enemy_eval_registered = true
+	end
+end

@@ -1,0 +1,495 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.helicopter_boss",
+  "displayName": "Босс-вертолёт",
+  "description": "Боевой вертолёт со случайной моделью из отмеченных, заданием на уничтожение и денежной наградой. Получает урон от обычного оружия. Здоровье и таймер сохраняются; на другую локацию за игроком не переходит. В подземельях эффект ждёт в очереди.",
+  "category": "npc_mutants", "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"helicopter_sections","displayName":"Допустимые модели вертолётов","kind":"MultiChoice","catalogKind":"Helicopter","minimumSelections":1,"defaultValue":""},
+    {"key":"health_percent","displayName":"Начальное здоровье, % (100 = ×1)","kind":"Integer","minimum":10,"maximum":99999,"defaultValue":"50"},
+    {"key":"arrival_seconds","displayName":"Задержка прилёта, сек","kind":"Integer","minimum":0,"maximum":60000,"defaultValue":"10"},
+    {"key":"reward_money","displayName":"Награда за уничтожение, RU","kind":"Integer","minimum":0,"maximum":1000000,"defaultValue":"10000"},
+    {"key":"use_rockets","displayName":"Использовать ракеты","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters":{"helicopter_sections":"","health_percent":"50","arrival_seconds":"10","reward_money":"10000","use_rockets":"false"},
+  "itemSpawns":[], "spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+-- Only our private C_HLCP_S section uses this binder. No stock binder, global
+-- heli ALife, task, immunity or map-specific route is replaced or hooked.
+local HANDLER="hardcoon.adb.helicopter_boss"
+local SECTION="adb_helicopter_boss"
+local MODULE="anomaly_donation_bridge_effect_hardcoon_adb_helicopter_boss"
+local SAVE="adb_helicopter_boss_v1"
+local PREFIX="adb_helicopter_boss_"
+local SLOTS=16
+local last_tick,next_tick=nil,0
+local spawn_retry={}
+local motion_cache,spawn_reported={},{}
+local registered=false
+local function call(o,m,...)
+    if not o then return nil end
+    local args={...};local ok,v=pcall(function() return o[m](o,unpack(args)) end)
+    if ok then return v end
+end
+local function actor() return db and db.actor end
+local function sim() return type(alife)=="function" and alife() end
+local function records(create)
+    local data=alife_storage_manager and alife_storage_manager.get_state()
+    if type(data)~="table" then return nil end
+    if create and not data[SAVE] then data[SAVE]={} end
+    return data[SAVE]
+end
+local function slot(i) return PREFIX..string.format("%02d",i) end
+local function live_actor() return call(actor(),"alive")==true end
+local function paused() return type(device)=="function" and device():is_paused() end
+local function server(id) return id and call(sim(),"object",id,true) end
+local function online(id) return id and level.object_by_id(id) end
+local function ini_value(ini,s,k)
+    if ini and ini:section_exist(s) and ini:line_exist(s,k) then return ini:r_string(s,k) end
+end
+local function underground()
+    -- Anomaly's live weather classification includes mod-added levels. Unknown
+    -- classification is NOT permission to spawn, and no vanilla map list is used.
+    if not level_weathers or type(level_weathers.bLevelUnderground)~="boolean" then return nil end
+    return level_weathers.bLevelUnderground
+end
+local function identity(o,r,is_server)
+    return o and call(o,is_server and "section_name" or "section")==SECTION and call(o,"name")==r.identity
+end
+local function entry(o)
+    local id=call(o,"id")
+    for key,r in pairs(records(false) or {}) do
+        if r.id==id and identity(o,r,false) then return r,key end
+    end
+end
+local function finite(n) return type(n)=="number" and n==n and n>-1e9 and n<1e9 end
+local function asset_exists(alias,path,extension)
+    if path:lower():sub(-#extension)~=extension then path=path..extension end
+    local ok,exists=pcall(function() return getFS():exist(alias,path) end)
+    return ok and not not exists
+end
+local function motion_exists(visual,animation)
+    local key=visual.."|"..animation
+    if motion_cache[key]==nil then
+        local ok,exists=false,false
+        if asset_exists("$game_meshes$",visual,".ogf") then ok,exists=pcall(game.motion_exists,visual,animation) end
+        motion_cache[key]=ok and exists==true
+    end
+    return motion_cache[key]
+end
+local function spawn_profile(source)
+    source=source or "helicopter" -- pending hb.1 saves keep their original base model
+    if not utils_stpk or type(utils_stpk.get_heli_data)~="function" or type(utils_stpk.set_heli_data)~="function" or
+        not game or type(game.motion_exists)~="function" or type(getFS)~="function" then return nil,"helicopter_boss_spawn_api_unavailable" end
+    local ini=system_ini()
+    if ini_value(ini,source,"class")~="C_HLCP_S" then return nil,"helicopter_boss_source_unsupported" end
+    local visual=ini_value(ini,source,"visual")
+    local animation=ini_value(ini,source,"startup_animation")
+    if not animation or animation=="" or animation=="$editor" then animation="idle" end
+    if not visual or visual=="" or not motion_exists(visual,animation) then
+        return nil,"helicopter_boss_model_animation_unsupported"
+    end
+    local sound=ini_value(ini,source,"engine_sound")
+    if not sound or sound=="" then sound=[[vehicles\helicopter\helicopter]] end
+    if not asset_exists("$game_sounds$",sound,".ogg") then return nil,"helicopter_boss_engine_sound_unavailable" end
+    return {visual=visual,animation=animation,sound=sound,
+        motion=ini_value(ini,source,"motion_name") or [[helicopter\aaa.anm]]}
+end
+local function prepare_server(s,profile)
+    -- Required by Anomaly's own smart_terrain / heli_alife_warfare spawn:
+    -- CSE_Visual defaults to "$editor", and engine_sound is otherwise empty.
+    -- Repair the SERVER packet before the client/renderer can spawn it.
+    local data=utils_stpk.get_heli_data(s)
+    if type(data)~="table" then error("helicopter_packet_unavailable") end
+    local visual=profile.visual
+    if not motion_exists(visual,profile.animation) then error("helicopter_model_animation_unsupported") end
+    data.visual_name=visual -- selected live model, never a hardcoded Mi-2/Mi-24
+    data.startup_animation=profile.animation
+    if not data.skeleton_name or data.skeleton_name=="" or data.skeleton_name=="$editor" then data.skeleton_name=profile.animation end
+    if not data.motion_name or data.motion_name=="" then data.motion_name=profile.motion end
+    if not data.engine_sound or data.engine_sound=="" then data.engine_sound=profile.sound end
+    utils_stpk.set_heli_data(data,s)
+    local check=utils_stpk.get_heli_data(s)
+    if not check or check.startup_animation~=profile.animation or check.visual_name~=visual or
+        not check.engine_sound or check.engine_sound=="" or not check.motion_name or check.motion_name=="" or
+        not check.skeleton_name or check.skeleton_name=="" or check.skeleton_name=="$editor" then
+        error("helicopter_packet_verification_failed")
+    end
+end
+local function vector_at(p) return vector():set(p.x,p.y,p.z) end
+local function stop_attack(heli)
+    heli:ClearEnemy();heli.m_use_mgun_on_attack=false;heli.m_use_rocket_on_attack=false
+    heli:LookAtPoint(vector():set(0,0,0),false)
+end
+local function combat_radius(heli,use_rockets)
+    if not use_rockets then return 100 end
+    -- Native firing checks horizontal distance, strictly INSIDE these limits.
+    -- Read the actual loaded helicopter, not vanilla values or the section
+    -- supplying only its model. Leave weapon ranges/cooldowns untouched.
+    local minimum,maximum=heli.m_min_rocket_dist,heli.m_max_rocket_dist
+    if not finite(minimum) or not finite(maximum) or minimum<0 or maximum<=minimum then return 100 end
+    local gun_min,gun_max=heli.m_min_mgun_dist,heli.m_max_mgun_dist
+    if finite(gun_min) and finite(gun_max) and gun_min>=0 and gun_max>gun_min then
+        local overlap_min,overlap_max=math.max(minimum,gun_min),math.min(maximum,gun_max)
+        if overlap_max>overlap_min then minimum,maximum=overlap_min,overlap_max end
+    end
+    -- The midpoint leaves room for turns/chords and a moving actor. Recenter
+    -- through air_point on each route update; never force a shot or bypass LOS.
+    return minimum+(maximum-minimum)/2
+end
+local function distance(a,b) return math.sqrt((a.x-b.x)^2+(a.y-b.y)^2+(a.z-b.z)^2) end
+local function ray_clear(a,b,ignore)
+    local len=distance(a,b);if len<0.01 then return true end
+    local dir=vector():set((b.x-a.x)/len,(b.y-a.y)/len,(b.z-a.z)/len)
+    local result=rq_result()
+    return not level.ray_pick(vector_at(a),dir,len,rq_target.rqtStatic,result,ignore)
+end
+local function corridor(a,b,ignore)
+    -- A swept clearance envelope, not only a zero-width center ray. It cannot
+    -- prove every modded mesh fits, but rejects buildings/terrain before flight.
+    for _,offset in ipairs({{0,0,0},{8,0,0},{-8,0,0},{0,0,8},{0,0,-8},{0,5,0},{0,-5,0}}) do
+        if not ray_clear({x=a.x+offset[1],y=a.y+offset[2],z=a.z+offset[3]},
+            {x=b.x+offset[1],y=b.y+offset[2],z=b.z+offset[3]},ignore) then return false end
+    end
+    return true
+end
+local function air_point(radius,from,ignore,phase)
+    local a=actor();if not a then return nil end
+    local p=a:position();local box=level.get_bounding_volume()
+    if not box or not box.min or not box.max then return nil end
+    local height=p.y+55
+    -- Air ABOVE the static geometry's max.y is normal (GetSafeAltitude does
+    -- exactly that). Do not reject flat maps whose highest mesh is below 55m.
+    if height-10<=box.min.y then return nil end
+    local center={x=p.x,y=height,z=p.z}
+    if not ray_clear({x=p.x,y=p.y+2,z=p.z},center,a) then return nil end
+    for step=0,11 do
+        local angle=((phase or 0)+step*30)*math.pi/180
+        local q={x=p.x+math.cos(angle)*radius,y=height,z=p.z+math.sin(angle)*radius}
+        if q.x>box.min.x+20 and q.x<box.max.x-20 and q.z>box.min.z+20 and q.z<box.max.z-20 and
+            corridor(from or center,q,ignore or a) then return q end
+    end
+end
+local function task_manager_object()
+    return task_manager and type(task_manager.get_task_manager)=="function" and task_manager.get_task_manager()
+end
+local function text(value) return anomaly_donation_bridge_common.game_text_cp1251_lossy(value) or "?" end
+local function task_text(id,field)
+    local r=(records(false) or {})[id]
+    if field=="title" then return text("Боевой вертолёт") end
+    return text(tostring(r and r.donor_name or "Донатер").." запросил зачистку с воздуха. Требуется отбить атаку.")
+end
+local function task_target(id) local r=(records(false) or {})[id];return r and r.id end
+local function task_status(_,id)
+    local r=(records(false) or {})[id]
+    if not r or r.stage=="failed" or r.stage=="cancelled" then return "fail" end
+    if r.dead and live_actor() then return "complete" end
+    if r.id and not identity(server(r.id),r,true) then return "fail" end
+end
+local function task_complete(_,_,p)
+    local r=(records(false) or {})[p and p[1]]
+    if not r or not r.dead or r.reward_granted or not live_actor() then return end
+    r.reward_granted=true
+    if r.reward>0 then actor():give_money(r.reward) end
+    r.stage="complete"
+end
+local function task_cancel(_,_,p)
+    local r=(records(false) or {})[p and p[1]]
+    if not r or r.reward_granted then return end
+    r.stage="cancelled"
+    local s=server(r.id)
+    if identity(s,r,true) then anomaly_donation_bridge_common.rollback_server_objects({s}) end
+end
+local function register_tasks()
+    if not task_functor or not task_status_functor or not xr_effects then return false end
+    task_functor.adb_helicopter_boss_text=task_text
+    task_functor.adb_helicopter_boss_target=task_target
+    task_status_functor.adb_helicopter_boss_status=task_status
+    xr_effects.adb_helicopter_boss_complete=task_complete
+    xr_effects.adb_helicopter_boss_cancel=task_cancel
+    return true
+end
+local function free_slot()
+    local manager=task_manager_object();if not manager or type(manager.task_info)~="table" then return nil end
+    local data=records(false) or {}
+    for i=1,SLOTS do
+        local id=slot(i)
+        local r=data[id]
+        local ended=not r or r.stage=="complete" or r.stage=="cancelled" or r.stage=="failed"
+        -- Identity+ID matching in entry() prevents a retired wreck's binder
+        -- from claiming a new use of the same TASK slot.
+        if ended and not manager.task_info[id] and not call(actor(),"get_task",id,true) then return id end
+    end
+end
+local function supported()
+    return object_binder~=nil and CHelicopter~=nil and callback and callback.helicopter_on_hit~=nil and
+        type(alife_create)=="function" and type(system_ini)=="function" and
+        alife_storage_manager~=nil and type(alife_storage_manager.get_state)=="function" and
+        level and type(level.ray_pick)=="function" and type(level.get_bounding_volume)=="function" and
+        rq_result~=nil and rq_target and rq_target.rqtStatic~=nil and
+        type(RegisterScriptCallback)=="function" and register_tasks()
+end
+local function can_execute(context,params)
+    local valid,why=anomaly_donation_bridge_common.params_only(params,
+        {health_percent=true,arrival_seconds=true,reward_money=true,use_rockets=true,donor_name=true,
+            helicopter_sections=true,catalog_revision=true})
+    if not valid then return false,"rejected",why end
+    if not supported() then return false,"deferred","helicopter_boss_api_unavailable" end
+    if not live_actor() or paused() then return false,"deferred","actor_unavailable" end
+    if underground()~=false then return false,"deferred","helicopter_boss_requires_surface" end
+    local ini=system_ini()
+    if ini_value(ini,"helicopter","class")~="C_HLCP_S" or
+        ini_value(ini,SECTION,"class")~="C_HLCP_S" or ini_value(ini,SECTION,"adb_heli_profile")~="1" or
+        ini_value(ini,SECTION,"script_binding")~=MODULE..".bind" then
+        return false,"deferred","helicopter_boss_update_addon_restart_game"
+    end
+    local options={}
+    for key,bounds in pairs({health_percent={50,10,99999},arrival_seconds={10,0,60000},reward_money={10000,0,1000000}}) do
+        options[key],why=anomaly_donation_bridge_common.parse_integer(params[key],bounds[1],bounds[2],bounds[3],"helicopter_boss_"..key.."_invalid")
+        if not options[key] then return false,"rejected",why end
+    end
+    if params.use_rockets~=nil and params.use_rockets~="true" and params.use_rockets~="false" then return false,"rejected","helicopter_boss_rockets_invalid" end
+    options.rockets=params.use_rockets=="true"
+    local catalog=anomaly_donation_bridge_catalog
+    if not catalog or not catalog.capable() then return false,"deferred","catalog_unavailable" end
+    local entries,selection_reason=catalog.validate_sections(params,"helicopter_sections","helicopter")
+    if not entries then
+        local transient=selection_reason=="catalog_unavailable" or selection_reason=="catalog_revision_mismatch"
+        return false,transient and "deferred" or "rejected",selection_reason
+    end
+    if #entries==0 then return false,"rejected","selection_empty" end
+    options.helicopter_section=entries[math.random(1,#entries)].section_id
+    local profile,profile_reason=spawn_profile(options.helicopter_section)
+    if not profile then return false,"deferred",profile_reason end
+    options.donor_name=tostring(params.donor_name or "Босс-вертолёт")
+    if #options.donor_name>256 or options.donor_name:find("[%z\1-\31\127]") then return false,"rejected","helicopter_boss_donor_invalid" end
+    options.slot=free_slot()
+    if not options.slot then return false,"deferred","helicopter_boss_slots_busy" end
+    if not air_point(220) then return false,"deferred","helicopter_boss_open_sky_required" end
+    context.options=options
+    return true
+end
+local function execute(context)
+    local p=context.options
+    if not p or underground()~=false or not live_actor() then return "deferred","helicopter_boss_requires_surface" end
+    local data=records(true)
+    if not data or free_slot()~=p.slot then return "deferred","helicopter_boss_slots_busy" end
+    data[p.slot]={stage="waiting",remaining_ms=p.arrival_seconds*1000,level=level.name(),
+        health_percent=p.health_percent,reward=p.reward_money,rockets=p.rockets,donor_name=p.donor_name,
+        source_section=p.helicopter_section}
+    last_tick=type(time_global)=="function" and time_global() or 0
+    -- Announce only after accepting the effect, never from the load/update
+    -- paths. A failing third-party news UI must not re-execute the spawn.
+    local announced,why=pcall(function()
+        if not news_manager or type(news_manager.send_tip)~="function" then error("news_manager_unavailable") end
+        local donor="%c[255,238,153,26]"..text(p.donor_name).."%c[default]"
+        local message=text("Штаб, это «")..donor..text("», запрашиваю зачистку местности, как слышно, приём?")..
+            "\\n\\n"..text("Вас понял, «")..donor..text("», птичка прибудет через "..p.arrival_seconds.." секунд.")
+        return news_manager.send_tip(actor(),message,nil,nil,8000)
+    end)
+    if (not announced or why==false) and type(printf)=="function" then
+        printf("[ADB] helicopter boss announcement failed: %s",tostring(why))
+    end
+    return "executed","helicopter_boss_waiting_"..p.arrival_seconds.."s"
+end
+local function snapshot(o)
+    local r=entry(o);if not r then return end
+    local heli=call(o,"get_helicopter")
+    local hp=call(heli,"GetfHealth")
+    if finite(hp) then r.health=hp end
+    if hp and hp<=0.005 or heli and heli.m_dead then r.dead=true end
+    local s=server(r.id)
+    if identity(s,r,true) then s.position=o:position() end
+end
+local function tick(now)
+    now=tonumber(now) or time_global()
+    if now<next_tick then return end
+    next_tick=now+250
+    local elapsed=last_tick and math.max(0,now-last_tick) or 0;last_tick=now
+    if not live_actor() or paused() then return end
+    for id,r in pairs(records(false) or {}) do
+        if r.level==level.name() and r.stage=="waiting" and underground()==false then
+            r.remaining_ms=math.max(0,r.remaining_ms-elapsed)
+            if r.remaining_ms==0 then
+                local point=air_point(220)
+                if point and now>=(spawn_retry[id] or 0) then
+                    spawn_retry[id]=now+5000
+                    -- Native helicopter class is checked immediately before
+                    -- creation. No vehicle enters the NPC/mutant spawn catalog.
+                    local ini=system_ini()
+                    local profile=spawn_profile(r.source_section)
+                    if r.source_section and (not anomaly_donation_bridge_catalog or
+                        not anomaly_donation_bridge_catalog.is_available(r.source_section,"helicopter")) then profile=nil end
+                    if profile and ini_value(ini,SECTION,"class")=="C_HLCP_S" then
+                        local ok,s=pcall(alife_create,SECTION,vector_at(point),actor():level_vertex_id(),actor():game_vertex_id())
+                        if ok and s then
+                            sim():set_switch_online(s.id,false)
+                            local prepared,why=pcall(prepare_server,s,profile)
+                            if prepared then
+                                r.id,r.identity,r.stage=s.id,call(s,"name"),"arriving"
+                                r.health=r.health_percent/100;spawn_retry[id]=nil;spawn_reported[id]=nil
+                                sim():set_switch_online(r.id,true);sim():set_switch_offline(r.id,false)
+                            else
+                                anomaly_donation_bridge_common.rollback_server_objects({s})
+                                if not spawn_reported[id] and type(printf)=="function" then
+                                    printf("[ADB] helicopter boss spawn preparation failed: %s",tostring(why));spawn_reported[id]=true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+local function on_load() last_tick=nil;next_tick=0;spawn_retry={};spawn_reported={};motion_cache={} end
+local function on_changing()
+    for _,r in pairs(records(false) or {}) do
+        local o=online(r.id);if o and identity(o,r,false) then snapshot(o) end
+        local s=server(r.id)
+        if identity(s,r,true) then
+            -- Allow the old level to go offline. Never teleport or recreate it
+            -- on the actor's destination level, and never award for unloading.
+            sim():set_switch_online(r.id,true);sim():set_switch_offline(r.id,true)
+        end
+    end
+    last_tick=nil;next_tick=0;spawn_retry={};spawn_reported={}
+end
+
+-- This binder intentionally does not run stock heli_alife / story heli logic:
+-- those can reassign a target, clean up a helicopter, or complete another quest.
+class "adb_helicopter_boss_binder" (object_binder)
+function adb_helicopter_boss_binder:__init(obj)
+    super(obj)
+    self.native_initial_health=obj:get_helicopter():GetfHealth()
+end
+function adb_helicopter_boss_binder:reinit()
+    object_binder.reinit(self)
+    db.storage[self.object:id()]={object=self.object,heliObject=self.object:get_helicopter()}
+    self.object:set_callback(callback.helicopter_on_hit,self.on_hit,self)
+end
+function adb_helicopter_boss_binder:net_spawn(s)
+    if not object_binder.net_spawn(self,s) then return false end
+    db.add_obj(self.object);db.add_heli(self.object)
+    return true
+end
+function adb_helicopter_boss_binder:net_save_relevant() return true end
+function adb_helicopter_boss_binder:save(packet)
+    object_binder.save(self,packet)
+    self:initialize_health(false)
+    snapshot(self.object)
+    packet:w_u8(1);packet:w_float(self.object:get_helicopter():GetfHealth())
+end
+function adb_helicopter_boss_binder:load(packet)
+    object_binder.load(self,packet)
+    local version=packet:r_u8()
+    if version~=1 then error("Unsupported ADB helicopter save version") end
+    local hp=packet:r_float()
+    if not finite(hp) then error("Invalid ADB helicopter health") end
+    self.loaded_health=hp;self.initialized=false
+    self.native_initial_health=self.object:get_helicopter():GetfHealth()
+end
+function adb_helicopter_boss_binder:net_destroy()
+    self:initialize_health(false)
+    snapshot(self.object)
+    self.object:set_callback(callback.helicopter_on_hit,nil)
+    db.del_heli(self.object);db.del_obj(self.object)
+    object_binder.net_destroy(self)
+end
+function adb_helicopter_boss_binder:on_hit()
+    -- Damage is applied by CHelicopter::Hit, including native weak points. This
+    -- callback only records the resulting HP: no healing or per-tick resets.
+    self:initialize_health(true)
+    snapshot(self.object)
+end
+function adb_helicopter_boss_binder:initialize_health(after_hit)
+    local r=entry(self.object);if not r then return end
+    local heli=self.object:get_helicopter()
+    if not self.initialized then
+        -- The binder packet is authoritative for HP on load, regardless of the
+        -- actor storage serialization order in that save. Apply exactly ONCE.
+        local hp=self.loaded_health or r.health or r.health_percent/100
+        -- A hit can arrive between net_spawn and the first update. Preserve
+        -- that native damage instead of overwriting it with starting HP.
+        if after_hit then hp=hp+heli:GetfHealth()-(self.native_initial_health or 1) end
+        heli:SetfHealth(hp);self.loaded_health=nil;self.initialized=true
+    end
+end
+function adb_helicopter_boss_binder:update(delta)
+    object_binder.update(self,delta)
+    local r,id=entry(self.object);local heli=self.object:get_helicopter()
+    if not r then stop_attack(heli);return end
+    self:initialize_health(false)
+    -- save/load/net_spawn may run inside inherited CEntity::net_Spawn, before
+    -- the helicopter has created its sound and light handles. Only update is
+    -- late enough to access those handles safely.
+    if not self.effects_started then
+        heli:TurnEngineSound(true);heli:TurnLighting(true);self.effects_started=true
+    end
+    snapshot(self.object)
+    if r.dead then
+        stop_attack(heli)
+        if not heli.m_dead then heli:Die() end
+        db.del_heli(self.object)
+        return
+    end
+    if r.level~=level.name() or not live_actor() or paused() or r.stage=="cancelled" then
+        stop_attack(heli);return
+    end
+    local now=time_global();local p=self.object:position();local a=actor():position()
+    if r.stage=="arriving" and distance(p,a)<=190 then r.stage="active" end
+    if r.stage=="active" and r.task_created and not call(actor(),"get_task",id,true) then r.task_created=false end
+    if r.stage=="active" and not r.task_created and now>=(self.next_task_try or 0) then
+        self.next_task_try=now+5000
+        local manager=task_manager_object()
+        if manager then
+            if not call(actor(),"get_task",id,true) then
+                -- give_task may have failed after creating its Lua descriptor
+                -- but before giving a real CGameTask. Retry only our own slot.
+                manager.task_info[id]=nil
+                local ok,why=pcall(function() manager:give_task(id,actor():id()) end)
+                if not ok and not self.task_error_reported and type(printf)=="function" then
+                    printf("[ADB] helicopter boss task failed: %s",tostring(why));self.task_error_reported=true
+                end
+            end
+            r.task_created=manager.task_info[id]~=nil and call(actor(),"get_task",id,true)~=nil
+        end
+    end
+    local fighting=r.stage=="active" and r.task_created==true and underground()==false
+    if fighting then
+        -- Same two requirements as stock heli_combat:round_update: direct
+        -- fire (not a finite flyby fire trail) and BODY facing the target.
+        -- SetEnemy alone cannot overcome the model's gun traverse limits
+        -- when an orbit makes the airframe face tangentially away from it.
+        heli:UseFireTrail(false)
+        heli:LookAtPoint(vector_at(a),true)
+        local visible=heli:isVisible(actor())==true
+        heli.m_use_mgun_on_attack=visible
+        heli.m_use_rocket_on_attack=visible and r.rockets==true
+        if visible then heli:SetEnemy(actor()) else heli:ClearEnemy() end
+    else stop_attack(heli) end
+    if now>=(self.next_move or 0) then
+        local radius=r.stage=="arriving" and 120 or combat_radius(heli,r.rockets==true)
+        self.orbit=((self.orbit or 0)+35)%360
+        local destination=air_point(radius,p,self.object,self.orbit)
+        if destination then
+            if not self.combat_speed then
+                self.combat_speed=math.max(5,math.min(30,tonumber(ini_value(system_ini(),SECTION,"round_velocity") or "") or 15))
+            end
+            heli:SetMaxVelocity(fighting and self.combat_speed or 30)
+            heli:SetSpeedInDestPoint(fighting and self.combat_speed or 10)
+            heli:SetDestPosition(vector_at(destination))
+        end
+        self.next_move=now+3000
+    end
+end
+function bind(object) object:bind_object(adb_helicopter_boss_binder(object)) end
+function on_game_start()
+    if registered then return end
+    registered=true;register_tasks()
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=function() return supported()==true end,
+        can_execute=can_execute,execute=execute,update=tick,on_game_load=on_load,on_level_changing=on_changing})
+end

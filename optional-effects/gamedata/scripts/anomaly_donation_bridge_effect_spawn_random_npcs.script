@@ -1,0 +1,153 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_random_npcs",
+  "displayName": "Случайные NPC (без сквада)",
+  "description": "Выбирает NPC из разрешённых секций и создаёт отдельных персонажей, а не симуляционный отряд.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "npc_sections",
+      "displayName": "Разрешённые NPC",
+      "kind": "MultiChoice",
+      "catalogKind": "Npc",
+      "minimumSelections": 0,
+      "defaultValue": ""
+    },
+    {
+      "key": "minimum_count",
+      "displayName": "Минимум NPC",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 99,
+      "defaultValue": "1"
+    },
+    {
+      "key": "maximum_count",
+      "displayName": "Максимум NPC",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 99,
+      "defaultValue": "10"
+    },
+    {
+      "key": "radius_meters",
+      "displayName": "Радиус появления, м",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 500,
+      "defaultValue": "25"
+    },
+    {
+      "key": "spawn_point_method",
+      "displayName": "Способ поиска места появления",
+      "kind": "Choice",
+      "options": [
+        "boss_sample",
+        "legacy",
+        "graph",
+        "scan",
+        "coordinates"
+      ],
+      "optionLabels": {
+        "boss_sample": "Случайные точки локации (рекомендуется)",
+        "legacy": "По прямой от игрока",
+        "graph": "С обходом препятствий",
+        "scan": "Полный поиск по локации",
+        "coordinates": "Случайные координаты"
+      },
+      "defaultValue": "boss_sample"
+    },
+    {
+      "key": "use_donor_name",
+      "displayName": "Спавнить NPC с ником донатера",
+      "kind": "Choice",
+      "options": [
+        "true",
+        "false"
+      ],
+      "defaultValue": "false"
+    },
+    {
+      "key": "force_hostile",
+      "displayName": "Всегда враждебны игроку",
+      "kind": "Choice",
+      "options": [
+        "true",
+        "false"
+      ],
+      "defaultValue": "true"
+    }
+  ],
+  "parameters": {
+    "npc_sections": "",
+    "minimum_count": "1",
+    "maximum_count": "10",
+    "radius_meters": "25",
+    "use_donor_name": "false",
+    "force_hostile": "true",
+    "spawn_point_method": "boss_sample"
+  }
+}
+ADB_PRESET_END]]
+
+local direct = nil
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		npc_sections = true, strength = true, minimum_count = true,
+		maximum_count = true, radius_meters = true, force_hostile = true,
+		use_donor_name = true, donor_name = true, catalog_revision = true, spawn_point_method=true
+	})
+	if not valid then return false, "rejected", reason end
+	local minimum, minimum_error = anomaly_donation_bridge_common.parse_integer(
+		params.minimum_count, 1, 1, 99, "minimum_count_invalid")
+	if minimum == nil then return false, "rejected", minimum_error end
+	local maximum, maximum_error = anomaly_donation_bridge_common.parse_integer(
+		params.maximum_count, 10, 1, 99, "maximum_count_invalid")
+	if maximum == nil then return false, "rejected", maximum_error end
+	if minimum > maximum then return false, "rejected", "spawn_count_range_invalid" end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "npc_sections", "npc")
+	if entries == nil then return false, "rejected", catalog_error end
+	local pool = entries
+	if #pool == 0 then return false, "rejected", "random_npc_pool_empty" end
+	local chosen = pool[math.random(#pool)]
+	local count = math.random(minimum, maximum)
+	context.spawn_source_params=params
+	local ready, state, detail = direct.can_execute(context, {
+		section_id = chosen.section_id, strength = "any", count = tostring(count),
+		radius_meters = params.radius_meters, force_hostile = params.force_hostile, spawn_point_method=params.spawn_point_method,
+		use_donor_name = params.use_donor_name, donor_name = params.donor_name,
+		catalog_revision = params.catalog_revision
+	})
+	if ready then context.random_section = context.options.rows[1].section end
+	return ready, state, detail
+end
+
+local function execute(context)
+	local status, detail = direct.execute(context)
+	if status ~= "executed" then return status, detail end
+	if context.options.force_hostile then
+		anomaly_donation_bridge_effects_direct_spawn.remember_hostile(
+			context.spawned_ids, context.actor, context.now)
+	end
+	return status, detail .. "_random_" .. tostring(context.random_section) ..
+		(context.options.force_hostile and "_forced_hostile" or "_natural_hostility")
+end
+
+function on_game_start()
+	direct = anomaly_donation_bridge_effects_direct_spawn.descriptor("npc")
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"spawn_random_npcs", {
+			can_execute = can_execute, execute = execute,
+			is_supported = direct.is_supported,
+			support_probe_is_hint = true,
+			update = anomaly_donation_bridge_effects_direct_spawn.update_hostile,
+			on_level_changing = anomaly_donation_bridge_effects_direct_spawn.clear_hostile
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_random_npcs registration failed: %s", tostring(reason))
+	end
+end

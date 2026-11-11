@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="windows-1251" ?>
+<game_dialogs>
+    <dialog id="anomaly_donation_bridge_annoying_fan_dialog">
+        <init_func>anomaly_donation_bridge_effect_hardcoon_adb_annoying_fan.init_dialog</init_func>
+    </dialog>
+    <dialog id="anomaly_donation_bridge_wandering_trader_dialog">
+        <init_func>anomaly_donation_bridge_wandering_trader.init_dialog</init_func>
+    </dialog>
+</game_dialogs>

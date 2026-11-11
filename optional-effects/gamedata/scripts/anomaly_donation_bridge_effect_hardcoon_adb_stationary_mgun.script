@@ -1,0 +1,386 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,"handlerId":"hardcoon.adb.stationary_mgun","displayName":"Стационарный пулемёт",
+  "description":"Создаёт рядом штатный управляемый пулемёт с бесконечными патронами. Сохраняются сам пулемёт и остаток таймера. Время работы: 0–6000 секунд; 0 — постоянно, в том числе после переходов между локациями. После таймера герой штатно выходит, в КПК приходит предупреждение; через 5 секунд пулемёт взрывается. Пулемёт остаётся на своей локации.",
+  "category":"world","cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"lifetime_seconds","displayName":"Время существования, сек. (0 — постоянно)","kind":"Integer","minimum":0,"maximum":6000,"defaultValue":"60"},
+    {"key":"rotation_speed_dps","displayName":"Скорость вращения, °/сек","kind":"Choice","options":["60","90","120"],"defaultValue":"60"}
+  ],
+  "parameters":{"lifetime_seconds":"60","rotation_speed_dps":"60"},"itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local HANDLER="hardcoon.adb.stationary_mgun"
+local MODULE="anomaly_donation_bridge_effect_hardcoon_adb_stationary_mgun"
+local SECTION="adb_stationary_mgun"
+local BLAST="adb_stationary_mgun_blast"
+local MODEL="anomaly_donation_bridge\\stationary_mgun"
+local SAVE="adb_stationary_mguns_v1"
+local MAX_GUNS=128
+local SPEEDS={[60]=true,[90]=true,[120]=true}
+local LEGACY_SPEEDS={[20]=true,[40]=true}
+local function speed_section(speed) return SECTION..string.format("_r%03d",speed) end
+local function section_speed(section)
+    if type(section)~="string" then return nil end
+    local speed=tonumber(section:match("^adb_stationary_mgun_r(%d%d%d)$"))
+    return (SPEEDS[speed] or LEGACY_SPEEDS[speed]) and section==speed_section(speed) and speed or nil
+end
+local function section_model(section)
+    if section==SECTION then return MODEL end
+    local speed=section_speed(section)
+    return speed and MODEL..string.format("_r%03d",speed) or nil
+end
+local records,registered,pending_load,last_clock={},false,true,nil
+local ready_at=0
+local retry_at,diagnostics={},{}
+local pickup_veto=nil
+local native_ready={}
+local function actor() return db and db.actor end
+local function life() return type(alife)=="function" and alife() end
+local function store() return alife_storage_manager and alife_storage_manager.get_state() end
+local function now() return time_global() end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e10 end
+local function int(n,lo,hi) return finite(n) and n%1==0 and n>=lo and n<=hi end
+local function point(p) return {x=p.x,y=p.y,z=p.z} end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function valid_point(p) return type(p)=="table" and finite(p.x) and finite(p.y) and finite(p.z) end
+local function settings(section,key) return anomaly_donation_bridge_common.ini_string(system_ini(),section,key) end
+local function server(id) return id and life():object(id,true) end
+local function client(id) return id and level.object_by_id(id) end
+local function owns(o,r,section,is_server)
+    if not o or not r then return false end
+    if section==SECTION then section=r.section or SECTION end
+    return (is_server and o:section_name() or o:section())==section and o:name()==r.name
+end
+local function identity(s) return {id=s.id,name=s:name()} end
+local function notice(id,reason)
+    if diagnostics[id]==reason then return end;diagnostics[id]=reason
+    if type(printf)=="function" then printf("[ADB] stationary mgun %s: %s",tostring(id),reason) end
+end
+local function count() local n=0;for _ in pairs(records) do n=n+1 end;return n end
+local function persist(data)
+    data=data or store();if not data then return end
+    local result={}
+    for id,r in pairs(records) do
+        result[id]={id=r.id,name=r.name,section=r.section or SECTION,rotation_speed_dps=r.rotation_speed_dps or 10,
+            lifetime_seconds=r.lifetime_seconds,remaining_ms=r.remaining_ms,
+            phase=r.phase,stage_ms=r.stage_ms,position=r.position,level_vertex_id=r.level_vertex_id,
+            game_vertex_id=r.game_vertex_id,blast=r.blast,blast_sent=r.blast_sent,warned=r.warned}
+    end
+    data[SAVE]={version=2,turrets=result}
+end
+local function read_saved()
+    local data=store();local saved=data and data[SAVE];local result={};local n=0
+    if type(saved)~="table" or (saved.version~=1 and saved.version~=2) or type(saved.turrets)~="table" then return result end
+    for _,r in pairs(saved.turrets) do
+        local section=type(r)=="table" and (r.section or (saved.version==1 and SECTION))
+        local speed=section==SECTION and 10 or section_speed(section)
+        if type(r)=="table" and int(r.id,1,65534) and type(r.name)=="string" and #r.name<=256 and
+            speed and (saved.version==1 or r.rotation_speed_dps==speed) and
+            int(r.lifetime_seconds,0,6000) and
+            finite(r.remaining_ms) and r.remaining_ms>=0 and r.remaining_ms<=r.lifetime_seconds*1000 and
+            ({active=true,exit=true,arming=true,blast=true,cleanup=true})[r.phase] and
+            finite(r.stage_ms) and r.stage_ms>=0 and r.stage_ms<=20000 and valid_point(r.position) and
+            int(r.level_vertex_id,0,4294967294) and int(r.game_vertex_id,0,65534) then
+            local b=r.blast
+            if b and (type(b)~="table" or not int(b.id,1,65534) or type(b.name)~="string" or #b.name>256) then b=nil end
+            result[r.id]={id=r.id,name=r.name,section=section,rotation_speed_dps=speed,
+                lifetime_seconds=r.lifetime_seconds,remaining_ms=r.remaining_ms,
+                phase=r.phase,stage_ms=r.stage_ms,position=point(r.position),level_vertex_id=r.level_vertex_id,
+                game_vertex_id=r.game_vertex_id,blast=b and {id=b.id,name=b.name},blast_sent=r.blast_sent==true,warned=r.warned==true}
+            n=n+1;if n>=MAX_GUNS then break end
+        end
+    end
+    return result
+end
+local function account()
+    local current=now();local elapsed=last_clock and math.max(0,current-math.max(last_clock,ready_at)) or 0;last_clock=current
+    if not actor() or not actor():alive() or device():is_paused() or current<ready_at then return end
+    for _,r in pairs(records) do
+        if r.phase=="active" and r.lifetime_seconds>0 then r.remaining_ms=math.max(0,r.remaining_ms-elapsed)
+        elseif r.phase=="arming" or r.phase=="cleanup" then r.stage_ms=math.max(0,r.stage_ms-elapsed) end
+    end
+end
+local function ray(origin,direction,length,mode)
+    local result=rq_result()
+    local hit=level.ray_pick(vec(origin),vec(direction),length,mode,result,actor())
+    return hit and result.range or nil
+end
+local function clear_segment(from,to,mode)
+    local dx,dy,dz=to.x-from.x,to.y-from.y,to.z-from.z;local d=math.sqrt(dx*dx+dy*dy+dz*dz)
+    if d<0.001 then return true end
+    local hit=ray(from,{x=dx/d,y=dy/d,z=dz/d},d+0.1,mode)
+    return not hit or hit>d+0.05
+end
+local function spawn_point()
+    local a=actor();local p=point(a:position());local d=a:direction();local length=math.sqrt(d.x*d.x+d.z*d.z)
+    if length<0.001 then return nil end
+    local dx,dz=d.x/length,d.z/length
+    local seen={}
+    for _,radius in ipairs({3,4}) do for _,degrees in ipairs({0,60,-60,120,-120,180}) do
+        local angle=degrees*math.pi/180
+        local direction={x=dx*math.cos(angle)-dz*math.sin(angle),y=0,z=dx*math.sin(angle)+dz*math.cos(angle)}
+        local vertex=level.vertex_in_direction(a:level_vertex_id(),vec(direction),radius)
+        if int(vertex,0,4294967294) and not seen[vertex] then
+            seen[vertex]=true;local q=point(level.vertex_position(vertex))
+            local distance=math.sqrt((q.x-p.x)^2+(q.z-p.z)^2)
+            if distance>=2.5 and distance<=4.5 and math.abs(q.y-p.y)<=1 then
+                local height=nil;local flat=true
+                for _,offset in ipairs({{0,0},{0.55,0},{-0.55,0},{0,0.55},{0,-0.55}}) do
+                    local start={x=q.x+offset[1],y=q.y+1.2,z=q.z+offset[2]}
+                    local range=ray(start,{x=0,y=-1,z=0},2.4,rq_target.rqtStatic)
+                    local ground=range and start.y-range
+                    if not ground or height and math.abs(ground-height)>0.25 then flat=false;break end
+                    height=height or ground
+                end
+                if flat then
+                    q.y=height+0.02
+                    local center={x=q.x,y=q.y+0.8,z=q.z}
+                    local clear=clear_segment({x=p.x,y=p.y+0.8,z=p.z},center,rq_target.rqtBoth)
+                    for step=0,7 do
+                        local rad=step*math.pi/4
+                        if clear and not clear_segment(center,{x=q.x+math.cos(rad)*0.9,y=center.y,z=q.z+math.sin(rad)*0.9},rq_target.rqtBoth) then clear=false end
+                    end
+                    if clear then return {position=q,level_vertex_id=vertex,game_vertex_id=a:game_vertex_id(),yaw=vec({x=dx,y=0,z=dz}):getH()} end
+                end
+            end
+        end
+    end end
+end
+local function supported()
+    return USE_MARSHAL==true and object_binder~=nil and type(alife_create)=="function" and type(alife)=="function" and
+        type(time_global)=="function" and type(RegisterScriptCallback)=="function" and rq_result~=nil and type(getFS)=="function" and
+        rq_target and rq_target.rqtStatic~=nil and rq_target.rqtBoth~=nil and level and
+        type(level.ray_pick)=="function" and type(level.vertex_in_direction)=="function" and store()~=nil
+end
+local function configured(section,speed)
+    local model=section_model(section)
+    local class=settings(section,"class")
+    if not model or (class~="W_STMGUN" and class~="_S_STMGU") or settings(section,"script_binding")~=MODULE..".bind" or
+        settings(section,"adb_stationary_profile")~="4" or settings(section,"visual")~=model..".ogf" or
+        settings(section,"adb_rotation_speed_dps")~=tostring(speed) or
+        settings(section,"unlimited_ammo")~="true" or settings(section,"lock_exit")~="false" then
+        return false,"stationary_mgun_update_addon_restart_game"
+    end
+    local class=settings(BLAST,"class")
+    if class~="G_RGD5_S" and class~="G_RGD5" then return false,"stationary_mgun_explosion_unsupported" end
+    local model=settings(section,"visual")
+    if not model or not getFS():exist("$game_meshes$",model:gsub("%.ogf$","")..".ogf") then
+        return false,"stationary_mgun_model_missing"
+    end
+    for _,texture in ipairs({"wpn\\wpn_pkm_mounted.dds","wpn\\wpn_pkm_lenta.dds"}) do
+        if not getFS():exist("$game_textures$",texture) then return false,"stationary_mgun_texture_missing" end
+    end
+    if not getFS():exist("$game_config$","models\\weapons\\anomaly_donation_bridge_stationary_mgun.ltx") then
+        return false,"stationary_mgun_userdata_missing"
+    end
+    local ok,holder=pcall(function()
+        if type(actor().detach_vehicle)~="function" then return false end
+        actor():get_attached_vehicle();return true
+    end)
+    if not ok or not holder then return false,"stationary_mgun_holder_api_unavailable" end
+    return true
+end
+-- Invoked AFTER native net_Spawn has constructed the PH shell. A Lua binder's
+-- net_spawn runs too early: native server ammo overwrites its client magazine.
+function net_spawn_after(gun)
+    local expected=gun and section_model(gun:section());if not expected then return false end
+    local holder=gun:get_holder_class();if not holder then return false end
+    holder:SetEnterLocked(true)
+    local ok,why=pcall(function()
+        local model=gun:get_visual_name():lower():gsub("/","\\"):gsub("%.ogf$","")
+        -- Saved sg1 objects may still carry the UNSAFE original visual. Never
+        -- swap a live skeleton/PH state or force-detach it. Use a pre-sg1 save.
+        if model~=expected then error("legacy_model_load_save_before_sg1_gun") end
+        if gun:section()~=SECTION and CWeaponStatMgun==nil then error("native_rotation_speed_api_unavailable") end
+        if CWeaponStatMgun~=nil then
+            local shell=gun:get_physics_shell()
+            if not shell or not shell:get_element_by_bone_name("bone_rotate_x") or
+                not shell:get_element_by_bone_name("bone_rotate_y") then error("native_aim_physics_missing") end
+            local stm=gun:get_stmgun();if not stm then error("native_gun_api_missing") end
+            -- switch2_Fire requires one cartridge EVEN when unlimited_ammo is
+            -- true. Fresh CSE_ALifeStationaryMgun starts with a_elapsed=0.
+            if stm:GetAmmoElapsed()<1 then stm:SetAmmoElapsed(1) end
+            if stm:GetAmmoElapsed()<1 then error("native_ammo_initialization_failed") end
+        end
+    end)
+    if not ok then notice(gun:id(),tostring(why));return false end
+    native_ready[gun:id()]=gun:name()
+    local r=records[gun:id()]
+    holder:SetEnterLocked(r~=nil and r.phase~="active")
+    return true
+end
+local function can_execute(context,params)
+    local common=anomaly_donation_bridge_common
+    local valid,why=common.params_only(params,{lifetime_seconds=true,rotation_speed_dps=true})
+    if not valid then return false,"rejected",why end
+    local lifetime,error_code=common.parse_integer(params.lifetime_seconds,60,0,6000,"stationary_mgun_lifetime_invalid")
+    if not lifetime then return false,"rejected",error_code end
+    local speed,speed_error=common.parse_integer(params.rotation_speed_dps,60,20,120,"stationary_mgun_rotation_speed_invalid")
+    if LEGACY_SPEEDS[speed] then speed=60 end -- already queued commands from older app versions
+    if not speed or not SPEEDS[speed] then return false,"rejected",speed_error or "stationary_mgun_rotation_speed_invalid" end
+    if not supported() then return false,"deferred","stationary_mgun_api_unavailable" end
+    if CWeaponStatMgun==nil then return false,"deferred","stationary_mgun_rotation_speed_api_unavailable" end
+    if pending_load or now()<ready_at then return false,"deferred","stationary_mgun_loading" end
+    if not actor() or not actor():alive() or device():is_paused() then return false,"deferred","actor_unavailable" end
+    if actor():get_current_holder() then return false,"deferred","actor_in_vehicle" end
+    local section=speed_section(speed)
+    local configured_ok,reason=configured(section,speed);if not configured_ok then return false,"deferred",reason end
+    if count()>=MAX_GUNS then return false,"deferred","stationary_mgun_limit_reached" end
+    local point=spawn_point();if not point then return false,"deferred","stationary_mgun_safe_place_unavailable" end
+    context.options={lifetime=lifetime,speed=speed,section=section,point=point};return true
+end
+local function release_owned(r,section)
+    local s=r and server(r.id)
+    if owns(s,r,section,true) then life():release(s,true) end
+end
+local function execute(context)
+    if not context.options then return "rejected","stationary_mgun_options_missing" end
+    -- Revalidate placement against current geometry/actor, not a moving snapshot.
+    local checked={};local ok,status,why=can_execute(checked,{lifetime_seconds=tostring(context.options.lifetime),
+        rotation_speed_dps=tostring(context.options.speed)})
+    if not ok then return status,why end
+    local o=checked.options;local p=o.point
+    local created,s=pcall(alife_create,o.section,vec(p.position),p.level_vertex_id,p.game_vertex_id)
+    if not created or not s then return "uncertain","stationary_mgun_spawn_failed" end
+    local r={id=s.id,name=s:name(),section=o.section,rotation_speed_dps=o.speed,lifetime_seconds=o.lifetime,remaining_ms=o.lifetime*1000,
+        phase="active",stage_ms=0,position=p.position,level_vertex_id=p.level_vertex_id,game_vertex_id=p.game_vertex_id}
+    -- Track identity BEFORE configuring; a partial spawn must not leave a
+    -- second untracked gun to be retried by the donation queue.
+    records[r.id]=r
+    local prepared,error=pcall(function()
+        life():set_switch_online(s.id,false)
+        s.angle=vector():set(0,p.yaw,0)
+        life():set_switch_offline(s.id,true)
+        life():set_switch_online(s.id,true)
+    end)
+    if not prepared then
+        release_owned(r,SECTION);records[r.id]=nil;persist();notice(r.id,tostring(error))
+        return "rejected","stationary_mgun_setup_failed"
+    end
+    last_clock=now();persist()
+    return "executed",o.lifetime==0 and "stationary_mgun_permanent" or "stationary_mgun_seconds_"..o.lifetime
+end
+local function lock_and_vacate(r,gun)
+    local holder=gun:get_holder_class()
+    if not holder then return false end
+    holder:SetEnterLocked(true);holder:SetExitLocked(false)
+    local vehicle=actor():get_attached_vehicle()
+    if owns(vehicle,r,SECTION,false) then
+        if not retry_at[r.id] or now()>=retry_at[r.id] then
+            retry_at[r.id]=now()+1000
+            -- Stock native dismount restores the camera, body, physics and
+            -- weapon input. NEVER teleport/delete the holder under the actor.
+            actor():detach_vehicle(false)
+        end
+        if owns(actor():get_attached_vehicle(),r,SECTION,false) then return false end
+    end
+    -- Also wait for an unknown NPC/mod owner; never release an occupied holder.
+    return not holder:engaged()
+end
+local function warn(r)
+    if r.warned then return end;r.warned=true
+    if news_manager and type(news_manager.send_tip)=="function" then
+        pcall(news_manager.send_tip,actor(),anomaly_donation_bridge_common.game_text_cp1251_lossy(
+            "Пулемёт сейчас рванёт, нужно уходить"),nil,nil,5000)
+    end
+end
+local function process(r)
+    local s=server(r.id);local gun=client(r.id)
+    if owns(gun,r,SECTION,false) and native_ready[r.id]~=r.name and not net_spawn_after(gun) then return end
+    -- GE_DESTROY is asynchronous. Once the gun has gone, the native grenade
+    -- still needs its own explosion/particle lifetime; do not release it early.
+    if r.phase=="cleanup" then
+        if owns(gun,r,SECTION,false) and not lock_and_vacate(r,gun) then return end
+        release_owned(r,SECTION)
+        if r.stage_ms<=0 then release_owned(r.blast,BLAST);records[r.id]=nil end
+        return
+    end
+    if not owns(s,r,SECTION,true) then
+        release_owned(r.blast,BLAST);records[r.id]=nil;return
+    end
+    if r.phase=="active" then
+        if r.lifetime_seconds==0 or r.remaining_ms>0 then return end
+        r.phase="exit"
+    end
+    if not owns(gun,r,SECTION,false) then
+        -- Offline simulation cannot play particles or contain an attached
+        -- actor. Remove the expired object THERE, never spawn a blast on the
+        -- actor's new level or force a far-away gun online.
+        if s.online==false then release_owned(r.blast,BLAST);release_owned(r,SECTION);records[r.id]=nil end
+        return
+    end
+    if not lock_and_vacate(r,gun) then
+        if r.phase~="cleanup" then r.phase="exit";r.stage_ms=0 end
+        return
+    end
+    if r.phase=="exit" then r.phase="arming";r.stage_ms=5000;warn(r);return end
+    if r.phase=="arming" then
+        if r.stage_ms>0 then return end
+        r.position=point(gun:position())
+        if not r.blast or not owns(server(r.blast.id),r.blast,BLAST,true) then
+            local b=alife_create(BLAST,vec(r.position),r.level_vertex_id,r.game_vertex_id)
+            if not b then error("stationary_mgun_blast_spawn_failed") end
+            r.blast=identity(b)
+            life():set_switch_offline(b.id,false);life():set_switch_online(b.id,true)
+        end
+        r.phase="blast";return
+    end
+    if r.phase=="blast" then
+        local b=client(r.blast and r.blast.id)
+        if not owns(b,r.blast,BLAST,false) then return end
+        if b:parent() then error("stationary_mgun_blast_has_parent") end
+        -- At-most-once event and an unoccupied, locked gun. No guessed
+        -- explosive method on W_STMGUN: it is not a CExplosive.
+        r.blast_sent=true;r.phase="cleanup";r.stage_ms=15000;persist()
+        b:explode(0)
+        release_owned(r,SECTION)
+    end
+end
+local function update()
+    if pickup_veto then pickup_veto.ret_value=true;pickup_veto=nil end
+    if pending_load then
+        records=read_saved();pending_load=false;last_clock=now();ready_at=now()+1000
+        retry_at={};diagnostics={};return
+    end
+    account()
+    if not actor() or not actor():alive() or device():is_paused() or now()<ready_at then return end
+    for _,r in pairs(records) do
+        local ok,why=pcall(process,r)
+        if not ok then notice(r.id,tostring(why)) end
+    end
+    persist()
+end
+local function on_load()
+    -- Drop FUTURE Lua state. Do not delete any world objects here; native
+    -- loading restores both the gun and its actor holder reference itself.
+    records={};pending_load=true;last_clock=nil;pickup_veto=nil;retry_at={};diagnostics={};native_ready={}
+end
+class "adb_stationary_mgun_binder" (object_binder)
+function adb_stationary_mgun_binder:__init(obj) super(obj) end
+function adb_stationary_mgun_binder:net_spawn(s)
+    native_ready[self.object:id()]=nil
+    return object_binder.net_spawn(self,s)
+end
+function adb_stationary_mgun_binder:net_destroy()
+    native_ready[self.object:id()]=nil
+    return object_binder.net_destroy(self)
+end
+function adb_stationary_mgun_binder:net_save_relevant() return true end
+function bind(obj) obj:bind_object(adb_stationary_mgun_binder(obj)) end
+function on_game_start()
+    if registered then return end;registered=true
+    anomaly_donation_bridge_registry.register(HANDLER,{is_supported=supported,
+        can_execute=can_execute,execute=execute,update=update,on_game_load=on_load,
+        on_level_changing=function() account();persist();last_clock=nil end})
+    RegisterScriptCallback("actor_on_update",update)
+    RegisterScriptCallback("save_state",function(data) account();if not pending_load then persist(data) end end)
+    RegisterScriptCallback("actor_on_item_before_pickup",function(item,flags)
+        if item and item:section()==BLAST and type(flags)=="table" then
+            for _,r in pairs(records) do
+                if r.blast and owns(item,r.blast,BLAST,false) then flags.ret_value=false;pickup_veto=flags;return end
+            end
+        end
+    end)
+end

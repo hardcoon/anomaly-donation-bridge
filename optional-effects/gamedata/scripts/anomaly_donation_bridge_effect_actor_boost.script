@@ -1,0 +1,494 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "actor_boost",
+  "displayName": "Временно изменить параметры героя",
+  "description": "На указанное время увеличивает или уменьшает высоту прыжка, скорость бега и переносимый вес, затем возвращает прежние значения. Эффект хранится только в памяти текущего процесса игры: переживает F9 и переходы, но не возобновляется после выхода или вылета. Конфиги не меняются. Рост скорости ограничен безопасным пределом.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"jump_percent","displayName":"Высота прыжка, %","kind":"Integer","minimum":-90,"maximum":300,"defaultValue":"50"},
+    {"key":"speed_percent","displayName":"Скорость перемещения, %","kind":"Integer","minimum":-90,"maximum":50,"defaultValue":"50"},
+    {"key":"carry_weight_kg","displayName":"Переносимый вес, кг","kind":"Integer","minimum":-500,"maximum":500,"defaultValue":"50"},
+    {"key":"duration_seconds","displayName":"Длительность, сек.","kind":"Integer","minimum":5,"maximum":3600,"defaultValue":"60"}
+  ],
+  "parameters": {"jump_percent":"50","speed_percent":"50","carry_weight_kg":"50","duration_seconds":"60"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_actor_boost_v1"
+local SAVE_KEY = "adb_actor_boost_v1"
+local SESSION_ENV = "ADB_ACTOR_BOOST_SESSION_V2"
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32
+if ffi_ok then
+	pcall(ffi.cdef, "unsigned long __stdcall GetCurrentProcessId(void);")
+	pcall(ffi.cdef, [[
+		unsigned long __stdcall GetEnvironmentVariableA(const char* name, char* buffer, unsigned long size);
+		int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+		unsigned long __stdcall GetCurrentProcessId(void);
+	]])
+	local ok, library = pcall(ffi.load, "kernel32")
+	if ok then kernel32 = library end
+end
+local function process_id()
+	if not kernel32 then return nil end
+	local ok, id = pcall(function() return kernel32.GetCurrentProcessId() end)
+	return ok and tonumber(id) or nil
+end
+local function session_read()
+	if not kernel32 then return nil end
+	local ok, size = pcall(kernel32.GetEnvironmentVariableA, SESSION_ENV, nil, 0)
+	size = ok and tonumber(size) or 0
+	if size <= 1 or size > 4096 then return nil end
+	local buffer = ffi.new("char[?]", size)
+	local read_ok, length = pcall(kernel32.GetEnvironmentVariableA, SESSION_ENV, buffer, size)
+	length = read_ok and tonumber(length) or 0
+	if length <= 0 or length >= size then return nil end
+	return ffi.string(buffer, length)
+end
+local function session_write(value)
+	if not kernel32 then return false end
+	local ok, result = pcall(kernel32.SetEnvironmentVariableA, SESSION_ENV, value)
+	return ok and tonumber(result) ~= 0 and session_read() == value
+end
+-- Actor_Movement multiplies walk_accel, run_coef and sprint_koef and passes
+-- the result to physics as maximum velocity divided by 10. Stock Anomaly
+-- starts collision damage at 15 m/s, so keep a margin below that threshold.
+local SAFE_SPRINT_VELOCITY = 13
+local FALLBACK_WALK_ACCEL = 11.5
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false, expires_at = 0, baseline = nil, target = nil,
+		load_pending = false, next_persist_at = 0
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.load_pending) ~= "boolean" then state.load_pending = false end
+if type(state.next_persist_at) ~= "number" then state.next_persist_at = 0 end
+
+local METHOD_NAMES = {
+	"get_actor_max_weight", "set_actor_max_weight",
+	"get_actor_max_walk_weight", "set_actor_max_walk_weight",
+	"get_actor_jump_speed", "set_actor_jump_speed",
+	"get_actor_sprint_koef", "set_actor_sprint_koef",
+	"get_actor_run_coef", "set_actor_run_coef"
+}
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function boost_supported(context)
+	local actor = actor_for_probe(context)
+	if actor == nil then return false, "actor_boost_api_unsupported" end
+	if not process_id() then
+		return false, "actor_boost_session_unavailable"
+	end
+	local id_ok, id_method = pcall(function() return actor.id end)
+	if not id_ok or type(id_method) ~= "function" then
+		return false, "actor_boost_persistence_unavailable"
+	end
+	for _, method_name in ipairs(METHOD_NAMES) do
+		local ok, method = pcall(function() return actor[method_name] end)
+		if not ok or type(method) ~= "function" then
+			return false, "actor_boost_api_unsupported"
+		end
+	end
+	return true
+end
+
+local function read_values(actor)
+	local ok, values = pcall(function()
+		return {
+			max_weight = actor:get_actor_max_weight(),
+			max_walk_weight = actor:get_actor_max_walk_weight(),
+			jump_speed = actor:get_actor_jump_speed(),
+			sprint_koef = actor:get_actor_sprint_koef(),
+			run_coef = actor:get_actor_run_coef()
+		}
+	end)
+	if not ok or type(values) ~= "table" then return nil end
+	for _, value in pairs(values) do
+		value = tonumber(value)
+		if value == nil or value ~= value or value <= 0 or value >= 1e8 then return nil end
+	end
+	return values
+end
+
+local function copy_values(values)
+	return {
+		max_weight = tonumber(values.max_weight),
+		max_walk_weight = tonumber(values.max_walk_weight),
+		jump_speed = tonumber(values.jump_speed),
+		sprint_koef = tonumber(values.sprint_koef),
+		run_coef = tonumber(values.run_coef)
+	}
+end
+
+local function actor_walk_accel(actor)
+	local ok, value = pcall(function()
+		if type(actor.get_actor_walk_accel) ~= "function" then return nil end
+		return actor:get_actor_walk_accel()
+	end)
+	value = tonumber(value)
+	if not ok or value == nil or value ~= value or value <= 0 then
+		return FALLBACK_WALK_ACCEL
+	end
+	return value
+end
+
+local function clamp_speed_values(actor, values)
+	local result = copy_values(values)
+	local product = result.run_coef * result.sprint_koef
+	local maximum_product = SAFE_SPRINT_VELOCITY * 10 / actor_walk_accel(actor)
+	if product <= maximum_product then return result, false end
+	local factor = math.sqrt(maximum_product / product)
+	result.run_coef = result.run_coef * factor
+	result.sprint_koef = result.sprint_koef * factor
+	return result, true
+end
+
+local function write_values(actor, values)
+	local ok = pcall(function()
+		actor:set_actor_max_weight(values.max_weight)
+		actor:set_actor_max_walk_weight(values.max_walk_weight)
+		actor:set_actor_jump_speed(values.jump_speed)
+		actor:set_actor_sprint_koef(values.sprint_koef)
+		actor:set_actor_run_coef(values.run_coef)
+	end)
+	if not ok then return false end
+	local actual = read_values(actor)
+	if not actual then return false end
+	for key, value in pairs(values) do
+		if math.abs(actual[key] - value) > 0.0001 * math.max(1, math.abs(value)) then return false end
+	end
+	return true
+end
+
+local function pda_tip(actor, text)
+	if actor == nil or news_manager == nil or
+		type(news_manager.send_tip) ~= "function" then return false end
+	text = anomaly_donation_bridge_common.game_text_cp1251(text)
+	if text == nil then return false end
+	local ok, sent = pcall(news_manager.send_tip, actor, text, nil, nil, 6000)
+	return ok and sent ~= false
+end
+
+local function values_valid(values)
+	if type(values) ~= "table" then return false end
+	for _, key in ipairs({ "max_weight", "max_walk_weight", "jump_speed",
+		"sprint_koef", "run_coef" }) do
+		local value = tonumber(values[key])
+		if value == nil or value ~= value or value <= 0 or value >= 1e8 then return false end
+	end
+	return true
+end
+
+local function actor_id(actor)
+	if actor == nil then return nil end
+	local ok, id = pcall(function() return actor:id() end)
+	id = tonumber(id)
+	return ok and id and id >= 0 and id or nil
+end
+
+local function now_ms(value)
+	return tonumber(value) or (time_global and time_global() or 0)
+end
+
+local function clear_saved(actor)
+	return session_write(nil)
+end
+
+local VALUE_KEYS = {"max_weight", "max_walk_weight", "jump_speed", "sprint_koef", "run_coef"}
+local function encode_values(values)
+	local result = {}
+	for _, key in ipairs(VALUE_KEYS) do result[#result+1] = string.format("%.17g", values[key]) end
+	return table.concat(result, ",")
+end
+local function decode_values(text)
+	local result, count = {}, 0
+	for value in text:gmatch("[^,]+") do
+		count = count+1
+		if not VALUE_KEYS[count] then return nil end
+		result[VALUE_KEYS[count]] = tonumber(value)
+	end
+	return count == 5 and values_valid(result) and result or nil
+end
+local function persist_state(actor, now)
+	local id = process_id()
+	if id == nil then return false end
+	if not state.active or not values_valid(state.baseline) or
+		not values_valid(state.target) then
+		return clear_saved(actor)
+	end
+	-- Windows process environment, NOT USER.ltx, registry or a game save.
+	-- PID prevents a child/restarted process inheriting a parent's live lease.
+	return session_write("2|" .. tostring(id) .. "|" .. tostring(math.floor(state.expires_at)) ..
+		"|" .. encode_values(state.baseline) .. "|" .. encode_values(state.target))
+end
+
+local function load_saved(actor)
+	local text = session_read()
+	if not text then return nil end
+	local id, expires, baseline, target = text:match("^2|(%d+)|(%d+)|([^|]+)|([^|]+)$")
+	id, expires = tonumber(id), tonumber(expires)
+	baseline = baseline and decode_values(baseline)
+	target = target and decode_values(target)
+	if id ~= process_id() or not expires or expires > now_ms()+3600000 or not baseline or not target then
+		session_write(nil);return nil
+	end
+	target = clamp_speed_values(actor, target)
+	return {baseline=baseline,target=target,expires_at=expires}
+end
+
+local function clear_state()
+	state.active = false
+	state.expires_at = 0
+	state.baseline = nil
+	state.target = nil
+	state.load_pending = false
+	state.next_persist_at = 0
+end
+
+local function restore(actor)
+	if not state.active then return true end
+	if actor == nil or state.baseline == nil then return false end
+	if not write_values(actor, state.baseline) then return false end
+	if not clear_saved(actor) then return false end
+	clear_state()
+	return true
+end
+
+local function configured_defaults(actor)
+	if type(system_ini)~="function" then return nil end
+	local ok,ini=pcall(system_ini)
+	if not ok or ini==nil then return nil end
+	local section_ok,section=pcall(function() return actor:section() end)
+	if not section_ok or type(section)~="string" or section=="" then return nil end
+	local function has(s,key)
+		local checked,exists=pcall(function() return ini:line_exist(s,key) end)
+		return checked and exists==true
+	end
+	local function number(s,key)
+		-- Missing INI keys may assert in native code before pcall can catch it.
+		if not has(s,key) then return nil end
+		local read,value=pcall(function() return ini:r_float(s,key) end)
+		value=read and tonumber(value) or nil
+		return value and value==value and value>0 and value<1e8 and value or nil
+	end
+	local condition=section
+	if has(section,"condition_sect") then
+		local read,value=pcall(function() return ini:r_string(section,"condition_sect") end)
+		if not read or type(value)~="string" or value=="" then return nil end
+		condition=value
+	end
+	-- Match Inventory::Load / InventoryOwner::Load and ActorCondition::Load.
+	local weight
+	if has(section,"inv_max_weight") then weight=number(section,"inv_max_weight")
+	else weight=number("inventory","max_weight") end
+	local values={max_weight=weight,max_walk_weight=number(condition,"max_walk_weight"),
+		jump_speed=number(section,"jump_speed"),sprint_koef=number(section,"sprint_koef"),
+		run_coef=number(section,"run_coef")}
+	return values_valid(values) and values or nil
+end
+
+local function clear_parameter_journal(actor,key)
+	local id=actor_id(actor)
+	if id==nil or type(se_load_var)~="function" or type(se_save_var)~="function" then return false end
+	local ok,result=pcall(se_save_var,id,nil,key,nil)
+	if not ok or result==false then return false end
+	local checked,value=pcall(se_load_var,id,nil,key)
+	return checked and value==nil
+end
+
+local function reset_can(context,params)
+	local valid,reason=anomaly_donation_bridge_common.params_only(params,{reset_to_defaults=true})
+	if not valid or params.reset_to_defaults~="true" then return false,"rejected",reason or "actor_boost_reset_invalid" end
+	if context.actor==nil then return false,"deferred","actor_unavailable" end
+	local supported,why=boost_supported(context)
+	if not supported then return false,"rejected",why end
+	if type(se_load_var)~="function" or type(se_save_var)~="function" then
+		return false,"rejected","actor_boost_reset_journal_unavailable"
+	end
+	local defaults=configured_defaults(context.actor)
+	if not defaults then return false,"rejected","actor_boost_reset_defaults_unavailable" end
+	context.options={reset=true,defaults=defaults,before=read_values(context.actor)}
+	return true
+end
+
+local function reset_execute(context)
+	local actor=context.actor
+	-- Stop the process lease and remove only the two ADB parameter journals.
+	-- Old saves may contain the former serialized temporary bonus or a permanent
+	-- ADB target; neither may re-apply over an explicit reset to game defaults.
+	if not clear_saved(actor) then return "rejected","actor_boost_reset_session_clear_failed" end
+	clear_state()
+	if not clear_parameter_journal(actor,SAVE_KEY) or
+		not clear_parameter_journal(actor,"adb_actor_parameters_v1") then
+		return "uncertain","actor_boost_reset_journal_clear_failed"
+	end
+	local permanent=rawget(_G,"__anomaly_donation_bridge_actor_parameters_v1")
+	if type(permanent)=="table" then permanent.target=nil;permanent.load_pending=false end
+	if not write_values(actor,context.options.defaults) then
+		if context.options.before then write_values(actor,context.options.before) end
+		return "uncertain","actor_boost_reset_apply_failed"
+	end
+	pda_tip(actor,"Параметры героя сброшены к базовым значениям.")
+	return "executed","actor_boost_reset_defaults"
+end
+
+local function boost_can(context, params)
+	if params.reset_to_defaults~=nil then return reset_can(context,params) end
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		jump_percent = true, speed_percent = true,
+		carry_weight_kg = true, duration_seconds = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local jump, jump_error = anomaly_donation_bridge_common.parse_integer(
+		params.jump_percent, 50, -90, 300, "actor_boost_jump_invalid")
+	if jump == nil then return false, "rejected", jump_error end
+	local speed, speed_error = anomaly_donation_bridge_common.parse_integer(
+		params.speed_percent, 50, -90, 300, "actor_boost_speed_invalid")
+	if speed == nil then return false, "rejected", speed_error end
+	local weight, weight_error = anomaly_donation_bridge_common.parse_integer(
+		params.carry_weight_kg, 50, -500, 500, "actor_boost_weight_invalid")
+	if weight == nil then return false, "rejected", weight_error end
+	local duration, duration_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 60, 5, 3600, "actor_boost_duration_invalid")
+	if duration == nil then return false, "rejected", duration_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if state.load_pending then return false, "deferred", "actor_boost_load_pending" end
+	local supported, reason = boost_supported(context)
+	if not supported then return false, "rejected", reason end
+	local current = state.active and values_valid(state.baseline) and copy_values(state.baseline) or read_values(context.actor)
+	if current == nil then return false, "deferred", "actor_boost_state_unavailable" end
+	local before, baseline_capped = clamp_speed_values(context.actor, current)
+	local target = {
+		max_weight = before.max_weight + weight,
+		max_walk_weight = before.max_walk_weight + weight,
+		jump_speed = before.jump_speed * (1 + jump / 100),
+		sprint_koef = before.sprint_koef * (1 + speed / 100),
+		run_coef = before.run_coef * (1 + speed / 100)
+	}
+	local speed_capped
+	target, speed_capped = clamp_speed_values(context.actor, target)
+	if not values_valid(target) then
+		return false, "rejected", "actor_boost_target_invalid"
+	end
+	context.options = {
+		jump = jump, speed = speed, weight = weight,
+		duration = duration, before = before, target = target,
+		speed_capped = baseline_capped or speed_capped
+	}
+	return true
+end
+
+local function boost_execute(context)
+	if context.options.reset then return reset_execute(context) end
+	local actor = context.actor
+	if state.active and not restore(actor) then
+		return "uncertain", "actor_boost_previous_restore_failed"
+	end
+	local baseline = context.options.before
+	local target = context.options.target
+	state.active = true
+	state.baseline = baseline
+	state.target = target
+	local now = now_ms(context.now)
+	state.expires_at = now + context.options.duration * 1000
+	state.next_persist_at = now + 1000
+	-- Publish recovery data in process memory BEFORE touching any runtime field.
+	-- Failure must never start an untracked temporary modification.
+	if not persist_state(actor, now) then
+		clear_state();return "rejected", "actor_boost_session_store_failed"
+	end
+	if not write_values(actor, target) then
+		state.expires_at = 0
+		persist_state(actor, now)
+		restore(actor)
+		return "uncertain", "actor_boost_apply_failed"
+	end
+	local cap_notice = context.options.speed_capped and
+		" Скорость ограничена безопасным пределом." or ""
+	pda_tip(actor, "Параметры героя временно изменены на " ..
+		tostring(context.options.duration) .. " сек." .. cap_notice)
+	return "executed", "actor_boost_seconds_" .. tostring(context.options.duration) ..
+		"_jump_" .. tostring(context.options.jump) ..
+		"_speed_" .. tostring(context.options.speed) ..
+		"_weight_" .. tostring(context.options.weight) ..
+		(context.options.speed_capped and "_speed_capped" or "")
+end
+
+local function migrate_legacy(actor)
+	-- Old releases explicitly saved and re-applied the bonus. Remove only
+	-- their own journal; permanent parameters and other saved data are untouched.
+	local id = actor_id(actor)
+	if not id or type(se_load_var)~="function" or type(se_save_var)~="function" then return true end
+	local ok, legacy = pcall(se_load_var, id, nil, SAVE_KEY)
+	if not ok then return false end
+	if legacy == nil then return true end
+	if not state.active and type(legacy)=="table" and tonumber(legacy.version)==1 and
+		legacy.active==true and values_valid(legacy.baseline) then
+		if not write_values(actor, legacy.baseline) then return false end
+	end
+	local cleared, result = pcall(se_save_var, id, nil, SAVE_KEY, nil)
+	return cleared and result ~= false
+end
+
+local function boost_update(now)
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	if state.load_pending then
+		state.load_pending = false
+		local current = now_ms(now)
+		local saved = load_saved(actor)
+		if saved ~= nil then
+			state.active = true
+			state.baseline = saved.baseline
+			state.target = saved.target
+			state.expires_at = saved.expires_at
+			state.next_persist_at = current + 1000
+		else clear_state() end
+		if not migrate_legacy(actor) then state.load_pending=true;return end
+	end
+	if not state.active then return end
+	local current = now_ms(now)
+	if current >= tonumber(state.expires_at or 0) then
+		restore(actor)
+		return
+	end
+	-- Location transitions may recreate or reset the actor's runtime values.
+	-- Keep the temporary effect active until its timer expires.
+	if state.target ~= nil and not write_values(actor, state.target) then
+		state.expires_at = 0;persist_state(actor, current);restore(actor);return
+	end
+	if current >= tonumber(state.next_persist_at or 0) then
+		persist_state(actor, current)
+		state.next_persist_at = current + 1000
+	end
+end
+
+local function boost_load()
+	state.load_pending = true
+	boost_update(now_ms())
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"actor_boost", {
+			reset_to_defaults_supported = true,
+			can_execute = boost_can,
+			execute = boost_execute,
+			update = boost_update,
+			on_game_load = boost_load,
+			is_supported = boost_supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] actor_boost registration failed: %s", tostring(reason))
+	end
+end

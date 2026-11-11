@@ -1,0 +1,647 @@
+local C = {
+	ADDON_VERSION = "1.0.181", PROTOCOL_VERSION = "1", UPDATE_MS = 100,
+	RETRY_MS = 1000, LOAD_GRACE_MS = 1500, MAX_EVENTS = 8,
+	RECENT_LIMIT = 256, CATALOG_RECORDS_PER_UPDATE = 32
+}
+local STATE_KEY = "__anomaly_donation_bridge_runtime_v1"
+local state = rawget(_G, STATE_KEY)
+
+if type(state) ~= "table" then
+	state = {
+		welcomed = false, app_version = "", next_update_ms = 0, next_attach_ms = 0,
+		loading_until_ms = 0, last_status = "", last_reason = "", recent = {},
+		recent_order = {}, catalog_transfer = nil, catalog_error = "",
+		transitioning = false, effect_batches = {}, hud_messages = {},
+		hud_message_until_ms = 0, save_sequence = 0
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.transitioning) ~= "boolean" then state.transitioning = false end
+if type(state.catalog_error) ~= "string" then state.catalog_error = "" end
+if type(state.effect_batches) ~= "table" then state.effect_batches = {} end
+if type(state.hud_messages) ~= "table" then state.hud_messages = {} end
+if type(state.hud_message_until_ms) ~= "number" then state.hud_message_until_ms = 0 end
+if type(state.save_sequence) ~= "number" then state.save_sequence = 0 end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+local function reset_session(disconnect_pipe)
+	if disconnect_pipe then anomaly_donation_bridge_transport.disconnect() end
+	state.welcomed, state.app_version = false, ""
+	state.last_status, state.last_reason, state.catalog_transfer = "", "", nil
+end
+
+local function send(fields)
+	local sent, error_code = anomaly_donation_bridge_transport.send(fields)
+	if not sent then reset_session(true) end
+	return sent, error_code
+end
+
+local function try_attach(now)
+	if anomaly_donation_bridge_transport.is_connected() then return true end
+	if now < (state.next_attach_ms or 0) then return false end
+	state.next_attach_ms = now + C.RETRY_MS
+	local connected = anomaly_donation_bridge_transport.connect()
+	if not connected then return false end
+	local sent = send({ "HELLO", C.PROTOCOL_VERSION, C.ADDON_VERSION,
+		tostring(anomaly_donation_bridge_transport.process_id()) })
+	if not sent then anomaly_donation_bridge_transport.disconnect() return false end
+	return true
+end
+
+local function window_shown(window)
+	if window == nil or type(window.IsShown) ~= "function" then return false end
+	local ok, shown = pcall(function() return window:IsShown() end)
+	return ok and shown == true
+end
+
+local function menu_visible()
+	local actor_menu = rawget(_G, "ActorMenu")
+	if actor_menu and type(actor_menu.get_actor_menu) == "function" then
+		local ok, menu = pcall(actor_menu.get_actor_menu)
+		if ok and window_shown(menu) then return true end
+	end
+	local main_menu = rawget(_G, "main_menu")
+	if main_menu and type(main_menu.get_main_menu) == "function" then
+		local ok, menu = pcall(main_menu.get_main_menu)
+		if ok and window_shown(menu) then return true end
+	end
+	return false
+end
+
+local function cutscene_active()
+	if db == nil or type(db.storage) ~= "table" then return false end
+	for _, storage in pairs(db.storage) do
+		if type(storage) == "table" and storage.active_scheme == "sr_cutscene" then return true end
+	end
+	return false
+end
+
+local function readiness(now)
+	if state.transitioning then return false, "level_changing" end
+	if now < (state.loading_until_ms or 0) then return false, "game_loading" end
+	if level == nil or type(level.present) ~= "function" or not level.present() then
+		return false, "level_unavailable"
+	end
+	if db == nil or db.actor == nil then return false, "actor_unavailable" end
+	local actor = db.actor
+	local alive_ok, alive = pcall(function() return actor:alive() end)
+	if not alive_ok or not alive then return false, "actor_dead" end
+	local car_ok, in_car = pcall(function() return actor:IsInCar() end)
+	local btr
+	if car_ok and in_car then
+		local companion=anomaly_donation_bridge_btr_ai
+		btr=companion and companion.passenger_object()
+		if not btr then return false, "actor_in_vehicle" end
+	end
+	local talk_ok, talking = pcall(function() return actor:is_talking() end)
+	if talk_ok and talking then return false, "actor_in_dialog" end
+	local sleep_ok, sleeping = pcall(function()
+		return actor:has_info("actor_is_sleeping") or actor:has_info("sleep_active")
+	end)
+	if sleep_ok and sleeping then return false, "actor_sleeping" end
+	if cutscene_active() then return false, "actor_in_cutscene" end
+	if anomaly_donation_bridge_registry and type(anomaly_donation_bridge_registry.busy_reason)=="function" then
+		local busy=anomaly_donation_bridge_registry.busy_reason()
+		if busy then return false,busy end
+	end
+	if menu_visible() then return false, "game_menu_open" end
+	local device_ok, frame_delta = pcall(function() return device().f_time_delta end)
+	if device_ok and tonumber(frame_delta) ~= nil and tonumber(frame_delta) <= 0 then
+		return false, "game_paused"
+	end
+	return true, btr and "actor_in_btr" or "ok", actor
+end
+
+local function profile_text(value, fallback, maximum_bytes)
+	local ok, normalized = pcall(function()
+		return anomaly_donation_bridge_common.game_text_utf8(value)
+	end)
+	value = ok and normalized or nil
+	if value == nil then value = tostring(fallback or "") end
+	value = value:gsub("[%z\1-\31\127]", " ")
+	value = value:gsub("^%s*(.-)%s*$", "%1")
+	maximum_bytes = maximum_bytes or 128
+	if #value > maximum_bytes then
+		value = value:sub(1, maximum_bytes)
+		while value ~= "" and not anomaly_donation_bridge_common.is_valid_utf8(value) do
+			value = value:sub(1, -2)
+		end
+	end
+	return value
+end
+
+function detect_engine_profile()
+	local game_version = profile_text(rawget(_G, "GAME_VERSION"), "unknown", 64)
+	local modded_version = rawget(_G, "MODDED_EXES_VERSION")
+	local version_getter = rawget(_G, "get_modded_exes_version")
+	if type(version_getter) == "function" then
+		local ok, value = pcall(version_getter)
+		if ok and value ~= nil and tostring(value) ~= "" then modded_version = value end
+	end
+
+	local modded_name = rawget(_G, "MODDED_EXES_NAME")
+	local name_getter = rawget(_G, "get_modded_exes_name")
+	if type(name_getter) == "function" then
+		local ok, value = pcall(name_getter)
+		if ok and value ~= nil and tostring(value) ~= "" then modded_name = value end
+	end
+
+	local name = profile_text(modded_name, "", 96)
+	local version = profile_text(modded_version, "", 64)
+	if name ~= "" or version ~= "" then
+		local label = game_version .. "+" .. (name ~= "" and name or "Modded Exes")
+		if version ~= "" then label = label .. "@" .. version end
+		label = profile_text(label, "unknown", 256)
+		local normalized = name:upper()
+		if normalized == "MODDED EXES MT-TEST" then
+			return "xray_monolith_mt_test", label
+		end
+		if normalized == "MODDED EXES" then
+			return "xray_monolith_standard", label
+		end
+		-- Old/custom builds expose only an integer date.  Absence of the official
+		-- name API cannot distinguish Standard from MT-TEST, so never guess.
+		return "unknown", label
+	end
+	if game_version:find("1.5.3", 1, true) then
+		return "anomaly_1_5_3_vanilla", game_version
+	end
+	return "unknown", game_version
+end
+
+local function dynamic_catalog_capable()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+local function capability_ids(supported)
+	local result = { "named_pipe", "command_deduplication", "correlated_ping", "safe_zone_v1" }
+	if type(anomaly_donation_bridge_registry.get)=="function" then
+		local boost=anomaly_donation_bridge_registry.get("actor_boost")
+		if boost and boost.reset_to_defaults_supported==true then result[#result+1]="actor_boost_reset_v1" end
+	end
+	if anomaly_donation_bridge_voting and type(anomaly_donation_bridge_voting.supported)=="function" and
+		anomaly_donation_bridge_voting.supported() then result[#result+1]="voting_game_ui_v1" end
+	if anomaly_donation_bridge_voting and type(anomaly_donation_bridge_voting.hud_supported)=="function" and
+		anomaly_donation_bridge_voting.hud_supported() then result[#result+1]="voting_hud_v1" end
+	if dynamic_catalog_capable() then
+		result[#result + 1] = "dynamic_catalog"
+		result[#result + 1] = "catalog_revision"
+		result[#result + 1] = "transactional_catalog"
+		result[#result + 1] = "catalog_sha256"
+		result[#result + 1] = "catalog_identity"
+	end
+	if supported.change_needs then result[#result + 1] = "needs.hunger" end
+	if supported.sleep_hours then result[#result + 1] = "stock_sleep" end
+	if supported.trigger_emission then result[#result + 1] = "stock_surge" end
+	if supported.spawn_random_hostile_squad or supported.spawn_random_mutant_pack then
+		result[#result + 1] = "dynamic_squads"
+	end
+	return result
+end
+
+local function send_capabilities()
+	local profile, engine_version = detect_engine_profile()
+	-- The handler list tells the launcher which commands this addon understands.
+	-- Do not use an eager API probe to hide a whole action: several stock X-Ray
+	-- APIs are only inspectable in the real command context.  Spawn/inventory
+	-- built-ins validate their concrete prerequisites in can_execute/execute;
+	-- other built-ins and all extension probes stay mandatory.  The probed set
+	-- below is used only for aggregate capability hints.
+	local registered_ids = anomaly_donation_bridge_registry.ids()
+	local probed_ids = anomaly_donation_bridge_registry.supported_ids()
+	local probed = {}
+	for _, action_id in ipairs(probed_ids) do probed[action_id] = true end
+	return send({ "CAPABILITIES", profile, engine_version,
+		table.concat(capability_ids(probed), ";"),
+		table.concat(registered_ids, ";") })
+end
+
+local function publish_status(status, reason, force)
+	if not state.welcomed then return true end
+	if force or status ~= state.last_status or reason ~= state.last_reason then
+		if send({ "STATUS", status, reason }) then
+			state.last_status, state.last_reason = status, reason
+			return true
+		end
+		return false
+	end
+	return true
+end
+
+local function send_status(now, force)
+	if not state.welcomed then return true end
+	local ready, reason = readiness(now)
+	if ready and reason=="ok" and state.catalog_error ~= "" then reason = state.catalog_error end
+	return publish_status(ready and "ready" or "waiting", reason, force)
+end
+
+local function remember(command_id, status, reason)
+	if state.recent[command_id] == nil then
+		state.recent_order[#state.recent_order + 1] = command_id
+	end
+	state.recent[command_id] = { status = status, reason = reason }
+	while #state.recent_order > C.RECENT_LIMIT do
+		local expired = table.remove(state.recent_order, 1)
+		state.recent[expired] = nil
+	end
+end
+
+local function send_result(command_id, status, reason, should_remember)
+	command_id = tostring(command_id or "invalid")
+	reason = tostring(reason or "unspecified")
+	if should_remember then remember(command_id, status, reason) end
+	return send({ "RESULT", command_id, status, reason })
+end
+
+local function log_failure(stage, detail)
+	if type(printf) ~= "function" then return end
+	pcall(printf, "[ADB] %s failed: %s", tostring(stage or "unknown"),
+		tostring(detail or "unknown"))
+end
+
+local function queue_hud_message(command)
+	if tostring(command.donor_name or "") == "" or
+		tostring(command.action_name or "") == "" then return end
+	local utf8_text = anomaly_donation_bridge_common.truncate_utf8(
+		tostring(command.donor_name) .. ": " .. tostring(command.action_name), 768)
+	local ok, game_text = pcall(function()
+		return anomaly_donation_bridge_common.game_text_cp1251(utf8_text)
+	end)
+	if not ok or game_text == nil then
+		game_text = "Donation - " .. tostring(command.action_id or "effect")
+	end
+	state.hud_messages[#state.hud_messages + 1] = game_text
+	while #state.hud_messages > 256 do table.remove(state.hud_messages, 1) end
+end
+
+local function send_pda_effect_message(command, actor)
+	if actor == nil or tostring(command.donor_name or "") == "" or
+		tostring(command.action_name or "") == "" then return false end
+	local manager = rawget(_G, "news_manager")
+	if type(manager) ~= "table" or type(manager.send_tip) ~= "function" then
+		log_failure("PDA message", "news_manager_unavailable")
+		return false
+	end
+	local donor_utf8 = anomaly_donation_bridge_common.truncate_utf8(
+		tostring(command.donor_name), 384)
+	local action_utf8 = anomaly_donation_bridge_common.truncate_utf8(
+		tostring(command.action_name), 640)
+	local ok, donor, action = pcall(function()
+		return anomaly_donation_bridge_common.game_text_cp1251(donor_utf8),
+			anomaly_donation_bridge_common.game_text_cp1251(action_utf8)
+	end)
+	if not ok or donor == nil or action == nil then
+		donor, action = "Donation", tostring(command.action_id or "effect")
+	end
+	local text = "%c[255,238,153,26]" .. donor .. "%c[default]: " .. action
+	local sent, reason = pcall(manager.send_tip, actor, text, nil, nil, 6000)
+	if not sent then log_failure("PDA message", reason) end
+	return sent
+end
+
+local function update_hud_messages(now)
+	if #state.hud_messages == 0 or now < state.hud_message_until_ms then return end
+	local menu = rawget(_G, "actor_menu")
+	if type(menu) ~= "table" or type(menu.set_msg) ~= "function" then return end
+	local text = state.hud_messages[1]
+	local ok, reason = pcall(menu.set_msg, 1, text, 3)
+	if not ok then
+		log_failure("HUD message", reason)
+		return
+	end
+	table.remove(state.hud_messages, 1)
+	state.hud_message_until_ms = now + 3200
+end
+
+local function create_effect_save(phase, now, retention)
+	if type(exec_console_cmd) ~= "function" then
+		log_failure("effect save", "exec_console_cmd_unavailable")
+		return false, nil
+	end
+	state.save_sequence = (state.save_sequence or 0) + 1
+	local player = "actor"
+	if type(user_name) == "function" then
+		local ok, value = pcall(user_name)
+		if ok and value ~= nil and tostring(value) ~= "" then player = tostring(value) end
+	end
+	local save_name = player .. " - ADB - " .. tostring(phase) .. "_" ..
+		tostring(math.floor(tonumber(now) or 0)) .. "_" .. tostring(state.save_sequence)
+	local registry=anomaly_donation_bridge_registry
+	local guarded=registry and type(registry.effect_save)=="function"
+	if guarded and not registry.effect_save("before",save_name) then
+		registry.effect_save("after",save_name,false)
+		log_failure("effect save","interaction_suspend_failed");return false,nil
+	end
+	local ok, reason = pcall(exec_console_cmd, "save " .. save_name)
+	if guarded then registry.effect_save("after",save_name,ok) end
+	if not ok then log_failure("effect save", reason) end
+	if ok then
+		local checked,pruned,removed,failed=pcall(anomaly_donation_bridge_common.prune_effect_saves,retention,save_name)
+		if not checked or not pruned then log_failure("effect save retention",checked and removed or pruned)
+		elseif failed>0 then log_failure("effect save retention","some_files_not_removed_"..failed) end
+	end
+	return ok, save_name
+end
+
+local function effect_batch(command, now)
+	local key = tostring(command.donation_id or "")
+	local batch = state.effect_batches[key]
+	if batch == nil then
+		batch = {
+			total = tonumber(command.batch_size) or 1,
+			completed = {}, completed_count = 0, launched = {}, started = false,
+			save_before = command.save_before_batch == true,
+			save_after = command.save_after_batch == true,
+			retention = command.effect_save_retention_count or 50,
+			last_seen_ms = now
+		}
+		state.effect_batches[key] = batch
+	else
+		batch.last_seen_ms = now
+	end
+	return batch, key
+end
+
+local function before_effect_execute(command, now, actor)
+	local batch = effect_batch(command, now)
+	if not batch.started then
+		if batch.save_before then create_effect_save("before", now, batch.retention) end
+		batch.started = true
+	end
+	if not batch.launched[command.command_id] then
+		batch.launched[command.command_id] = true
+		if command.show_game_effect_log ~= false then queue_hud_message(command) end
+		if command.show_pda_effect_message == true then
+			send_pda_effect_message(command, actor)
+		end
+	end
+	return true
+end
+
+local function complete_effect_batch_command(command, status, now)
+	if status == "deferred" then return end
+	local batch, key = effect_batch(command, now)
+	local index = tonumber(command.batch_index) or 1
+	if not batch.completed[index] then
+		batch.completed[index] = true
+		batch.completed_count = batch.completed_count + 1
+	end
+	if batch.completed_count >= batch.total then
+		if batch.started and batch.save_after then
+			create_effect_save("after", now, batch.retention)
+		end
+		state.effect_batches[key] = nil
+	end
+end
+
+local function expire_effect_batches(now)
+	for key, batch in pairs(state.effect_batches) do
+		if now - (tonumber(batch.last_seen_ms) or now) > 1800000 then
+			state.effect_batches[key] = nil
+		end
+	end
+end
+
+local function handle_command(fields, now)
+	local parse_ok, command, parse_error, parsed_id = pcall(
+		anomaly_donation_bridge_protocol.parse_command, fields)
+	if not parse_ok then
+		log_failure("command parse", command)
+		return send_result("invalid", "rejected", "command_parse_failed", true)
+	end
+	if command == nil then
+		return send_result(parsed_id or "invalid", "rejected", parse_error, true)
+	end
+	local previous = state.recent[command.command_id]
+	if previous ~= nil then
+		return send_result(command.command_id, previous.status, previous.reason, false)
+	end
+	if not state.welcomed then
+		return send_result(command.command_id, "rejected", "handshake_required", true)
+	end
+	local ready, reason, actor = readiness(now)
+	if not ready then
+		return send_result(command.command_id, "deferred", reason, false)
+	end
+	local context = { actor = actor, now = now, command = command }
+	-- Normal command lifecycle (including deferred retries) belongs in the
+	-- application history, not the game log. Actual dispatch errors stay below.
+	local dispatch_ok, status, action_reason = pcall(
+		anomaly_donation_bridge_registry.dispatch,
+		command.action_id, context, command.params,
+		function() return before_effect_execute(command, now, actor) end)
+	if not dispatch_ok then
+		log_failure("command " .. command.command_id .. " " .. command.action_id,
+			status)
+		status, action_reason = "uncertain", "action_dispatch_failed"
+	end
+	complete_effect_batch_command(command, status, now)
+	return send_result(command.command_id, status, action_reason, status ~= "deferred")
+end
+
+local function catalog_snapshot()
+	local ok, snapshot, error_code = pcall(function()
+		return anomaly_donation_bridge_catalog.snapshot()
+	end)
+	if not ok then return nil, "catalog_snapshot_failed" end
+	return snapshot, error_code
+end
+
+local function schedule_catalog()
+	local snapshot, error_code = catalog_snapshot()
+	if snapshot == nil then
+		state.last_status, state.last_reason = "", ""
+		return false, error_code
+	end
+	state.catalog_error = ""
+	state.catalog_transfer = { snapshot = snapshot, phase = "begin", cursor = 1 }
+	return true
+end
+
+local function send_catalog_info()
+	local snapshot, error_code = catalog_snapshot()
+	if snapshot == nil then return false, error_code end
+	state.catalog_error = ""
+	return send({ "CATALOG_INFO", snapshot.revision, tostring(snapshot.count),
+		snapshot.content_hash })
+end
+
+local function send_catalog_step()
+	local transfer = state.catalog_transfer
+	if transfer == nil or not state.welcomed then return end
+	local sent_records = 0
+	while transfer ~= nil and sent_records < C.CATALOG_RECORDS_PER_UPDATE do
+		local snapshot = transfer.snapshot
+		local fields
+		if transfer.phase == "begin" then
+			fields = { "CATALOG_BEGIN", snapshot.revision, tostring(snapshot.count),
+				snapshot.content_hash }
+			if snapshot.monster_communities and snapshot.monster_communities~="" then
+				fields[#fields+1]=snapshot.monster_communities
+			end
+			transfer.phase = "entries"
+		elseif transfer.phase == "entries" and transfer.cursor <= snapshot.count then
+			local entry = snapshot.entries[transfer.cursor]
+			fields = { "CATALOG_ENTRY", snapshot.revision, tostring(transfer.cursor - 1),
+				entry.section_id, entry.kind, entry.display_name, entry.category,
+				entry.strength, entry.faction, entry.available and "1" or "0",
+				entry.quarantine_reason }
+			if entry.native_class and entry.native_class ~= "" then
+				fields[#fields + 1] = entry.native_class
+			end
+			transfer.cursor = transfer.cursor + 1
+		else
+			fields = { "CATALOG_END", snapshot.revision, tostring(snapshot.count),
+				snapshot.content_hash }
+			transfer.phase = "done"
+		end
+		if not send(fields) then return end
+		sent_records = sent_records + 1
+		if transfer.phase == "done" then state.catalog_transfer, transfer = nil, nil end
+	end
+end
+
+local function handle_event(fields, now)
+	local kind = tostring(fields[1] or "")
+	if kind == "WELCOME" then
+		if #fields ~= 3 or fields[2] ~= C.PROTOCOL_VERSION or
+			#tostring(fields[3] or "") > 64 then
+			reset_session(true)
+			return false
+		end
+		state.welcomed, state.app_version = true, tostring(fields[3])
+		if not send_capabilities() then return false end
+		return send_status(now, true)
+	elseif kind == "GET_CATALOG_INFO" and #fields == 1 then
+		if not state.welcomed then reset_session(true) return false end
+		local sent_info, catalog_error = send_catalog_info()
+		if not sent_info then
+			state.catalog_error = tostring(catalog_error or "catalog_unavailable")
+			state.last_status, state.last_reason = "", ""
+			return send_status(now, true)
+		end
+		return true
+	elseif kind == "GET_CATALOG" and #fields == 1 then
+		if not state.welcomed then reset_session(true) return false end
+		local scheduled, catalog_error = schedule_catalog()
+		if not scheduled then
+			state.catalog_error = tostring(catalog_error or "catalog_unavailable")
+			state.last_status, state.last_reason = "", ""
+			return send_status(now, true)
+		end
+		return true
+	elseif kind == "PING" and (#fields == 1 or #fields == 2) then
+		if #fields == 2 then return send({ "PONG", fields[2] }) end
+		return send({ "PONG" })
+	elseif kind == "COMMAND" then
+		return handle_command(fields, now)
+	elseif kind:match("^VOTING_") then
+		if not state.welcomed then reset_session(true) return false end
+		if not anomaly_donation_bridge_voting or type(anomaly_donation_bridge_voting.handle)~="function" then return true end
+		return anomaly_donation_bridge_voting.handle(fields,send,function() return readiness(now) end)
+	else
+		reset_session(true)
+		return false
+	end
+	return true
+end
+
+local function update_once(now)
+	if not try_attach(now) then return end
+	local events, poll_error = anomaly_donation_bridge_transport.poll(C.MAX_EVENTS)
+	for _, fields in ipairs(events) do
+		if not handle_event(fields, now) then return end
+	end
+	if poll_error ~= nil then
+		reset_session(false)
+		state.next_attach_ms = now + C.RETRY_MS
+		return
+	end
+	send_catalog_step()
+	send_status(now, false)
+end
+
+function update()
+	if state.transitioning then return end
+	local now = now_ms()
+	if now < (state.next_update_ms or 0) then return end
+	state.next_update_ms = now + C.UPDATE_MS
+	anomaly_donation_bridge_registry.update(now)
+	update_hud_messages(now)
+	expire_effect_batches(now)
+	local ok, update_error = pcall(update_once, now)
+	if not ok then
+		log_failure("runtime update", update_error)
+		reset_session(true)
+		state.next_attach_ms = now + C.RETRY_MS
+	end
+end
+
+function on_game_load()
+    state.voting_ui_next_ms=0;state.voting_ui_attach_ms=0
+	local now = now_ms()
+	state.transitioning = false
+	anomaly_donation_bridge_registry.on_game_load()
+	state.catalog_error = ""
+	state.loading_until_ms = now + C.LOAD_GRACE_MS
+	state.last_status, state.last_reason = "", ""
+	state.next_update_ms = 0
+	state.hud_message_until_ms = 0
+	if not anomaly_donation_bridge_transport.is_connected() then
+		state.next_attach_ms = 0
+	end
+end
+
+-- Only the owned voting dialog uses this pump. time_global/actor updates stop
+-- on pause, but native CUIScriptWnd::Update and time_continual still run.
+-- Normal COMMANDs still go through readiness() and remain deferred while the
+-- voting registry lease is held. No game-world update is forced from this UI.
+function update_voting_ui()
+	if state.transitioning or not anomaly_donation_bridge_voting or not anomaly_donation_bridge_voting.is_active() then return end
+	local real_now=type(time_continual)=="function" and time_continual() or now_ms()
+	if real_now<(state.voting_ui_next_ms or 0) then return end
+	state.voting_ui_next_ms=real_now+C.UPDATE_MS
+	if not anomaly_donation_bridge_transport.is_connected() then
+		if real_now<(state.voting_ui_attach_ms or 0) then return end
+		state.voting_ui_attach_ms=real_now+C.RETRY_MS
+		state.next_attach_ms=0
+	end
+	local ok,reason=pcall(update_once,now_ms())
+	if not ok then log_failure("voting UI pump",reason);reset_session(true) end
+end
+
+function on_actor_before_death(_, flags)
+	-- Stock bind_stalker stops actor_on_update once alive() is false, so the
+	-- ordinary readiness poll cannot publish that transition. Notify before
+	-- native death instead; never cancel death or change another mod's flags.
+	-- If death is cancelled later, the next live update restores ready normally.
+	if type(flags) == "table" and flags.ret_value == false then return end
+	local ok, error_code = pcall(publish_status, "waiting", "actor_dead", true)
+	if not ok then
+		pcall(log_failure, "death status", error_code)
+		pcall(reset_session, true)
+	end
+end
+
+function on_level_changing()
+	state.transitioning = true
+	state.catalog_error = ""
+	state.loading_until_ms = math.huge
+	state.next_update_ms = 0
+	send_status(now_ms(), true)
+	anomaly_donation_bridge_registry.on_level_changing()
+end
+
+function state_snapshot()
+	return {
+		connected = anomaly_donation_bridge_transport.is_connected(),
+		welcomed = state.welcomed == true, app_version = state.app_version,
+		status = state.last_status, reason = state.last_reason
+	}
+end

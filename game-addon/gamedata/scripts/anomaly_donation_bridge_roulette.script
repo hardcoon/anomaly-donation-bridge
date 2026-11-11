@@ -1,0 +1,459 @@
+-- Private Bridge integration of Anomaly Item Upgrader 0.2.5 (MIT, Hardcoon).
+-- Original standalone files, F6 binding and save keys are never replaced.
+VERSION="0.2.5-adb.1"
+API_VERSION=2
+BRIDGE_API_VERSION=1
+GUI=nil
+local ready=false
+local open_key=0
+local scan_stats={}
+local default_batch_count=1
+local batch,last_batch
+local request
+local coin_sound,tick_sound,tick_id,tick_bucket,tick_next
+local audio={ticks=0,wins=0,errors=0}
+local prepared_id
+local required=false
+local pause_owned=false
+local function pause_requested() return (batch or request or {}).pause_game==true end
+-- Keep the original game clock when the option is off. Paused dialogs run
+-- from the UI clock, independently of actor_on_update and simulation time.
+function animation_time()
+    if pause_requested() and type(time_continual)=="function" then return time_continual() end
+    return time_global()
+end
+function pause_supported()
+    return type(time_continual)=="function" and type(device)=="function"
+end
+local function acquire_pause()
+    local ok,paused=pcall(function() return device():is_paused() end)
+    if not ok or paused then return false end
+    local changed=pcall(function() device():pause(true) end)
+    local checked,is_paused=pcall(function() return device():is_paused() end)
+    pause_owned=checked and is_paused==true
+    return changed and pause_owned
+end
+local function release_pause()
+    if not pause_owned then return true end
+    local ok,paused=pcall(function() return device():is_paused() end)
+    if not ok then return false end
+    if paused then
+        if not pcall(function() device():pause(false) end) then return false end
+        local checked,still_paused=pcall(function() return device():is_paused() end)
+        if not checked or still_paused then return false end
+    end
+    pause_owned=false;return true
+end
+local function actor() return db and db.actor end
+local function call(object,method,...)
+    if not object then return nil end
+    local ok,fn=pcall(function() return object[method] end)
+    if not ok or type(fn)~="function" then return nil end
+    local worked,value=pcall(fn,object,...)
+    return worked and value or nil
+end
+function text(key,...)
+    local token="st_adb_roulette_"..key
+    local value=game and game.translate_string and game.translate_string(token) or token
+    if select("#",...)>0 then
+        local ok,formatted=pcall(string.format,value,...)
+        if ok then return formatted end
+    end
+    return value
+end
+function log(message)
+    if type(printf)=="function" then printf("[HC Upgrader] %s",tostring(message)) end
+end
+local function play_win_sound(result)
+    if not result.win or not actor() or not sound_object then return end
+    local ok,why=pcall(function()
+        coin_sound=coin_sound or sound_object("ui\\anomaly_donation_bridge_roulette_coins")
+        coin_sound:play(actor(),0,sound_object.s2d)
+        coin_sound.volume=0.70
+        audio.wins=audio.wins+1
+    end)
+    if not ok then audio.errors=audio.errors+1;log("coin sound: "..tostring(why)) end
+end
+function audio_status()return audio end
+local function update_audio()
+    local t=anomaly_donation_bridge_roulette_core.current()
+    if not GUI or not t or t.phase~="spinning" then tick_id=nil;return end
+    local now=animation_time();local progress=math.max(0,math.min(1,(now-t.started)/t.duration))
+    -- Use unwrapped angular travel; modulo 360 would skip divisions at laps.
+    local bucket=math.floor((1-(1-progress)^3)*(1800+t.angle)/12)
+    if tick_id~=t.id then tick_id=t.id;tick_bucket=bucket;tick_next=now end
+    if bucket~=tick_bucket then
+        tick_bucket=bucket
+        if now>=(tick_next or 0) and sound_object then
+            tick_next=now+40 -- soft clicks, no backlog or bursts on slow frames
+            local ok,why=pcall(function()
+                tick_sound=tick_sound or sound_object("ui\\anomaly_donation_bridge_roulette_tick")
+                tick_sound:play(actor(),0,sound_object.s2d);tick_sound.volume=0.30
+                audio.ticks=audio.ticks+1
+            end)
+            if not ok then audio.errors=audio.errors+1;log("wheel sound: "..tostring(why))end
+        end
+    end
+end
+local function server(id)
+    local sim=type(alife)=="function" and alife() or nil
+    return sim and sim:object(id) or nil
+end
+local function live_item(id)
+    local a=actor()
+    if not a then return nil end
+    local item=call(a,"object_by_id",id)
+    if not item and level and level.object_by_id then item=level.object_by_id(id) end
+    local parent=call(item,"parent")
+    return parent and call(parent,"id")==call(a,"id") and item or nil
+end
+function snapshot(id)
+    local item=live_item(id)
+    if not item then return nil,"input_missing" end
+    local section=call(item,"section")
+    local entry=anomaly_donation_bridge_roulette_catalog.get(section)
+    if not entry then return nil,"input_unavailable" end
+    local condition=tonumber(call(item,"condition")) or 1
+    condition=math.max(0,math.min(1,condition))
+    local price=tonumber(call(item,"cost")) or entry.price
+    if not anomaly_donation_bridge_roulette_catalog.finite(price) or price<=0 then price=entry.price end
+    price=price*math.max(0.05,condition)
+    if not anomaly_donation_bridge_roulette_catalog.finite(price) or price<=0 then return nil,"empty_item" end
+    return {id=id,section=section,value=price,condition=condition,amount=1,maximum=1,
+        name=entry.name,tier=entry.tier,estimated=entry.estimated}
+end
+function inventory()
+    local result={}
+    local a=actor()
+    if a then
+        a:iterate_inventory(function(_,item)
+            if not item then return end
+            local value=snapshot(item:id())
+            if value then result[#result+1]=value end
+        end,nil)
+    end
+    table.sort(result,function(a,b)
+        if a.value~=b.value then return a.value<b.value end
+        return a.id<b.id
+    end)
+    return result
+end
+function is_quest(id)
+    local item=live_item(id)
+    local entry=item and anomaly_donation_bridge_roulette_catalog.get(call(item,"section"))
+    if not entry or entry.quest then return true end
+    local se=server(id)
+    if se then
+        local ok,story_id=pcall(function() return tonumber(se.m_story_id) end)
+        if ok and story_id and story_id>=0 and story_id<4294967295 then return true end
+    end
+    return false
+end
+function eligible_inventory()
+    local result={}
+    -- iterate_inventory uses native m_all, covering rucksack, belt and slots.
+    for _,item in ipairs(inventory()) do
+        if not is_quest(item.id) and #anomaly_donation_bridge_roulette_catalog.pool(item.section)>0 then result[#result+1]=item end
+    end
+    return result
+end
+local function create(section)
+    local a=actor()
+    local entry=anomaly_donation_bridge_roulette_catalog.get(section)
+    if not a or not entry or not entry.reward_allowed then return nil,"target_unavailable" end
+    local sim=alife()
+    local ok,created=pcall(function()
+        return sim:create(section,a:position(),a:level_vertex_id(),a:game_vertex_id(),a:id())
+    end)
+    if not ok or not created then log(created);return nil,"spawn_failed" end
+    if created.parent_id~=a:id() then
+        pcall(function() sim:release(created,true) end)
+        return nil,"spawn_failed"
+    end
+    return created.id
+end
+local function release(id)
+    local item=server(id)
+    if not item then return true end
+    local ok,why=pcall(function() alife():release(item,true) end)
+    if not ok then log(why) end
+    return ok
+end
+function rescan()
+    local ok,items,stats=pcall(anomaly_donation_bridge_roulette_catalog.rebuild,system_ini(),function(token)
+        return game.translate_string(token)
+    end)
+    if not ok then log(items);return false,items end
+    scan_stats=stats
+    log(string.format("catalogue: %d items, %d sections, %d unpriced, %d story IDs",stats.items,stats.sections,stats.unpriced,stats.protected))
+    return true,stats
+end
+function stats() return scan_stats end
+local function initialize()
+    if ready then return true end
+    if not actor() or type(system_ini)~="function" then return false end
+    local options={duration_ms=3500}
+    anomaly_donation_bridge_roulette_core.configure({snapshot=function(id)
+            if is_quest(id) then return nil,"quest_item" end
+            return snapshot(id)
+        end,create=create,release=release,
+        -- Online destruction is asynchronous. A server deletion alone does not
+        -- prove the equipped/client inventory object has disappeared yet.
+        exists=function(id) return server(id)~=nil or live_item(id)~=nil end,now=animation_time,
+        random=function() return math.random() end,
+        on_result=function(result)
+            log("attempt "..result.id..": "..result.reason)
+            play_win_sound(result)
+        end},options)
+    ready=rescan()
+    return ready
+end
+function open()
+    if not initialize() then return false,"unavailable" end
+    if not actor():alive() then return false,"unavailable" end
+    if GUI then return true end
+    if type(Check_UI)=="function" and Check_UI() then return false,"ui_busy" end
+    if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return false,"ui_busy" end
+    if level and type(level.main_input_receiver)=="function" and level.main_input_receiver() then return false,"ui_busy" end
+    if pause_requested() then
+        if not pause_supported() then return false,"pause_api_unavailable" end
+        local checked,paused=pcall(function() return device():is_paused() end)
+        if not checked then return false,"pause_api_unavailable" end
+        -- Never take ownership of a pause established by another window/mod.
+        if paused then return false,"ui_busy" end
+    end
+    if not anomaly_donation_bridge_roulette_core.busy() then
+        local mode=risk_mode()
+        local offer,why=preview(mode=="high" and "high" or "low")
+        if not offer then return false,why end
+    end
+    local ok,why=pcall(function()
+        anomaly_donation_bridge_roulette_ui.ensure_class()
+        GUI=anomaly_donation_bridge_roulette_ui.adb_roulette_window()
+        if type(Register_UI)=="function" then Register_UI("ADBRoulette","anomaly_donation_bridge_roulette") end
+        GUI:ShowDialog(true)
+        if pause_requested() and not acquire_pause() then error("pause_api_unavailable") end
+        required=true
+    end)
+    if not ok then
+        log(why)
+        local failed=GUI;GUI=nil
+        if failed then pcall(function() failed:HideDialog() end) end
+        if type(Unregister_UI)=="function" then pcall(Unregister_UI,"ADBRoulette") end
+        release_pause()
+        return false,tostring(why)
+    end
+    return true
+end
+function close()
+    if required or anomaly_donation_bridge_roulette_core.busy() then return false,"must_roll" end
+    if not release_pause() then return false,"pause_release_failed" end
+    local old=GUI;GUI=nil
+    if old then pcall(function() old:HideDialog() end) end
+    if type(Unregister_UI)=="function" then pcall(Unregister_UI,"ADBRoulette") end
+    return true
+end
+function dismiss_unavailable()
+    if anomaly_donation_bridge_roulette_core.busy() or #eligible_inventory()>0 then return false,"must_roll" end
+    if batch then last_batch={total=batch.total,completed=batch.completed,reason="no_candidates"} end
+    batch=nil;request=nil;required=false
+    return close()
+end
+function quote(input_id,risk)
+    if not initialize() then return nil,"unavailable" end
+    return anomaly_donation_bridge_roulette_core.quote_category(input_id,risk)
+end
+function start_upgrade(input_id,risk)
+    if not initialize() then return nil,"unavailable" end
+    return anomaly_donation_bridge_roulette_core.start_category(input_id,risk)
+end
+function default_count() return request and request.count or default_batch_count end
+function batch_status() return batch,last_batch end
+function risk_mode() return batch and batch.risk_mode or request and request.risk_mode or "both" end
+function request_active() return request~=nil or batch~=nil or GUI~=nil or anomaly_donation_bridge_roulette_core.busy() end
+local function valid_count(count)
+    return anomaly_donation_bridge_roulette_catalog.finite(count) and count>=1 and count<=50 and count==math.floor(count)
+end
+local function valid_mode(mode) return mode=="both" or mode=="low" or mode=="high" end
+function request_batch(count,mode,pause)
+    if not valid_count(count) then return false,"invalid_count" end
+    if not valid_mode(mode) then return false,"invalid_risk" end
+    if pause~=nil and type(pause)~="boolean" then return false,"invalid_pause" end
+    if request_active() then return false,"busy" end
+    request={count=count,risk_mode=mode,pause_game=pause==true}
+    -- No inventory is spent until the player actually presses Spin.
+    local opened,why=open()
+    if not opened then request=nil end
+    return opened,why
+end
+function preview(risk,refresh)
+    if not initialize() then return nil,"unavailable" end
+    if anomaly_donation_bridge_roulette_core.busy() then return anomaly_donation_bridge_roulette_core.current() end
+    if refresh then prepared_id=nil end
+    local items=eligible_inventory()
+    local item
+    for _,candidate in ipairs(items) do if candidate.id==prepared_id then item=candidate;break end end
+    if not item and #items>0 then
+        item=items[math.min(#items,1+math.floor(math.random()*#items))]
+        prepared_id=item.id
+    end
+    if not item then prepared_id=nil;return nil,"no_candidates" end
+    return anomaly_donation_bridge_roulette_core.quote_category(item.id,risk)
+end
+local function next_attempt()
+    local items=eligible_inventory()
+    if #items==0 then return nil,"no_candidates" end
+    local item
+    if prepared_id then
+        for _,candidate in ipairs(items) do if candidate.id==prepared_id then item=candidate;break end end
+    end
+    prepared_id=nil
+    item=item or items[math.min(#items,1+math.floor(math.random()*#items))]
+    local attempt,why=anomaly_donation_bridge_roulette_core.start_category(item.id,batch.risk)
+    if not attempt then return nil,why end
+    batch.index=batch.index+1
+    return attempt
+end
+function start_batch(count,risk)
+    if not initialize() then return nil,"unavailable" end
+    if anomaly_donation_bridge_roulette_core.busy() or (batch and not batch.waiting) then return nil,"busy" end
+    if risk~=nil and risk~="low" and risk~="high" then return nil,"invalid_risk" end
+    local mode=risk_mode()
+    if mode~="both" then
+        if risk~=nil and risk~=mode then return nil,"invalid_risk" end
+        risk=mode
+    end
+    if batch and batch.waiting then
+        batch.risk=risk or batch.risk;batch.waiting=nil
+        local attempt,why=next_attempt()
+        if not attempt then last_batch={total=batch.total,completed=batch.completed,reason=why};batch=nil end
+        return attempt,why
+    end
+    count=request and request.count or tonumber(count) or default_batch_count
+    if not anomaly_donation_bridge_roulette_catalog.finite(count) then return nil,"invalid_count" end
+    count=math.max(1,math.min(50,math.floor(count)))
+    batch={total=count,index=0,completed=0,risk=risk or "low",risk_mode=mode,pause_game=pause_requested()}
+    last_batch=nil
+    local attempt,why=next_attempt()
+    if not attempt then batch=nil else request=nil end
+    return attempt,why
+end
+function claim_reward()
+    local received,why=anomaly_donation_bridge_roulette_core.claim()
+    if not received then return nil,why end
+    if pause_requested() and batch then
+        batch.completed=batch.index
+        if (received.win or received.lost) and batch.index<batch.total and #eligible_inventory()>0 then
+            -- Preserve one modal and one pause across the whole series. A
+            -- paused actor cannot reopen the next window via actor_on_update.
+            batch.waiting=true;prepared_id=nil
+            return received
+        end
+        local reason=not (received.win or received.lost) and received.reason or
+            batch.index<batch.total and "no_candidates" or "batch_done"
+        last_batch={total=batch.total,completed=batch.completed,reason=reason}
+        required=false;close();batch=nil
+        return received
+    end
+    required=false;close()
+    if not batch then return received end
+    batch.completed=batch.index
+    if (received.win or received.lost) and batch.index<batch.total then
+        batch.waiting=true;prepared_id=nil
+        -- Next attempt is shown on the next live update; never spin or spend
+        -- another stake invisibly during acknowledgement of the previous one.
+        required=true
+        return received
+    end
+    last_batch={total=batch.total,completed=batch.completed,reason=(received.win or received.lost) and "batch_done" or received.reason}
+    batch=nil
+    return received
+end
+local function on_key(key)
+    if key~=open_key or open_key==0 then return end
+    if not GUI then open() end
+end
+local function modal_key(key,bind,disabled,flags)
+    if not GUI then return end
+    local mouse=DIK_keys and (key==DIK_keys.MOUSE_1 or key==DIK_keys.MOUSE_2 or key==DIK_keys.MOUSE_3)
+    if mouse then return end -- native dialog dispatches button clicks
+    flags.ret_value=false
+end
+local function modal_press(key,bind,disabled,flags)
+    local wnd=GUI
+    modal_key(key,bind,disabled,flags)
+    if wnd and key_bindings and bind==key_bindings.kJUMP then wnd:OnKeyboard(key,ui_events.WINDOW_KEY_PRESSED)end
+end
+local function modal_release(key,bind,disabled,flags)
+    local wnd=GUI
+    modal_key(key,bind,disabled,flags)
+    if wnd and key_bindings and bind==key_bindings.kJUMP then wnd:OnKeyboard(key,ui_events.WINDOW_KEY_RELEASED)end
+end
+local function modal_save(flags)if GUI then flags.ret=true end end
+local function modal_load(key,bind,flags)if GUI then flags.ret=true end end
+function update()
+    if not actor() then return end
+    if not ready and not required and not request and not batch then return end
+    if not ready then initialize() end
+    anomaly_donation_bridge_roulette_core.update()
+    update_audio()
+    if required and not GUI and actor():alive() then
+        local opened,why=open()
+        if not opened and why=="no_candidates" then dismiss_unavailable() end
+    end
+    if GUI and not required and not request and not batch and not anomaly_donation_bridge_roulette_core.busy() then close() end
+end
+local function save(data)
+    anomaly_donation_bridge_roulette_core.save(data)
+    data.anomaly_donation_bridge_roulette_batch=batch
+    data.anomaly_donation_bridge_roulette_window={required=required,prepared_id=prepared_id,request=request}
+end
+local function load(data)
+    -- A dialog from the old level holder must never be hidden through a new one.
+    GUI=nil;ready=false;prepared_id=nil;request=nil
+    release_pause()
+    if type(Unregister_UI)=="function" then pcall(Unregister_UI,"ADBRoulette") end
+    local current_format=anomaly_donation_bridge_roulette_core.load(data)
+    local window=current_format and type(data)=="table" and data.anomaly_donation_bridge_roulette_window
+    required=anomaly_donation_bridge_roulette_core.busy() or type(window)=="table" and window.required==true or false
+    if type(window)=="table" and anomaly_donation_bridge_roulette_catalog.finite(window.prepared_id)then prepared_id=window.prepared_id end
+    local pending=type(window)=="table" and window.request
+    if type(pending)=="table" and valid_count(pending.count) and valid_mode(pending.risk_mode) and
+        not anomaly_donation_bridge_roulette_core.busy() then
+        request={count=pending.count,risk_mode=pending.risk_mode,pause_game=pending.pause_game==true};required=true
+    end
+    batch=nil;last_batch=nil
+    local saved=current_format and type(data)=="table" and data.anomaly_donation_bridge_roulette_batch
+    if type(saved)=="table" and (anomaly_donation_bridge_roulette_core.current() or saved.waiting==true) and
+        anomaly_donation_bridge_roulette_catalog.finite(saved.total) and saved.total>=1 and saved.total<=50 and
+        anomaly_donation_bridge_roulette_catalog.finite(saved.index) and saved.index>=1 and saved.index<=saved.total and
+        saved.index==math.floor(saved.index) and saved.total==math.floor(saved.total) and
+        (saved.risk=="low" or saved.risk=="high") then
+        local waiting=saved.waiting==true and not anomaly_donation_bridge_roulette_core.current() and saved.index<saved.total
+        if not anomaly_donation_bridge_roulette_core.current() and not waiting then return end
+        local mode=valid_mode(saved.risk_mode) and saved.risk_mode or "both"
+        batch={total=saved.total,index=saved.index,completed=waiting and saved.index or saved.index-1,risk=saved.risk,waiting=waiting,risk_mode=mode,pause_game=saved.pause_game==true}
+        request=nil;required=true
+    end
+    -- A malformed/old window marker alone must not trap the actor in a modal.
+    if not request and not batch and not anomaly_donation_bridge_roulette_core.busy() then required=false end
+end
+local function destroy()
+    GUI=nil;ready=false;prepared_id=nil;required=false;tick_id=nil;request=nil;batch=nil
+    release_pause()
+    for _,s in ipairs({coin_sound,tick_sound})do if s then pcall(function()s:stop()end)end end
+    coin_sound=nil;tick_sound=nil
+    if type(Unregister_UI)=="function" then pcall(Unregister_UI,"ADBRoulette") end
+end
+function on_game_start()
+    RegisterScriptCallback("on_key_press",on_key)
+    RegisterScriptCallback("on_before_key_press",modal_press)
+    RegisterScriptCallback("on_before_key_hold",modal_key)
+    RegisterScriptCallback("on_before_key_release",modal_release)
+    RegisterScriptCallback("on_before_save_input",modal_save)
+    RegisterScriptCallback("on_before_load_input",modal_load)
+    RegisterScriptCallback("actor_on_update",update)
+    RegisterScriptCallback("save_state",save)
+    RegisterScriptCallback("load_state",load)
+    RegisterScriptCallback("actor_on_net_destroy",destroy)
+end

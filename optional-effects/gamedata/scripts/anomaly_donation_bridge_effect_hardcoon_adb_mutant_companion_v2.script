@@ -1,0 +1,1289 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.mutant_companion_v2",
+  "displayName": "Напарник-мутант V2",
+  "description": "Мутант с именем донатера и меню команд: следование, ожидание, отдых и режимы боя. Пассивные ауры и топот отключены, штатные атаки сохранены.\n\nУстановка: обновить аддон → запустить игру и обновить каталог → закрыть игру и повторно обновить аддон → запустить игру заново.\n\nПодготовка нужна один раз и после изменения сборки. Сейвы требуют установленный аддон V2.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"mutant_sections","displayName":"Допустимые мутанты","kind":"MultiChoice","catalogKind":"Mutant","minimumSelections":1,"defaultValue":""},
+    {"key":"radius_meters","displayName":"Радиус появления, м","kind":"Integer","minimum":10,"maximum":100,"defaultValue":"25"},
+    {"key":"health_percent","displayName":"Множитель начального здоровья (100 = ×1, 300 = ×3)","kind":"Integer","minimum":100,"maximum":1000000,"defaultValue":"300"},
+    {"key":"menu_key","displayName":"Клавиша игрового меню","kind":"KeyboardKey","defaultValue":"HOME"},
+    {"key":"follow_distance","displayName":"Дистанция следования, м","kind":"Integer","minimum":2,"maximum":50,"defaultValue":"15"},
+    {"key":"combat_mode","displayName":"Режим боя","kind":"Choice","options":["assist","defend","passive"],"optionLabels":{"assist":"Помогать в бою","defend":"Только защищаться","passive":"Не атаковать"},"defaultValue":"assist"},
+    {"key":"nickname_visibility","displayName":"3D ник по умолчанию","kind":"Choice","options":["show","hide"],"optionLabels":{"show":"Показывать","hide":"Не показывать"},"defaultValue":"hide"},
+    {"key":"nickname_key","displayName":"Переключить 3D ники (по умолчанию PageDown)","kind":"KeyboardKey","defaultValue":"NEXT"}
+  ],
+  "parameters": {"mutant_sections":"","radius_meters":"25","health_percent":"300","menu_key":"HOME","follow_distance":"15","combat_mode":"assist","nickname_visibility":"hide","nickname_key":"NEXT"},
+  "itemSpawns": [], "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+-- Real monsters must not enter the human-only axr_companions planner.
+-- V1 is deliberately not imported, patched or registered by this module.
+-- MC2-010: new pets default to hidden 3D nicknames; saved visibility, PageDown and hover HP unchanged.
+local HANDLER = "hardcoon.adb.mutant_companion_v2"
+local SAVE_KEY = "adb_mutant_companions_v2"
+local SPOT = "ui_pda2_companion_location"
+local UI_NAME = "ADBMutantCompanionV2"
+local MODULE_NAME = "anomaly_donation_bridge_effect_hardcoon_adb_mutant_companion_v2"
+local state = { objects = {}, threats = {}, next_update = 0, next_markers = 0 }
+local retired_labels={}
+local callbacks_registered = false
+local SUPPORTED = {}
+for name in ("SM_BLOOD SM_BOARW SM_BURER SM_CAT_S SM_CHIMS SM_CONTR SM_DOG_S " ..
+    "SM_FLESH SM_IZLOM SM_GIANT SM_POLTR SM_P_DOG SM_DOG_P SM_RAT SM_SNORK SM_TUSHK SM_ZOMBI"):gmatch("%S+") do
+    SUPPORTED[name] = true
+end
+local MODE_TEXT = { assist = "Помогать в бою", defend = "Только защищаться", passive = "Не атаковать" }
+local ORDER_TEXT = { follow="Следовать за игроком",stay="Стоять на месте",rest="Отдыхать в лагере" }
+local CAMP_RADIUS = 30
+local function color(r,g,b) return 4278190080+r*65536+g*256+b end
+local COLORS={normal=color(235,235,235),muted=color(175,180,175),green=color(150,196,148),
+    orange=color(223,170,92),red=color(207,126,118),blue=color(135,182,210)}
+local ORDER_STYLE={follow="green",stay="orange",rest="blue"}
+local MODE_STYLE={assist="green",defend="orange",passive="red"}
+local KEYS = {}
+for key in ("HOME END INSERT DELETE PRIOR NEXT UP DOWN LEFT RIGHT TAB RETURN SPACE BACK " ..
+    "MINUS EQUALS LBRACKET RBRACKET SEMICOLON APOSTROPHE GRAVE BACKSLASH COMMA PERIOD SLASH " ..
+    "NUMPAD0 NUMPAD1 NUMPAD2 NUMPAD3 NUMPAD4 NUMPAD5 NUMPAD6 NUMPAD7 NUMPAD8 NUMPAD9 " ..
+    "ADD SUBTRACT MULTIPLY DIVIDE DECIMAL NUMPADENTER F1 F2 F3 F4 F6 F7 F8 F10 F11 F12 " ..
+    "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z 0 1 2 3 4 5 6 7 8 9"):gmatch("%S+") do KEYS[key]=true end
+
+local function call(object, method, ...)
+    if object == nil then return nil end
+    local args = {...}
+    local ok, value = pcall(function() return object[method](object, unpack(args)) end)
+    if ok then return value end
+    return nil
+end
+local function clock() return type(time_global) == "function" and time_global() or 0 end
+local function actor() return db and db.actor or nil end
+local function life() return type(alife) == "function" and alife() or nil end
+local function id_of(object) return tonumber(call(object, "id")) end
+local function alive(object)
+    -- Alive() accepts CEntity (including stationary weapons), but relation()
+    -- requires CEntityAlive. The native cast probe is safe for ANY game object.
+    return call(object,"is_entity_alive")==true and call(object,"alive")==true
+end
+local function encoded(value)
+    return anomaly_donation_bridge_common.game_text_cp1251_lossy(tostring(value or "")) or "?"
+end
+local NICK_GROUP="mutant_v2"
+local function nickname_preferences(create)
+    local data=alife_storage_manager and type(alife_storage_manager.get_state)=="function" and alife_storage_manager.get_state()
+    if type(data)~="table" then return end
+    local name="adb_companion_nickname_hud_v1"
+    if type(data[name])~="table" then if not create then return end;data[name]={} end
+    local all=data[name]
+    if type(all[NICK_GROUP])~="table" then if not create then return end;all[NICK_GROUP]={} end
+    return all[NICK_GROUP]
+end
+local function nickname_visible(default,key)
+    local prefs=nickname_preferences(false);local value=prefs and prefs[key or "NEXT"]
+    if type(value)=="boolean" then return value end
+    return default~=false
+end
+local function nickname_toggle(key,current,flags)
+    local prefs=nickname_preferences(true);if not prefs then return false end
+    local d=type(device)=="function" and device();local frame=d and d.frame or (type(time_global)=="function" and time_global() or 0)
+    if type(flags.adb_nickname_toggle)~="table" or flags.adb_nickname_toggle.frame~=frame then flags.adb_nickname_toggle={frame=frame} end
+    local token=NICK_GROUP..":"..key
+    if flags.adb_nickname_toggle[token] then return true end
+    prefs[key]=not current
+    flags.adb_nickname_toggle[token]=true;flags.ret_value=false
+    return true
+end
+local function nickname_owns_input(flags)
+    local d=type(device)=="function" and device();local frame=d and d.frame or (type(time_global)=="function" and time_global() or 0)
+    return type(flags.adb_nickname_toggle)=="table" and flags.adb_nickname_toggle.frame==frame
+end
+local function initial_distance(entry)
+    local initial=tonumber(entry.initial_follow_distance)
+    if not initial or initial<2 or initial>50 or initial~=math.floor(initial) then
+        -- Older V2 saves never stored the original template distance. Preserve
+        -- their first observed distance as a baseline; do not invent a value.
+        initial=math.max(2,math.min(50,tonumber(entry.follow_distance) or 15))
+        entry.initial_follow_distance=initial
+    end
+    return initial
+end
+local function health_percent(object)
+    return math.floor(math.max(0,math.min(1,tonumber(object and object.health) or 0))*100+0.5)
+end
+local function saved(create)
+    if alife_storage_manager == nil or type(alife_storage_manager.get_state) ~= "function" then return nil end
+    local data = alife_storage_manager.get_state()
+    if type(data) ~= "table" then return nil end
+    if data[SAVE_KEY] == nil and create then data[SAVE_KEY] = {} end
+    return type(data[SAVE_KEY]) == "table" and data[SAVE_KEY] or nil
+end
+local function entry_for(object)
+    local id, records = id_of(object), saved(false)
+    local entry = id and records and records[tostring(id)] or nil
+    -- IDs can be recycled. A stale save record must never protect another NPC.
+    if type(entry) ~= "table" or call(object, "section") ~= entry.spawn_section or
+        call(object, "name") ~= entry.identity then return nil end
+    return entry, id
+end
+local function pet_enemy(object)
+    -- GetEnemy is AI-only, and even for monsters logs an engine error after
+    -- death. pcall cannot silence this native log-and-return-nil behavior.
+    if entry_for(object) and alive(object) then return call(object,"get_enemy") end
+end
+local function server_for(id) return call(life(), "object", tonumber(id), true) end
+local function online(id) return level and type(level.object_by_id) == "function" and level.object_by_id(tonumber(id)) or nil end
+local function ini_value(ini, section, key)
+    if ini == nil then return nil end
+    local ok, value = pcall(function()
+        if ini:section_exist(section) and ini:line_exist(section, key) then return ini:r_string(section, key) end
+    end)
+    return ok and value or nil
+end
+local function variant(section)
+    return "adb_mc2_" .. anomaly_donation_bridge_sha256.digest(section:lower()):sub(1,24)
+end
+local function profile_ready(section)
+    local ini = system_ini()
+    local native = (ini_value(ini, section, "class") or ""):upper()
+    local alias = variant(section)
+    if not SUPPORTED[native] then return nil, "mutant_v2_native_class_unsupported" end
+    local binder = ini_value(ini, section, "script_binding")
+    if binder ~= "bind_monster.bind" then return nil, "mutant_v2_custom_binder_unsupported" end
+    local profile=ini_value(ini,alias,"adb_mc2_profile")
+    if ini_value(ini, alias, "adb_mc2_source") ~= section or
+        ini_value(ini, alias, "adb_mc2_native_class") ~= native or
+        profile~="5" or ini_value(ini,alias,"species")~="adb_mc2_companion" or
+        type(anomaly_donation_bridge_catalog.companion_relations_ready)~="function" or
+        not anomaly_donation_bridge_catalog.companion_relations_ready() then
+        return nil, "mutant_v2_update_catalog_install_addon_restart_game: Обновите каталог, установите аддон и перезапустите игру"
+    end
+    for _, aura in ipairs({"psy", "radiation", "fire", "base"}) do
+        for _, key in ipairs({"linear_factor", "quadratic_factor", "max_power", "max_distance"}) do
+            if tonumber(ini_value(ini, alias, aura .. "_" .. key)) ~= 0 then
+                return nil, "mutant_v2_unsafe_aura_configuration"
+            end
+        end
+    end
+    if native == "SM_GIANT" and (ini_value(ini, alias, "step_params") ~= "adb_mc2_no_steps" or
+        not ini:section_exist("adb_mc2_no_steps")) then
+        return nil, "mutant_v2_unsafe_step_configuration"
+    end
+    if native == "SM_DOG_P" and (ini_value(ini, alias, "class") ~= "SM_DOG_P" or
+        ini_value(ini,alias,"aura_effector")~="adb_mc2_presence_neutral" or
+        not ini:section_exist("adb_mc2_presence_neutral")) then
+        return nil, "mutant_v2_unsafe_phantom_configuration"
+    end
+    if native == "SM_POLTR" and ((ini_value(ini,alias,"detection_pp_effector_name") or "")~="" or
+        ini_value(ini,alias,"flame_scan_effector_section")~="adb_mc2_presence_neutral" or
+        not ini:section_exist("adb_mc2_presence_neutral")) then
+        return nil,"mutant_v2_unsafe_poltergeist_configuration"
+    end
+    return alias, native
+end
+local function supported(context)
+    local a = context and context.actor or actor()
+    local ok = a ~= nil and call(a,"is_entity_alive")==true and life() ~= nil and saved(true) ~= nil and
+        type(alife_create) == "function" and type(RegisterScriptCallback) == "function" and
+        type(system_ini) == "function" and action ~= nil and anim ~= nil and
+        xr_logic ~= nil and type(xr_logic.mob_capture) == "function" and type(xr_logic.mob_release)=="function" and
+        type(get_hud) == "function" and CScriptXmlInit ~= nil and DIK_keys ~= nil and
+        type(Register_UI)=="function" and type(Unregister_UI)=="function"
+    return ok, ok and nil or "mutant_v2_api_unsupported"
+end
+local function can_execute(context, params)
+    local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+        mutant_sections=true, radius_meters=true, health_percent=true, menu_key=true,
+        follow_distance=true, combat_mode=true, donor_name=true, catalog_revision=true,show_3d_nick=true,nickname_visibility=true,nickname_key=true
+    })
+    if not valid then return false, "rejected", reason end
+    if context.actor == nil then return false, "deferred", "actor_unavailable" end
+    local ok, why = supported(context)
+    if not ok then return false, "rejected", why end
+    local options = {}
+    local label_setting=tostring(params.show_3d_nick==nil and "false" or params.show_3d_nick):lower()
+    if params.nickname_visibility~=nil then
+        if params.nickname_visibility~="show" and params.nickname_visibility~="hide" then return false,"rejected","mutant_v2_nickname_visibility_invalid" end
+        label_setting=params.nickname_visibility=="show" and "true" or "false"
+    end
+    if label_setting~="true" and label_setting~="false" then return false,"rejected","mutant_v2_show_3d_nick_invalid" end
+    options.show_3d_nick=label_setting=="true"
+    for key, bounds in pairs({ radius_meters={25,10,100}, health_percent={300,100,1000000}, follow_distance={15,2,50} }) do
+        options[key], reason = anomaly_donation_bridge_common.parse_integer(params[key], bounds[1], bounds[2], bounds[3], "mutant_v2_"..key.."_invalid")
+        if options[key] == nil then return false, "rejected", reason end
+    end
+    options.menu_key = tostring(params.menu_key or "HOME")
+    options.nickname_key=tostring(params.nickname_key or "NEXT"):upper()
+    if not KEYS[options.nickname_key] or not DIK_keys["DIK_"..options.nickname_key] then return false,"rejected","mutant_v2_nickname_key_invalid" end
+    if options.nickname_key==options.menu_key then return false,"rejected","mutant_v2_nickname_key_conflicts_menu" end
+    local dik = DIK_keys["DIK_" .. options.menu_key]
+    if not KEYS[options.menu_key] or type(dik) ~= "number" or
+        dik == DIK_keys.DIK_ESCAPE or dik == DIK_keys.DIK_F5 or dik == DIK_keys.DIK_F9 or
+        options.menu_key:find("CONTROL") or options.menu_key:find("SHIFT") or options.menu_key:find("MENU") then
+        return false, "rejected", "mutant_v2_menu_key_invalid"
+    end
+    if type(bind_to_dik)=="function" and key_bindings then
+        for _,name in ipairs({"kQUICK_SAVE","kQUICK_LOAD"}) do
+            if key_bindings[name] and bind_to_dik(key_bindings[name])==dik then
+                return false,"rejected","mutant_v2_menu_key_reserved_for_save"
+            end
+            if key_bindings[name] and bind_to_dik(key_bindings[name])==DIK_keys["DIK_"..options.nickname_key] then
+                return false,"rejected","mutant_v2_nickname_key_reserved_for_save"
+            end
+        end
+    end
+    options.combat_mode = params.combat_mode or "assist"
+    if MODE_TEXT[options.combat_mode] == nil then return false, "rejected", "mutant_v2_combat_mode_invalid" end
+    options.donor_name = tostring(params.donor_name or ""):match("^%s*(.-)%s*$")
+    if options.donor_name == "" or #options.donor_name > 256 or options.donor_name:find("[%z\1-\31\127]") then
+        return false, "rejected", "mutant_v2_donor_name_invalid"
+    end
+    local entries
+    entries, reason = anomaly_donation_bridge_catalog.validate_sections(params, "mutant_sections", "mutant")
+    if entries == nil then return false, "rejected", reason end
+    if #entries == 0 then return false, "rejected", "mutant_v2_pool_empty" end
+    for _, entry in ipairs(entries) do
+        local alias, profile = profile_ready(entry.section_id)
+        if alias == nil then return false, "rejected", profile end
+    end
+    options.section = entries[math.random(#entries)].section_id
+    options.spawn_section, options.native_class = profile_ready(options.section)
+    context.options = options
+    return true
+end
+
+local function same_team(server, object, a)
+    local team = tonumber(call(a, "team"))
+    if team == nil or team < 0 or team > 255 then return false end
+    if server then server.team = team end
+    if object and call(object, "team") ~= team then
+        object:change_team(team, call(object, "squad") or 0, call(object, "group") or 0)
+    end
+    return true
+end
+local function is_pet(object)
+    if entry_for(object) ~= nil then return true end
+    local id = id_of(object)
+    local data = alife_storage_manager and alife_storage_manager.get_state()
+    local v1 = data and data.adb_mutant_companions_v1
+    return id ~= nil and v1 ~= nil and (v1[id] ~= nil or v1[tostring(id)] ~= nil)
+end
+local function friendly(object, a)
+    if object == nil or a == nil then return true end
+    if call(object,"is_entity_alive")~=true then return true end
+    if id_of(object) == id_of(a) or is_pet(object) then return true end
+    local stalker_ok,stalker=false,false
+    if type(IsStalker)=="function" then stalker_ok,stalker=pcall(IsStalker,object) end
+    if stalker_ok and stalker then
+        local id = id_of(object)
+        if axr_companions and axr_companions.non_task_companions and axr_companions.non_task_companions[id] then return true end
+        if call(object, "has_info", "npcx_is_companion") == true then return true end
+    end
+    -- Use the native entity-to-actor relation for every living type. A modded
+    -- neutral creature must not become a target simply because it is a mutant.
+    if state.evaluating then return true end
+    state.evaluating = true
+    local relation = call(object, "relation", a)
+    state.evaluating = false
+    return tonumber(relation) == nil or tonumber(relation) < (game_object and game_object.enemy or 2)
+end
+local function enemy_eval(object, enemy, flags)
+    if type(flags) ~= "table" or object == nil or enemy == nil then return end
+    local entry, id = entry_for(object)
+    local enemy_entry = entry_for(enemy)
+    if entry == nil and enemy_entry == nil then return end
+    local a = actor()
+    if a == nil then return end
+    local other = entry and enemy or object
+    local blocked = friendly(other, a)
+    if entry and not blocked then
+        local threat = state.threats[id]
+        blocked = entry.combat_mode == "passive" or
+            (entry.combat_mode == "defend" and not (threat and threat.id == id_of(enemy) and threat.until_ms >= clock()))
+        if entry.order == "stay" and entry.anchor then
+            local pos = call(enemy, "position")
+            local anchor = entry.anchor
+            blocked = blocked or pos == nil or (pos.x-anchor.x)^2+(pos.z-anchor.z)^2 > 25
+        elseif entry.order=="rest" and entry.camp then
+            local pos=call(enemy,"position")
+            blocked=blocked or pos==nil or (pos.x-entry.camp.x)^2+(pos.y-entry.camp.y)^2+(pos.z-entry.camp.z)^2>CAMP_RADIUS^2
+        end
+    end
+    if blocked then flags.override, flags.result = true, false end
+end
+local function pet_enemy_filter(object,enemy)
+    -- on_enemy_eval is reached through the stalker combat scheme, not every
+    -- monster's native memory. Install the filter on OUR monster as well.
+    local flags={}
+    enemy_eval(object,enemy,flags)
+    if flags.override and flags.result==false then return false end
+    local entry,id=entry_for(object)
+    local runtime=id and state.objects[id]
+    if entry and runtime and runtime.native_combat and runtime.target~=id_of(enemy) then
+        local retained=online(runtime.target)
+        if alive(retained) and call(retained,"name")==runtime.target_identity and
+            call(retained,"section")==runtime.target_section and
+            clock()-(runtime.target_seen_at or 0)<=15000 then
+            local policy={}
+            enemy_eval(object,retained,policy)
+            -- Reject alternatives only while the locked target is still legal.
+            -- Never force an enemy into memory, bypass species or query actor AI.
+            if not (policy.override and policy.result==false) then return false end
+        end
+    end
+    return true
+end
+local function combat_allowed(object,entry)
+    local a=actor()
+    if not alive(a) or entry.combat_mode=="passive" then return false end
+    local p=object:position()
+    local function d2(q) return (p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2 end
+    local runtime=state.objects[id_of(object)]
+    if entry.order=="stay" and entry.anchor and d2(entry.anchor)>25 then return nil end
+    if entry.order=="rest" and entry.camp and d2(entry.camp)>CAMP_RADIUS^2 then return nil end
+    if entry.order=="follow" then
+        local distance=d2(a:position())
+        if distance>100^2 then
+            if runtime then runtime.recalling=true end
+            return nil
+        end
+        -- A recalled follower must reach its follow distance before resuming
+        -- combat, not bounce between native AI and movement at the 100m edge.
+        if runtime and runtime.recalling then
+            if distance>(entry.follow_distance+1)^2 then return nil end
+            runtime.recalling=nil
+        end
+    end
+    return true
+end
+local function native_enemy(object,entry)
+    if not combat_allowed(object,entry) then return nil end
+    local enemy=pet_enemy(object)
+    if not alive(enemy) or not pet_enemy_filter(object,enemy) then return nil end
+    -- get_enemy is the monster's actual native enemy, not a Lua-selected
+    -- visible object. The native AI owns target ranking, approach and attacks.
+    return enemy
+end
+local function own_bone_target(object)
+    if entry_for(object) then return true end
+    -- Dead pets leave the party, but their bodies still use our private
+    -- skeleton sections. xr_corpse_detection keeps querying them for a human
+    -- spine. Recognize the CONFIG, not a retired/recycled object ID or tombstone.
+    if call(object,"is_entity_alive")~=true then return false end
+    local section=call(object,"section")
+    if type(section)~="string" or #section~=32 or section:sub(1,8)~="adb_mc2_" or
+        section:sub(9):find("[^0-9a-f]") then return false end
+    state.bone_sections=state.bone_sections or {}
+    local known=state.bone_sections[section]
+    if known~=nil then return known end
+    local ini=type(system_ini)=="function" and system_ini() or nil
+    local source=ini_value(ini,section,"adb_mc2_source")
+    local native=ini_value(ini,section,"adb_mc2_native_class")
+    local profile=ini_value(ini,section,"adb_mc2_profile")
+    known=type(source)=="string" and #source>0 and #source<=256 and variant(source)==section and
+        SUPPORTED[native]==true and (profile=="1" or profile=="2" or profile=="3" or profile=="4" or profile=="5")
+    -- Configs are immutable during a game session. Cache only section metadata,
+    -- never object IDs; F9 resets this cache without restoring a dead companion.
+    state.bone_sections[section]=known
+    return known
+end
+local release_hook,bone_hook
+local function install_scoped_hooks()
+    if xr_logic and type(xr_logic.mob_release)=="function" and xr_logic.mob_release~=release_hook then
+        local previous=xr_logic.mob_release
+        release_hook=function(object,...)
+            -- bind_monster runs this AFTER monster_on_update. Only a battle
+            -- explicitly handed to native AI may release our pet. Cached,
+            -- forbidden or out-of-leash enemies must not cancel its orders.
+            local entry,id=entry_for(object)
+            if entry and alive(object) then
+                local runtime=state.objects[id]
+                if not (runtime and runtime.native_combat and native_enemy(object,entry)) then return end
+            end
+            return previous(object,...)
+        end
+        xr_logic.mob_release=release_hook
+    end
+    if utils_obj and type(utils_obj.safe_bone_pos)=="function" and utils_obj.safe_bone_pos~=bone_hook then
+        local previous=utils_obj.safe_bone_pos
+        bone_hook=function(object,bone,...)
+            if own_bone_target(object) then
+                local id=tonumber(call(object,"get_bone_id",bone))
+                -- rx_ff and corpse detection ask for a human spine. A missing
+                -- bone must return the object position, not bone_position(""):
+                -- the native root-bone fallback logs on EVERY such request.
+                if not id or id<0 or id>=65535 then return object:position() end
+                return object:bone_position(id)
+            end
+            return previous(object,bone,...)
+        end
+        utils_obj.safe_bone_pos=bone_hook
+    end
+end
+local function note_threat(source, id)
+    local a = actor()
+    if source and a and alive(source) and not friendly(source, a) then
+        state.threats[id] = { id=id_of(source), until_ms=clock()+15000 }
+    end
+end
+local function actor_before_hit(hit, bone, flags)
+    if hit == nil then return end
+    if entry_for(hit.draftsman) ~= nil then
+        -- Friendly fire is normal gameplay. Do not cancel a companion's hit;
+        -- only avoid registering our own pet as a retaliation target.
+        return
+    end
+    if type(flags) == "table" and flags.ret_value == false then return end
+    for key in pairs(saved(false) or {}) do note_threat(hit.draftsman, tonumber(key)) end
+end
+local function monster_before_hit(object, hit, bone, flags)
+    local entry, id = entry_for(object)
+    if entry == nil or hit == nil or type(flags) == "table" and flags.ret_value == false then return end
+    if (tonumber(hit.power) or 0)>0 then
+        hit.power = hit.power / math.max(1, (tonumber(entry.health_percent) or 100)/100)
+    end
+    note_threat(hit.draftsman, id)
+end
+local function valid_vertex(value)
+    return type(value) == "number" and value >= 0 and value < 4294967295 and value == math.floor(value)
+end
+local function vec(point) return vector():set(point.x, point.y, point.z) end
+local function distance2(p,q) return (p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2 end
+local function choose_enemy(object,entry,now)
+    if not combat_allowed(object,entry) then return nil end
+    local runtime=state.objects[id_of(object)]
+    local native=native_enemy(object,entry)
+    if native then
+        if runtime then runtime.target_gap_since=nil end
+        return native
+    end
+    if runtime and runtime.native_combat then
+        local retained=online(runtime.target)
+        if alive(retained) and pet_enemy_filter(object,retained) and
+            call(retained,"name")==runtime.target_identity and call(retained,"section")==runtime.target_section then
+            runtime.target_gap_since=runtime.target_gap_since or now
+            -- Memory may be temporarily empty during an AI tick / invisibility.
+            -- Give native Think a bounded chance to refresh it, not a made-up
+            -- enemy or an act.attack that would be unforced outside ProcessScripts.
+            if now-runtime.target_gap_since<1500 then return nil,true end
+        end
+    end
+    return nil
+end
+local function point_for(object, position, vertex)
+    if valid_vertex(vertex) and call(object, "accessible", vertex) == true then
+        return vertex, level.vertex_position(vertex)
+    end
+    local buffer = vector()
+    local ok, nearest, point = pcall(function() return object:accessible_nearest(position, buffer) end)
+    if ok and valid_vertex(nearest) and call(object,"accessible",nearest) == true then
+        return nearest, point or buffer
+    end
+end
+local function follow_point(object,runtime,entry,a,now)
+    local center,p=a:position(),object:position()
+    for vertex,until_ms in pairs(runtime.blocked or {}) do
+        if until_ms<=now then runtime.blocked[vertex]=nil end
+    end
+    local cached=runtime.follow_point
+    if cached and distance2(center,cached.actor)<4 and
+        call(object,"accessible",cached.vertex)==true and
+        not (runtime.blocked and (runtime.blocked[cached.vertex] or 0)>now) then
+        return cached.point,cached.vertex
+    end
+    -- axr_beh / xr_companion choose an accessible offset near the leader,
+    -- not the actor's occupied vertex. Keep the chosen point until he moves.
+    local dx,dz=p.x-center.x,p.z-center.z
+    local length=math.sqrt(dx*dx+dz*dz)
+    if length<0.1 then dx,dz,length=0,1,1 end
+    dx,dz=dx/length,dz/length
+    local radius=math.max(2,entry.follow_distance*0.8)
+    local best,cost,seen=nil,nil,{}
+    local function consider(v)
+        if not valid_vertex(v) or seen[v] or call(object,"accessible",v)~=true then return end
+        seen[v]=true
+        if runtime.blocked and (runtime.blocked[v] or 0)>now then return end
+        local point=level.vertex_position(v)
+        local actor_dist=math.sqrt(distance2(point,center))
+        if math.abs(point.y-center.y)>2.5 or actor_dist<1.5 or actor_dist>entry.follow_distance+3 then return end
+        local score=math.sqrt(distance2(point,p))+math.abs(actor_dist-radius)*0.5
+        -- Own pets must not all aim at the very same graph vertex.
+        for _,other in pairs(state.objects) do
+            if other~=runtime and other.follow_point and other.follow_point.vertex==v then score=score+10 end
+        end
+        if not cost or score<cost then best,cost={point=point,vertex=v,actor={x=center.x,y=center.y,z=center.z}},score end
+    end
+    if level and type(level.vertex_in_direction)=="function" and valid_vertex(a:level_vertex_id()) then
+        for _,angle in ipairs({0,60,-60,120,-120,180}) do
+            local radians=angle*math.pi/180
+            local direction=vector():set(dx*math.cos(radians)-dz*math.sin(radians),0,dx*math.sin(radians)+dz*math.cos(radians))
+            consider(level.vertex_in_direction(a:level_vertex_id(),direction,radius))
+        end
+    end
+    if not best then
+        local vertex=point_for(object,center,a:level_vertex_id())
+        consider(vertex)
+    end
+    runtime.follow_point=best
+    if best then return best.point,best.vertex end
+end
+local function prepare(object, id, entry)
+    initial_distance(entry)
+    local runtime = state.objects[id]
+    if runtime == nil then runtime = {}; state.objects[id] = runtime end
+    if not runtime.prepared then
+        install_scoped_hooks()
+        object:set_enemy_callback(pet_enemy_filter)
+        object:remove_all_restrictions()
+        object:remove_home()
+        runtime.prepared = true
+    end
+    if entry.native_class == "SM_POLTR" then
+        -- These abilities run outside Think and target Actor() directly. Honor
+        -- passive/orders out of combat, but restore ALL native abilities during
+        -- an allowed native battle. Presence PP is muted in private config.
+        object:poltergeist_set_actor_ignore(not runtime.native_combat)
+    end
+    if entry.order=="rest" and entry.camp then
+        local camp=entry.camp
+        if runtime.home_vertex~=camp.vertex and valid_vertex(camp.vertex) and call(object,"accessible",camp.vertex)==true then
+            -- Native, per-monster home; no smart terrain, spawned restrictor or
+            -- global AI patch. Restore it from this save after load/online.
+            object:set_home(camp.vertex,3,CAMP_RADIUS,false,24)
+            runtime.home_vertex=camp.vertex
+        end
+    elseif runtime.home_vertex then object:remove_home();runtime.home_vertex=nil end
+    -- This also runs on every monster binder update. Never capture here:
+    -- SetScriptControl critical-finalizes the monster's native combat state.
+    -- Movement/idle/rest reacquire only when an actual order needs control.
+    return runtime
+end
+local function clear_enemy(object)
+    local enemy = pet_enemy(object)
+    if enemy then call(object, "enable_memory_object", enemy, false) end
+end
+local function replace_action(object,...)
+    -- _g.action() APPENDS to the native queue; it does not replace its front.
+    -- Clear only our registered pet's queue when actually changing its order.
+    object:reset_action_queue()
+    action(object,...)
+end
+local function capture_order(object,runtime)
+    local was_combat=runtime.native_combat
+    local entry=entry_for(object)
+    if entry and entry.native_class=="SM_POLTR" then object:poltergeist_set_actor_ignore(true) end
+    if was_combat then
+        runtime.native_combat=nil
+        runtime.target_gap_since,runtime.target_seen_at=nil,nil
+        runtime.mode,runtime.target,runtime.target_identity,runtime.target_section=nil,nil,nil,nil
+        runtime.progress,runtime.follow_point=nil,nil
+    end
+    if was_combat or call(object,"get_script")~=true then xr_logic.mob_capture(object,true) end
+end
+local function order_idle(object, runtime, now)
+    capture_order(object,runtime)
+    if runtime.mode == "idle" and now - (runtime.at or 0) < 7500 and call(object,"action") ~= nil then return end
+    -- Unlike act.rest, this does not select a walk/eat/sleep substate.
+    replace_action(object, anim(anim.stand_idle,0), cond(cond.time_end,8000))
+    runtime.mode, runtime.at, runtime.target = "idle", now, nil
+    runtime.progress=nil
+end
+local function order_move(object, runtime, position, vertex, mode, now)
+    capture_order(object,runtime)
+    local v, point = point_for(object, position, vertex)
+    if v == nil then order_idle(object, runtime, now); return end
+    local p=object:position()
+    local progress=runtime.progress
+    if not progress or runtime.mode~=mode or distance2(p,progress.point)>0.49 then
+        runtime.progress={point={x=p.x,y=p.y,z=p.z},at=now}
+        runtime.stalled_since=nil
+    elseif now-progress.at>=5000 then
+        runtime.blocked=runtime.blocked or {};runtime.blocked[runtime.vertex or v]=now+15000
+        runtime.follow_point=nil;runtime.stalled_since=runtime.stalled_since or progress.at
+        -- Stock axr_companions also resets physically stuck followers by an
+        -- ALife teleport TO THEIR CURRENT POSITION, never through a wall.
+        local threat=state.threats[id_of(object)]
+        local threatened=threat and threat.until_ms>=now and alive(online(threat.id))
+        if mode=="follow" and now-runtime.stalled_since>=20000 and
+            now-(runtime.last_physics_reset or -30000)>=30000 and valid_vertex(object:level_vertex_id()) and
+            pet_enemy(object)==nil and not threatened then
+            local sim=life()
+            if sim then
+                if db.offline_objects and db.offline_objects[id_of(object)] then db.offline_objects[id_of(object)].level_vertex_id=nil end
+                if db.spawned_vertex_by_id then db.spawned_vertex_by_id[id_of(object)]=nil end
+                sim:teleport_object(id_of(object),object:game_vertex_id(),object:level_vertex_id(),p)
+                runtime.last_physics_reset=now;runtime.prepared=false
+            end
+        end
+        runtime.progress={point={x=p.x,y=p.y,z=p.z},at=now}
+        -- Retry a different assist point on the next tick, not an infinite
+        -- sequence of commands queued behind the blocked action.
+        object:reset_action_queue();runtime.at=nil;runtime.vertex=nil
+        return
+    end
+    if runtime.mode == mode and call(object,"action") ~= nil and runtime.vertex==v and
+        runtime.destination and distance2(point,runtime.destination)<1 then return end
+    if runtime.mode==mode and runtime.at and now-runtime.at<1000 then return end
+    replace_action(object, move(move.run_fwd,v,point,1), cond(cond.move_end))
+    runtime.mode, runtime.at, runtime.vertex, runtime.target = mode, now, v, nil
+    runtime.destination={x=point.x,y=point.y,z=point.z}
+end
+local function order_combat(object, runtime, enemy, now)
+    local target = id_of(enemy)
+    local identity,section=call(enemy,"name"),call(enemy,"section")
+    local unchanged=runtime.native_combat and runtime.target==target and
+        runtime.target_identity==identity and runtime.target_section==section
+    -- No capture while normal native combat is progressing. Native Think/StateMan
+    -- must run continuously, rather than only execute_script_state. Clear the
+    -- previous order once; leave the queue empty until combat is over.
+    if not runtime.native_combat or call(object,"get_script")==true then object:reset_action_queue() end
+    runtime.native_combat=true
+    local entry=entry_for(object)
+    if entry and entry.native_class=="SM_POLTR" then object:poltergeist_set_actor_ignore(false) end
+    runtime.mode, runtime.at, runtime.target = "combat", now, target
+    runtime.target_identity,runtime.target_section=identity,section
+    if not unchanged or call(object,"see",enemy)==true then runtime.target_seen_at=now end
+    runtime.progress=nil
+    if call(object,"get_script")==true then xr_logic.mob_release(object) end
+end
+local function order_rest(object,runtime,now)
+    capture_order(object,runtime)
+    if runtime.mode=="rest" and call(object,"action")~=nil then return end
+    -- eStateRest owns the species' normal idle/walk/sleep/fun substates.
+    -- A long-lived action lets those timers run instead of restarting idle.
+    replace_action(object,act(act.rest),cond(cond.time_end,600000))
+    runtime.mode,runtime.at,runtime.target="rest",now,nil
+    runtime.progress=nil
+end
+local function marker_remove(id)
+    if level and type(level.map_remove_object_spot) == "function" then pcall(level.map_remove_object_spot,tonumber(id),SPOT) end
+end
+local function label_frame() local d=type(device)=="function" and device();return d and d.frame or clock() end
+local function retire_label(label)
+    if not label then return end
+    -- CDialogHolder stores raw pointers, does NOT own Lua-created windows.
+    -- Remove only disables its entry; keep a strong reference through its
+    -- deferred OnFrame sweep. Never leave an enabled pointer behind at F9.
+    retired_labels[#retired_labels+1]={window=label,frame=label_frame()+4}
+    pcall(function() label:Show(false);label:Enable(false) end)
+    if type(get_hud)=="function" then
+        pcall(function() local hud=get_hud();if hud then hud:RemoveDialogToRender(label) end end)
+    end
+end
+local function hide_label()
+    local label=state.label
+    state.label,state.nicknames,state.hover=nil,nil,nil
+    retire_label(label)
+end
+local function finite(v) return type(v)=="number" and v==v and math.abs(v)<math.huge end
+local function point_valid(p) return p and finite(p.x) and finite(p.y) and finite(p.z) end
+local function nickname_head(object)
+    local p=call(object,"position")
+    if not point_valid(p) then return end
+    local box=call(object,"bounding_box",false)
+    local center=call(object,"center",false)
+    local x,z=p.x,p.z
+    if point_valid(center) then x,z=center.x,center.z end
+    -- BoundingBox is model-local. No guessed head bone (and no missing-bone
+    -- warnings) for different monster skeletons or modded visuals.
+    if box and box.max and finite(box.max.y) and box.max.y>0 then
+        return {x=x,y=p.y+box.max.y+0.2,z=z}
+    elseif point_valid(center) then
+        return {x=x,y=center.y+math.max(0.4,center.y-p.y)+0.2,z=z}
+    end
+end
+local function nickname_project(head,d)
+    local p,dir,right,up=d.cam_pos,d.cam_dir,d.cam_right,d.cam_top
+    if not point_valid(p) or not point_valid(dir) or not point_valid(right) or not point_valid(up) then return end
+    local dx,dy,dz=head.x-p.x,head.y-p.y,head.z-p.z
+    local depth=dx*dir.x+dy*dir.y+dz*dir.z
+    if depth<=0.1 then return end
+    local fov=tonumber(d.fov)
+    if not finite(fov) or fov<=5 or fov>=180 then return end
+    local aspect=d.width>0 and d.height>0 and (d.height/d.width)/(768/1024) or 1
+    local focal=384/math.tan(fov*math.pi/360)
+    local x=512+(dx*right.x+dy*right.y+dz*right.z)/depth*focal*aspect
+    local y=384-(dx*up.x+dy*up.y+dz*up.z)/depth*focal
+    if finite(x) and finite(y) and x>=0 and x<=1024 and y>=24 and y<=768 then return x,y,aspect end
+end
+local function nickname_label(window)
+    local label={controls={}}
+    for _,offset in ipairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1},{0,0}}) do
+        local c=CUITextWnd();c:SetAutoDelete(true)
+        c:SetFont(GetFontLetterica16Russian());c:SetTextAlignment(2);c:SetTextComplexMode(false)
+        c:SetTextColor(#label.controls==8 and COLORS.green or color(0,0,0))
+        window:AttachChild(c);label.controls[#label.controls+1]={control=c,dx=offset[1],dy=offset[2]}
+    end
+    function label:Show(shown) for _,item in ipairs(self.controls) do item.control:Show(shown) end end
+    function label:Place(text,x,y,aspect)
+        if text~=self.text then
+            for _,item in ipairs(self.controls) do item.control:SetText(text) end
+            self.text=text
+        end
+        for _,item in ipairs(self.controls) do
+            item.control:SetWndSize(vector2():set(320*aspect,24))
+            item.control:SetWndPos(vector2():set(x-160*aspect+item.dx*aspect,y-24+item.dy))
+        end
+        self:Show(true)
+    end
+    return label
+end
+local update_label
+local function ensure_label_class()
+    if adb_mutant_v2_nicknames then return end
+    class "adb_mutant_v2_nicknames" (CUIScriptWnd)
+    function adb_mutant_v2_nicknames:__init()
+        super();self:SetAutoDelete(false);self:SetWndRect(Frect():set(0,0,1024,768))
+    end
+    function adb_mutant_v2_nicknames:Update()
+        if state.label~=self then return end -- invalidated before touching a pre-F9 native HUD
+        CUIScriptWnd.Update(self)
+        update_label()
+    end
+end
+update_label=function()
+    local frame=label_frame()
+    for i=#retired_labels,1,-1 do if frame>=retired_labels[i].frame then table.remove(retired_labels,i) end end
+    if state.loading or frame<(state.resume_frame or 0) then hide_label();return end
+    local a=actor()
+    if state.menu or not a or not alive(a) then hide_label();return end
+    local display=type(device)=="function" and device()
+    local records=saved(false)
+    if not display or display:is_paused() or not records or not next(records) then hide_label();return end
+    local function ensure_window()
+        if state.label then return true end
+        local hud=get_hud();if not hud then return false end
+        ensure_label_class()
+        state.label=adb_mutant_v2_nicknames();state.nicknames={}
+        local xml=CScriptXmlInit();xml:ParseFile("anomaly_donation_bridge_mutant_v2.xml")
+        state.hover=xml:InitTextWnd("aim_label",state.label);state.hover:Show(false)
+        hud:AddDialogToRender(state.label);state.label:Show(true)
+        return true
+    end
+    local used=0
+    for id,entry in pairs(records) do
+        local object=online(id)
+        if nickname_visible(entry.show_3d_nick,entry.nickname_key) and object and entry_for(object) and alive(object) then
+            local head=nickname_head(object)
+            local x,y,aspect
+            if head then x,y,aspect=nickname_project(head,display) end
+            if x then
+                if not ensure_window() then return end
+                used=used+1
+                local label=state.nicknames[used]
+                if not label then label=nickname_label(state.label);state.nicknames[used]=label end
+                label:Place(encoded(entry.donor_name),x,y,aspect)
+            end
+        end
+    end
+    for i=used+1,#(state.nicknames or {}) do state.nicknames[i]:Show(false) end
+    local ok,target=false,nil
+    if level and type(level.get_target_obj)=="function" then ok,target=pcall(level.get_target_obj) end
+    local hover_entry=ok and target and entry_for(target)
+    if hover_entry and alive(target) and ensure_window() then
+        state.hover:SetText(encoded(hover_entry.donor_name..": "..health_percent(target).."% HP"))
+        state.hover:Show(true)
+    elseif state.hover then state.hover:Show(false) end
+end
+local function close_menu()
+    local menu = state.menu
+    state.menu = nil
+    GUI = nil
+    if menu ~= nil then pcall(function() menu:HideDialog() end) end
+    if state.ui_registered then
+        state.ui_registered=nil
+        pcall(Unregister_UI,UI_NAME)
+    end
+end
+local function tick(now)
+    now = tonumber(now) or clock()
+    if state.forward_key then
+        local dik = state.forward_key
+        state.forward_key = nil
+        if level and type(level.press_action) == "function" then level.press_action(dik) end
+        return
+    end
+    update_label() -- world labels follow the render camera, not the 250 ms AI cadence
+    if now < state.next_update then return end
+    state.next_update = now+250
+    local records, a, sim = saved(false), actor(), life()
+    if records == nil or a == nil or sim == nil then close_menu();hide_label();return end
+    if not alive(a) then close_menu();hide_label();return end
+    local markers = now >= state.next_markers
+    if markers then state.next_markers = now+1000 end
+    for key, entry in pairs(records) do
+        local id, server = tonumber(key), server_for(key)
+        if server == nil or call(server,"name") ~= entry.identity then
+            marker_remove(id); records[key],state.objects[id],state.threats[id] = nil,nil,nil
+        else
+            local object = online(id)
+            if object and not alive(object) then
+                marker_remove(id); records[key],state.objects[id],state.threats[id] = nil,nil,nil
+                if news_manager and type(news_manager.send_tip)=="function" then
+                    local text="%c[255,238,153,26]"..encoded(entry.donor_name).."%c[default]"..encoded(" погиб")
+                    pcall(news_manager.send_tip,a,text,nil,nil,6000)
+                end
+            else
+                same_team(server,object,a)
+                if markers and level and type(level.map_add_object_spot)=="function" then
+                    local present = type(level.map_has_object_spot)=="function" and level.map_has_object_spot(id,SPOT)
+                    if not present or present==0 then level.map_add_object_spot(id,SPOT,encoded(entry.donor_name)) end
+                end
+                if object and entry_for(object) then
+                    entry.last_health_percent=health_percent(object)
+                    local runtime = prepare(object,id,entry)
+                    local p = object:position()
+                    local enemy,pending = choose_enemy(object,entry,now)
+                    if pending then
+                        -- No capture/reset while native memory is settling.
+                    elseif entry.order=="rest" and entry.camp then
+                        local camp=entry.camp
+                        local d2=distance2(p,camp)
+                        if d2>CAMP_RADIUS^2 or runtime.mode=="camp_return" and d2>24^2 then
+                            clear_enemy(object);order_move(object,runtime,vec(camp),camp.vertex,"camp_return",now)
+                        elseif enemy then order_combat(object,runtime,enemy,now)
+                        elseif runtime.home_vertex then clear_enemy(object);order_rest(object,runtime,now)
+                        else clear_enemy(object);order_idle(object,runtime,now) end
+                    elseif entry.order == "stay" and entry.anchor then
+                        local q = entry.anchor
+                        local d2 = (p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2
+                        if d2>25 then clear_enemy(object); order_move(object,runtime,vec(q),q.vertex,"return",now)
+                        elseif enemy then order_combat(object,runtime,enemy,now)
+                        elseif d2>4 then clear_enemy(object); order_move(object,runtime,vec(q),q.vertex,"return",now)
+                        else clear_enemy(object); order_idle(object,runtime,now) end
+                    else
+                        local dist = p:distance_to(a:position())
+                        if dist>100 then
+                            clear_enemy(object)
+                            local point,vertex=follow_point(object,runtime,entry,a,now)
+                            if point then order_move(object,runtime,point,vertex,"follow",now) else order_idle(object,runtime,now) end
+                        elseif enemy then order_combat(object,runtime,enemy,now)
+                        elseif dist>entry.follow_distance+2 or runtime.mode=="follow" and dist>entry.follow_distance+1 then
+                            clear_enemy(object)
+                            local point,vertex=follow_point(object,runtime,entry,a,now)
+                            if point then order_move(object,runtime,point,vertex,"follow",now) else order_idle(object,runtime,now) end
+                        else clear_enemy(object); order_idle(object,runtime,now) end
+                    end
+                end
+            end
+        end
+    end
+    if state.menu and markers then state.menu:Refresh() end
+end
+
+-- Public only inside this module: tests/menu operate on saved IDs, never arbitrary objects.
+function set_command(ids, command, value)
+    if command ~= "follow" and command ~= "stay" and command ~= "rest" and command ~= "distance" and
+        command ~= "distance_reset" and command ~= "combat" and command ~= "refresh" then return false end
+    if command=="distance" and (type(value)~="number" or value<2 or value>50 or value~=math.floor(value)) then return false end
+    if command=="combat" and MODE_TEXT[value]==nil then return false end
+    local records, changed = saved(false), false
+    for _, id in ipairs(ids or {}) do
+        local entry = records and records[tostring(id)]
+        local server = entry and server_for(id)
+        if server and call(server,"name")==entry.identity then
+            initial_distance(entry)
+            local previous=entry.order
+            local object=online(id)
+            if command=="follow" then entry.order,entry.anchor,entry.camp="follow",nil,nil
+            elseif command=="stay" then
+                local pos=object and object:position() or server.position
+                entry.anchor={x=pos.x,y=pos.y,z=pos.z,vertex=object and object:level_vertex_id() or server.m_level_vertex_id,
+                    game_vertex=server.m_game_vertex_id}
+                entry.order,entry.camp="stay",nil
+            elseif command=="rest" then
+                if not entry.camp then
+                    -- Online selections share the actor's camp. An offline
+                    -- pet rests on its own level, never at a foreign vertex.
+                    local source=object and actor() or nil
+                    local pos=source and source:position() or server.position
+                    local vertex=source and source:level_vertex_id() or server.m_level_vertex_id
+                    if object then
+                        local v,point=point_for(object,pos,vertex)
+                        if not v then return false end
+                        vertex,pos=v,point
+                    end
+                    entry.camp={x=pos.x,y=pos.y,z=pos.z,vertex=vertex,
+                        game_vertex=source and source:game_vertex_id() or server.m_game_vertex_id,radius=CAMP_RADIUS}
+                end
+                entry.order,entry.anchor="rest",nil
+            elseif command=="distance" then entry.follow_distance=value
+            elseif command=="distance_reset" then entry.follow_distance=initial_distance(entry)
+            elseif command=="combat" then entry.combat_mode=value end
+            if object and entry_for(object) and alive(object) then
+                local runtime=state.objects[tonumber(id)]
+                if runtime then capture_order(object,runtime) end
+                clear_enemy(object)
+                object:reset_action_queue()
+                if command=="follow" or command=="stay" then object:remove_home() end
+                if previous=="rest" and command~="rest" and command~="refresh" then xr_logic.mob_capture(object,true) end
+                if command=="refresh" then
+                    xr_logic.mob_capture(object,true)
+                end
+            end
+            state.objects[tonumber(id)],state.threats[tonumber(id)]=nil,nil
+            changed=true
+        end
+    end
+    state.next_update=0
+    return changed
+end
+
+local function ui_free()
+    local a=actor()
+    if not alive(a) then return false end
+    if type(device)=="function" and device():is_paused() then return false end
+    if actor_menu==nil or type(actor_menu.is_hud_free)~="function" or not actor_menu.is_hud_free() then return false end
+    if type(Check_UI)=="function" and Check_UI() then return false end
+    if type(_GUIs)=="table" and next(_GUIs)~=nil then return false end
+    local inventory=rawget(_G,"ui_inventory")
+    if inventory and inventory.GUI and inventory.GUI:IsShown() then return false end
+    local menus=rawget(_G,"ActorMenu")
+    if menus then
+        for _, getter in ipairs({"get_actor_menu","get_pda_menu"}) do
+            local wnd=type(menus[getter])=="function" and menus[getter]() or nil
+            if wnd and wnd:IsShown() then return false end
+        end
+    end
+    return true
+end
+local function ensure_menu_class()
+    if anomaly_donation_bridge_mutant_v2_menu~=nil then return end
+    class "anomaly_donation_bridge_mutant_v2_menu" (CUIScriptWnd)
+    function anomaly_donation_bridge_mutant_v2_menu:__init() super()
+        self:SetAutoDelete(false)
+        local rect=Frect(); rect:set(0,0,1024,768); self:SetWndRect(rect)
+        local xml=CScriptXmlInit(); xml:ParseFile("anomaly_donation_bridge_mutant_v2.xml")
+        local display=type(device)=="function" and device() or nil
+        local w,h=display and tonumber(display.width),display and tonumber(display.height)
+        -- Same correction as native UI().get_current_kx(). Only horizontal
+        -- geometry is corrected: engine fonts already keep their proportions.
+        self.aspect_k=w and h and w>0 and h>0 and math.min(1,(h/w)/(768/1024)) or 1
+        local function fit(control)
+            local p=control:GetWndPos()
+            local x,y=p.x,p.y
+            local width,height=control:GetWidth(),control:GetHeight()
+            control:SetWndPos(vector2():set(512+(x-512)*self.aspect_k,y))
+            control:SetWndSize(vector2():set(width*self.aspect_k,height))
+            return control
+        end
+        self.panel=fit(xml:InitStatic("panel",self))
+        self.title=fit(xml:InitTextWnd("title",self))
+        self.title:SetText(encoded("Напарники-мутанты"))
+        self.decorations={}
+        for _,key in ipairs({"header_line","order_line","combat_line","distance_line","footer_line","column_line"}) do
+            self.decorations[key]=fit(xml:InitStatic(key,self))
+        end
+        self.fields={}
+        local captions={list_heading="НАПАРНИКИ",status_heading="СОСТОЯНИЕ",health_label="Здоровье:",
+            order_label="Приказ:",combat_label="Режим боя:",distance_label="Дистанция следования:"}
+        for _,key in ipairs({"list_heading","status_heading","health_label","health_value","order_label",
+            "order_value","combat_label","combat_value","health_scale","selection","distance_label","distance_value","page_number"}) do
+            self.fields[key]=fit(xml:InitTextWnd(key,self))
+            if captions[key] then self.fields[key]:SetText(encoded(captions[key])) end
+        end
+        self.fields.selection:SetEllipsis(true)
+        self.list=fit(xml:InitListBox("list",self)); self.list:ShowSelectedItem(true)
+        self:Register(self.list,"list")
+        self.buttons,self.button_styles={},{}
+        local labels={follow="Следовать",stay="Стоять",rest="Отдыхать",assist="Помогать",defend="Оборонять",passive="Игнорировать бой",
+            less="-1 м",reset="Сбросить",more="+1 м",refresh="Обновить зависшую логику",close="x",previous_page="<",next_page=">"}
+        for key,label in pairs(labels) do
+            -- Stock 3t buttons keep an unresizable private background when Lua
+            -- SetWndSize is used. A native single-skin button keeps its visible
+            -- texture and click rectangle exactly together after aspect fitting.
+            local button=CUIButton();button:SetAutoDelete(true);self:AttachChild(button)
+            xml:InitWindow(key,0,button);fit(button)
+            button:SetStretchTexture(true)
+            button:TextControl():SetFont(GetFontLetterica16Russian())
+            button:TextControl():SetTextColor(COLORS.normal)
+            button:TextControl():SetText(encoded(label)); self:Register(button,key); self.buttons[key]=button
+        end
+        self:AddCallback("list",ui_events.LIST_ITEM_SELECT,self.OnSelect,self)
+        self:AddCallback("follow",ui_events.BUTTON_CLICKED,self.OnFollow,self)
+        self:AddCallback("stay",ui_events.BUTTON_CLICKED,self.OnStay,self)
+        self:AddCallback("rest",ui_events.BUTTON_CLICKED,self.OnRest,self)
+        self:AddCallback("assist",ui_events.BUTTON_CLICKED,self.OnAssist,self)
+        self:AddCallback("defend",ui_events.BUTTON_CLICKED,self.OnDefend,self)
+        self:AddCallback("passive",ui_events.BUTTON_CLICKED,self.OnPassive,self)
+        self:AddCallback("less",ui_events.BUTTON_CLICKED,self.OnLess,self)
+        self:AddCallback("more",ui_events.BUTTON_CLICKED,self.OnMore,self)
+        self:AddCallback("reset",ui_events.BUTTON_CLICKED,self.OnReset,self)
+        self:AddCallback("refresh",ui_events.BUTTON_CLICKED,self.OnRefresh,self)
+        self:AddCallback("close",ui_events.BUTTON_CLICKED,self.OnClose,self)
+        self:AddCallback("previous_page",ui_events.BUTTON_CLICKED,self.OnPreviousPage,self)
+        self:AddCallback("next_page",ui_events.BUTTON_CLICKED,self.OnNextPage,self)
+        self.selected=nil; self.ids={};self.row_fields={};self.page=1; self:Refresh()
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:Targets()
+        if self.selected then return {self.selected} end
+        local result={}; for _,id in ipairs(self.ids) do result[#result+1]=id end; return result
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:OnSelect()
+        local index=self.list:GetSelectedIndex()
+        self.selected=index and index>0 and self.visible_ids[index] or nil
+        self:UpdateDetails()
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:UpdateDetails()
+        local records,targets=saved(false) or {},self:Targets()
+        local values={}
+        local function merge(key,value)
+            if values[key]==nil then values[key]=value elseif values[key]~=value then values[key]=false end
+        end
+        local lowest_hp
+        for _,id in ipairs(targets) do
+            local entry=records[tostring(id)]
+            local object=online(id)
+            if entry then
+                local hp=object and health_percent(object) or entry.last_health_percent
+                merge("health",hp and hp.."%"..(object and "" or " (офлайн)") or "Офлайн")
+                if object and hp then lowest_hp=math.min(lowest_hp or hp,hp) end
+                merge("order",entry.order)
+                merge("combat",entry.combat_mode)
+                merge("distance",entry.follow_distance)
+                merge("health_scale",entry.health_percent)
+            end
+        end
+        self.fields.health_value:SetText(encoded(values.health==false and "Разное" or values.health or "—"))
+        self.fields.order_value:SetText(encoded(values.order==false and "Разные приказы" or ORDER_TEXT[values.order] or "—"))
+        self.fields.combat_value:SetText(encoded(values.combat==false and "Разные режимы" or MODE_TEXT[values.combat] or "—"))
+        self.fields.distance_value:SetText(encoded(values.distance==false and "Разная" or values.distance and values.distance.." м" or "—"))
+        self.fields.health_scale:SetText(encoded(values.health_scale==false and "Множитель начального здоровья: разный" or
+            values.health_scale and "Множитель начального здоровья: "..values.health_scale or ""))
+        self.fields.health_value:SetTextColor(lowest_hp and lowest_hp<=25 and COLORS.red or lowest_hp and lowest_hp<=50 and COLORS.orange or COLORS.normal)
+        self.fields.order_value:SetTextColor(COLORS[ORDER_STYLE[values.order]] or COLORS.normal)
+        self.fields.combat_value:SetTextColor(COLORS[MODE_STYLE[values.combat]] or COLORS.normal)
+        for key,button in pairs(self.buttons) do
+            local style=""
+            if key==values.order then style=ORDER_STYLE[key] or "" end
+            if key==values.combat then style=MODE_STYLE[key] or "" end
+            if self.button_styles[key]~=style then
+                button:InitTexture("adb_mc2_button"..(style=="" and "" or "_"..style).."_e")
+                self.button_styles[key]=style
+            end
+            button:Enable(key=="close" or #targets>0)
+        end
+        self.buttons.previous_page:Enable(self.page>1)
+        self.buttons.next_page:Enable(self.page<self.pages)
+        local selected=records[tostring(self.selected)]
+        local selection=selected and selected.donor_name or "Выбраны все: "..#targets
+        if self.any_offline then selection=selection.."  |  * — офлайн" end
+        self.fields.selection:SetText(encoded(selection))
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:Refresh()
+        local records=saved(false) or {}
+        local ids={}; for key in pairs(records) do ids[#ids+1]=tonumber(key) end
+        table.sort(ids)
+        local pages=math.max(1,math.ceil(#ids/10))
+        self.page=math.max(1,math.min(self.page,pages));self.pages=pages
+        local changed=#ids~=#self.ids
+        for i,id in ipairs(ids) do if self.ids[i]~=id then changed=true end end
+        changed=changed or self.rendered_page~=self.page
+        if changed or self.list:GetSize()==0 then
+            -- Stock Lua cannot reposition a list's private scrollbar after a
+            -- resize. Bounded pages keep it hidden even on ultrawide screens.
+            self.ids=ids;self.visible_ids={};self.row_fields={};self.rendered_page=self.page
+            self.list:Clear(); self.list:AddTextItem(encoded("Все напарники ("..#ids..")"))
+            local selected_index=0
+            for i=(self.page-1)*10+1,math.min(#ids,self.page*10) do
+                local id=ids[i];local index=#self.visible_ids+1;self.visible_ids[index]=id
+                self.list:AddTextItem("")
+                local row=self.list:GetItemByIndex(index)
+                local name=row:GetTextItem()
+                local column_k=math.max(1,math.min(428*self.aspect_k,row:GetWidth()-2))/428
+                name:SetWndSize(vector2():set(158*column_k,28));name:SetEllipsis(true)
+                local section=row:AddTextField("",208*column_k);section:SetEllipsis(true)
+                local hp=row:AddTextField("",62*column_k)
+                self.row_fields[index]={name=name,section=section,hp=hp}
+                if self.selected==id then selected_index=index end
+            end
+            if self.selected and not records[tostring(self.selected)] then self.selected=nil end
+            self.list:SetSelectedIndex(self.selected and selected_index==0 and 4294967295 or selected_index)
+        end
+        self.buttons.previous_page:Show(pages>1);self.buttons.next_page:Show(pages>1);self.fields.page_number:Show(pages>1)
+        self.fields.page_number:SetText(encoded(self.page.." / "..pages))
+        self.any_offline=false
+        for _,id in ipairs(ids) do if not online(id) then self.any_offline=true end end
+        for index,id in ipairs(self.visible_ids) do
+            local entry=records[tostring(id)]
+            initial_distance(entry)
+            local object=online(id)
+            local hp=object and health_percent(object) or entry.last_health_percent
+            if not object then self.any_offline=true end
+            local row=self.row_fields[index]
+            row.name:SetText(encoded(((self.page-1)*10+index).." "..entry.donor_name))
+            row.section:SetText(encoded("| "..entry.section))
+            row.hp:SetText(encoded("| "..(hp and hp.."%"..(object and "" or "*") or "—")))
+            row.hp:SetTextColor(not object and COLORS.muted or hp and hp<=25 and COLORS.red or hp and hp<=50 and COLORS.orange or COLORS.normal)
+        end
+        self:UpdateDetails()
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:Apply(command,value)
+        set_command(self:Targets(),command,value); self:Refresh()
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:OnFollow() self:Apply("follow") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnStay() self:Apply("stay") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnRest() self:Apply("rest") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnAssist() self:Apply("combat","assist") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnDefend() self:Apply("combat","defend") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnPassive() self:Apply("combat","passive") end
+    function anomaly_donation_bridge_mutant_v2_menu:Distance(delta)
+        local records=saved(false) or {}
+        for _,id in ipairs(self:Targets()) do
+            local e=records[tostring(id)]
+            if e then set_command({id},"distance",math.max(2,math.min(50,e.follow_distance+delta))) end
+        end
+        self:Refresh()
+    end
+    function anomaly_donation_bridge_mutant_v2_menu:OnLess() self:Distance(-1) end
+    function anomaly_donation_bridge_mutant_v2_menu:OnMore() self:Distance(1) end
+    function anomaly_donation_bridge_mutant_v2_menu:OnReset() self:Apply("distance_reset") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnRefresh() self:Apply("refresh") end
+    function anomaly_donation_bridge_mutant_v2_menu:OnPreviousPage() self.page=self.page-1;self:Refresh() end
+    function anomaly_donation_bridge_mutant_v2_menu:OnNextPage() self.page=self.page+1;self:Refresh() end
+    function anomaly_donation_bridge_mutant_v2_menu:OnClose() close_menu() end
+    function anomaly_donation_bridge_mutant_v2_menu:Close() close_menu() end
+    function anomaly_donation_bridge_mutant_v2_menu:OnKeyboard(dik,event)
+        if dik==state.open_key and event==ui_events.WINDOW_KEY_PRESSED then self.toggle_armed=true end
+        if event==ui_events.WINDOW_KEY_PRESSED and
+            (dik==DIK_keys.DIK_F5 or dik==DIK_keys.DIK_F9) then
+            close_menu(); state.forward_key=dik; return true
+        end
+        if event==ui_events.WINDOW_KEY_RELEASED and (dik==DIK_keys.DIK_ESCAPE or dik==state.open_key and self.toggle_armed) then
+            close_menu(); return true
+        end
+        return CUIScriptWnd.OnKeyboard(self,dik,event)
+    end
+end
+local function key_press(dik,bind,disabled,flags)
+    -- Detach while the old HUD is still alive, even when input is disabled.
+    local actions=key_bindings
+    local quick=actions and bind~=nil and
+        (actions.kQUICK_LOAD~=nil and bind==actions.kQUICK_LOAD or actions.kQUICK_SAVE~=nil and bind==actions.kQUICK_SAVE)
+    if quick or dik==DIK_keys.DIK_F5 or dik==DIK_keys.DIK_F9 then
+        state.resume_frame=label_frame()+2
+        if dik==DIK_keys.DIK_F9 or actions and actions.kQUICK_LOAD~=nil and bind==actions.kQUICK_LOAD then state.loading=true end
+        close_menu();hide_label();return
+    end
+    if disabled==true or type(flags)~="table" or flags.ret_value==false and not nickname_owns_input(flags) or state.menu or state.loading then return end
+    local free_ok,free=pcall(ui_free)
+    if not free_ok or not free then return end
+    local selected,current
+    for _,entry in pairs(saved(false) or {}) do
+        local key=entry.nickname_key or "NEXT"
+        if DIK_keys["DIK_"..key]==dik then selected=key;current=current or nickname_visible(entry.show_3d_nick,key) end
+    end
+    if selected then nickname_toggle(selected,not not current,flags);return end
+    if flags.ret_value==false then return end
+    local matches=false
+    for _,entry in pairs(saved(false) or {}) do
+        if DIK_keys["DIK_"..entry.menu_key]==dik then matches=true; break end
+    end
+    if not matches then return end
+    local free_ok,free=pcall(ui_free)
+    if not free_ok or not free then return end
+    local ok,reason=pcall(function()
+        ensure_menu_class()
+        hide_label()
+        state.open_key=dik
+        state.menu=anomaly_donation_bridge_mutant_v2_menu()
+        GUI=state.menu
+        state.ui_registered=true
+        Register_UI(UI_NAME,MODULE_NAME)
+        state.menu:ShowDialog(true)
+    end)
+    if ok then flags.ret_value=false
+    else close_menu(); if type(printf)=="function" then printf("[ADB] mutant V2 menu: %s",tostring(reason)) end end
+end
+local function on_load()
+    -- The passive window is Lua-owned and unparented. Remove its raw pointer
+    -- from the CURRENT holder even when load was initiated by console/menu,
+    -- not just by F9. Do not call modal HideDialog through an old Holder.
+    hide_label();retire_label(state.menu)
+    if state.ui_registered then pcall(Unregister_UI,UI_NAME) end
+    GUI=nil
+    state={objects={},threats={},next_update=0,next_markers=0,resume_frame=label_frame()+2}
+end
+local function level_changing()
+    close_menu()
+    hide_label()
+    local sim=life(); local records=saved(false)
+    if sim==nil or records==nil then return end
+    local a=call(sim,"actor")
+    if a==nil then return end
+    local ok,gvid,lvid,position=pcall(function()
+        local node=game_graph():vertex(a.m_game_vertex_id)
+        return a.m_game_vertex_id,node:level_vertex_id(),node:level_point()
+    end)
+    if not ok or not valid_vertex(lvid) then return end
+    for key,entry in pairs(records) do
+        local id=tonumber(key)
+        if entry.order=="follow" then
+            marker_remove(id)
+            if db and db.offline_objects and db.offline_objects[id] then db.offline_objects[id].level_vertex_id=nil end
+            if db and db.spawned_vertex_by_id then db.spawned_vertex_by_id[id]=nil end
+            sim:teleport_object(id,gvid,lvid,position)
+        end
+    end
+    state.objects,state.threats,state.next_update,state.next_markers={},{},0,0
+end
+local function monster_update(object)
+    local entry,id=entry_for(object)
+    local a=actor()
+    if entry and a and alive(object) then
+        -- During native special animations the monster may temporarily refuse
+        -- capture. Do not let an optional AI operation abort the binder callback.
+        pcall(function()
+            same_team(server_for(id),object,a)
+            prepare(object,id,entry)
+        end)
+    end
+end
+local function execute(context)
+    local o=context.options
+    if not anomaly_donation_bridge_catalog.is_spawn_safe(o.section,"mutant") then return "rejected","spawn_section_unsafe" end
+    local alias,why=profile_ready(o.section)
+    if not alias then return "rejected",why end
+    local points,placement=anomaly_donation_bridge_common.spawn_points(context.actor,1,math.max(1,o.radius_meters-5),o.radius_meters,720)
+    if points==nil then return "deferred",placement end
+    local ok,server=pcall(alife_create,alias,points[1].position,points[1].vertex_id,context.actor:game_vertex_id())
+    if not ok or server==nil then return "rejected","mutant_v2_spawn_failed" end
+    local id=tonumber(server.id)
+    local setup=pcall(function()
+        assert(id and id>0 and same_team(server,nil,context.actor))
+        local identity=assert(call(server,"name"))
+        assert(saved(true))[tostring(id)]={ identity=identity,donor_name=o.donor_name,section=o.section,
+            spawn_section=alias,native_class=o.native_class,health_percent=o.health_percent,menu_key=o.menu_key,
+            follow_distance=o.follow_distance,initial_follow_distance=o.follow_distance,
+            combat_mode=o.combat_mode,order="follow",last_health_percent=100,show_3d_nick=o.show_3d_nick,nickname_key=o.nickname_key }
+    end)
+    if not setup then
+        local rolled=anomaly_donation_bridge_common.rollback_server_objects({server})
+        return rolled and "rejected" or "uncertain",rolled and "mutant_v2_setup_rolled_back" or "mutant_v2_setup_state_unknown"
+    end
+    state.next_update=0
+    return "executed","spawned_mutant_companion_v2_"..id.."_"..o.section
+end
+function on_game_start()
+    install_scoped_hooks()
+    local ok,why=anomaly_donation_bridge_registry.register(HANDLER,{
+        can_execute=can_execute,execute=execute,is_supported=supported,support_probe_is_hint=true,
+        update=tick,on_game_load=on_load,on_level_changing=level_changing
+    })
+    if not ok and type(printf)=="function" then printf("[ADB] mutant V2 registration: %s",tostring(why)) end
+    if not callbacks_registered and type(RegisterScriptCallback)=="function" then
+        RegisterScriptCallback("on_enemy_eval",enemy_eval)
+        RegisterScriptCallback("actor_on_before_hit",actor_before_hit)
+        RegisterScriptCallback("monster_on_before_hit",monster_before_hit)
+        RegisterScriptCallback("monster_on_update",monster_update)
+        RegisterScriptCallback("on_before_key_press",key_press)
+        -- Stock level_input routes quickload directly here, bypassing the
+        -- generic on_before_key_press callback entirely. Detach old HUD first.
+        RegisterScriptCallback("on_before_load_input",function() state.loading=true;close_menu();hide_label() end)
+        RegisterScriptCallback("on_before_save_input",function() state.resume_frame=label_frame()+2;close_menu();hide_label() end)
+        RegisterScriptCallback("save_state",function() state.resume_frame=label_frame()+2;close_menu();hide_label() end)
+        callbacks_registered=true
+    end
+end

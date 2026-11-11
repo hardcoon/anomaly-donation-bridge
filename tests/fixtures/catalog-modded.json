@@ -1,0 +1,76 @@
+{
+  "revision": "modpack-session-8",
+  "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "entries": [
+    {
+      "sectionId": "mod_chimera_alpha",
+      "kind": "Mutant",
+      "displayName": "Альфа-химера",
+      "category": "Добавленные мутанты",
+      "strength": "Strong",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "mod_unknown_beast",
+      "kind": "Mutant",
+      "displayName": "mod_unknown_beast",
+      "category": "Без классификации",
+      "strength": "Unclassified",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "mod_faction_regular",
+      "kind": "Npc",
+      "displayName": "Боец новой группировки",
+      "category": "Новая группировка",
+      "strength": "Normal",
+      "faction": "mod_faction",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "mod_faction_squad",
+      "kind": "StalkerSquad",
+      "displayName": "Отряд новой группировки",
+      "category": "Новая группировка",
+      "strength": "Normal",
+      "faction": "mod_faction",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "simulation_mod_beast",
+      "kind": "MutantSquad",
+      "displayName": "Стая нового мутанта",
+      "category": "Добавленные мутанты",
+      "strength": "Unclassified",
+      "faction": "monster",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "mod_medkit_mk2",
+      "kind": "Item",
+      "displayName": "Модернизированная аптечка",
+      "category": "Медицина",
+      "strength": "Unclassified",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    },
+    {
+      "sectionId": "zone_mod_gravity",
+      "kind": "Anomaly",
+      "displayName": "Гравитационная воронка",
+      "category": "Гравитационные",
+      "strength": "Normal",
+      "faction": "",
+      "isAvailable": true,
+      "quarantineReason": "None"
+    }
+  ]
+}

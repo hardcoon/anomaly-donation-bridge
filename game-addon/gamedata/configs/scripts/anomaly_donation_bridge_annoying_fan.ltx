@@ -1,0 +1,41 @@
+[logic]
+active = beh@fan
+post_combat_time = 0,0
+
+[beh@fan]
+behavior_state = beh_move
+target = actor
+walk_dist = 4
+jog_dist = 8
+run_dist = 90
+keep_distance = near
+near_desired_dist = 2
+wait_anim = random_animation
+walk_anim = patrol
+jog_anim = rush
+run_anim = panic
+sprint_anim = panic
+delay_anim = random_animation
+meet = meet@fan
+combat_ignore_keep_when_attacked = true
+combat_ignore_cond = true
+gather_items_enabled = false
+help_wounded_enabled = false
+corpse_detection_enabled = false
+use_camp = false
+
+[meet@fan]
+abuse = false
+close_distance = 2
+close_anim = guard_na
+close_snd_hello = nil
+close_snd_bye = nil
+close_victim = actor
+far_distance = 0
+far_anim = nil
+far_snd = nil
+far_victim = nil
+use = {=dist_to_actor_le(5)} true, false
+allow_break = true
+use_text = nil
+trade_enable = false

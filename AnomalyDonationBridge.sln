@@ -1,0 +1,87 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.Core", "src\AnomalyDonationBridge.Core\AnomalyDonationBridge.Core.csproj", "{12477B73-B394-4AB1-A015-30D3D382166E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.Persistence", "src\AnomalyDonationBridge.Persistence\AnomalyDonationBridge.Persistence.csproj", "{730013D1-FDC9-42D9-91DF-37323E90A8D5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.DonationAlerts", "src\AnomalyDonationBridge.DonationAlerts\AnomalyDonationBridge.DonationAlerts.csproj", "{5DBA13DD-B4F5-40AA-8213-B700198CDE12}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.DonateX", "src\AnomalyDonationBridge.DonateX\AnomalyDonationBridge.DonateX.csproj", "{1AD9BBA1-2626-4C44-B313-DBC9CF546B13}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.GameIpc", "src\AnomalyDonationBridge.GameIpc\AnomalyDonationBridge.GameIpc.csproj", "{27277D4C-FCDA-4757-8B29-24C5A3F05AC0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.App", "src\AnomalyDonationBridge.App\AnomalyDonationBridge.App.csproj", "{F98257C5-DC93-4C2E-B0EA-42EBB70240EE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.CrashGuard", "src\AnomalyDonationBridge.CrashGuard\AnomalyDonationBridge.CrashGuard.csproj", "{804052AB-EB69-4701-B973-D9F9A0EF815D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.Tests", "tests\AnomalyDonationBridge.Tests\AnomalyDonationBridge.Tests.csproj", "{D04A0DF6-35EC-42EC-822F-6587C3225388}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{71AD1747-9E8E-4FBB-BB46-53C6BB7D0CD3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.ProtocolTests", "tests\AnomalyDonationBridge.ProtocolTests\AnomalyDonationBridge.ProtocolTests.csproj", "{6DC3C45A-8C22-493C-BE66-712B7457874C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.AppTests", "tests\AnomalyDonationBridge.AppTests\AnomalyDonationBridge.AppTests.csproj", "{875CF12F-8E89-4746-BA65-C11344C3F7CA}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{C651A422-4966-40C8-B2D9-8EE09337FA48}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.YouTubeChat", "src\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj", "{09608A58-6E82-4AC9-8476-BB3D44653134}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{804052AB-EB69-4701-B973-D9F9A0EF815D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{804052AB-EB69-4701-B973-D9F9A0EF815D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{804052AB-EB69-4701-B973-D9F9A0EF815D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{804052AB-EB69-4701-B973-D9F9A0EF815D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{12477B73-B394-4AB1-A015-30D3D382166E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{12477B73-B394-4AB1-A015-30D3D382166E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{12477B73-B394-4AB1-A015-30D3D382166E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{12477B73-B394-4AB1-A015-30D3D382166E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{730013D1-FDC9-42D9-91DF-37323E90A8D5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{730013D1-FDC9-42D9-91DF-37323E90A8D5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{730013D1-FDC9-42D9-91DF-37323E90A8D5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{730013D1-FDC9-42D9-91DF-37323E90A8D5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5DBA13DD-B4F5-40AA-8213-B700198CDE12}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5DBA13DD-B4F5-40AA-8213-B700198CDE12}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5DBA13DD-B4F5-40AA-8213-B700198CDE12}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5DBA13DD-B4F5-40AA-8213-B700198CDE12}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1AD9BBA1-2626-4C44-B313-DBC9CF546B13}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1AD9BBA1-2626-4C44-B313-DBC9CF546B13}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1AD9BBA1-2626-4C44-B313-DBC9CF546B13}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1AD9BBA1-2626-4C44-B313-DBC9CF546B13}.Release|Any CPU.Build.0 = Release|Any CPU
+		{27277D4C-FCDA-4757-8B29-24C5A3F05AC0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{27277D4C-FCDA-4757-8B29-24C5A3F05AC0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{27277D4C-FCDA-4757-8B29-24C5A3F05AC0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{27277D4C-FCDA-4757-8B29-24C5A3F05AC0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F98257C5-DC93-4C2E-B0EA-42EBB70240EE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F98257C5-DC93-4C2E-B0EA-42EBB70240EE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F98257C5-DC93-4C2E-B0EA-42EBB70240EE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F98257C5-DC93-4C2E-B0EA-42EBB70240EE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D04A0DF6-35EC-42EC-822F-6587C3225388}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D04A0DF6-35EC-42EC-822F-6587C3225388}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D04A0DF6-35EC-42EC-822F-6587C3225388}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D04A0DF6-35EC-42EC-822F-6587C3225388}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6DC3C45A-8C22-493C-BE66-712B7457874C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6DC3C45A-8C22-493C-BE66-712B7457874C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6DC3C45A-8C22-493C-BE66-712B7457874C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6DC3C45A-8C22-493C-BE66-712B7457874C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{875CF12F-8E89-4746-BA65-C11344C3F7CA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{875CF12F-8E89-4746-BA65-C11344C3F7CA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{875CF12F-8E89-4746-BA65-C11344C3F7CA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{875CF12F-8E89-4746-BA65-C11344C3F7CA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{09608A58-6E82-4AC9-8476-BB3D44653134}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{09608A58-6E82-4AC9-8476-BB3D44653134}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{09608A58-6E82-4AC9-8476-BB3D44653134}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{09608A58-6E82-4AC9-8476-BB3D44653134}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{6DC3C45A-8C22-493C-BE66-712B7457874C} = {71AD1747-9E8E-4FBB-BB46-53C6BB7D0CD3}
+		{875CF12F-8E89-4746-BA65-C11344C3F7CA} = {71AD1747-9E8E-4FBB-BB46-53C6BB7D0CD3}
+		{09608A58-6E82-4AC9-8476-BB3D44653134} = {C651A422-4966-40C8-B2D9-8EE09337FA48}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,551 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.dementia",
+  "displayName": "Деменция",
+  "description": "На указанное время случайно переставляет назначенные игроком клавиши внутри выбранных групп действий. Слоты оружия 1–6 перемешиваются между собой; направление смены оружия колёсиком временно инвертируется, если движок поддерживает этот параметр. Назначения клавиш не изменяются, USER.ltx напрямую не редактируется. Таймер переживает F9 в пределах текущего запуска игры.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"duration_seconds","displayName":"Длительность, сек.","kind":"Integer","minimum":10,"maximum":600,"defaultValue":"30"},
+    {"key":"mix_stance","displayName":"Присесть, бежать, прыгать, идти шагом","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"mix_quick_slots","displayName":"Слоты быстрого доступа","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"mix_equipment","displayName":"Инвентарь, КПК, карта, детектор, фонарик","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"mix_weapon_slots","displayName":"Слоты оружия 1–6 и инверсия колёсика","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"swap_fire_aim","displayName":"Стрельба и прицеливание","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"swap_lookout","displayName":"Взгляд влево и вправо","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"invert_movement","displayName":"Инвертировать направления движения","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters": {
+    "duration_seconds":"30",
+    "mix_stance":"true",
+    "mix_quick_slots":"true",
+    "mix_equipment":"true",
+    "mix_weapon_slots":"true",
+    "swap_fire_aim":"true",
+    "swap_lookout":"true",
+    "invert_movement":"false"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.dementia"
+local STATE_KEY = "__anomaly_donation_bridge_dementia_v1"
+local SESSION_ENV = "ADB_DEMENTIA_SESSION_V1"
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32 = nil
+
+if ffi_ok then
+	pcall(ffi.cdef, [[
+		unsigned long __stdcall GetEnvironmentVariableA(const char* name,
+			char* buffer, unsigned long size);
+		int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+	]])
+	local loaded, library = pcall(ffi.load, "kernel32")
+	if loaded then kernel32 = library end
+end
+
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false,
+		expires_at = 0,
+		mapping = {},
+		pressed = {},
+		forwarding = false,
+		callbacks_registered = false,
+		callback_functions = nil
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.mapping) ~= "table" then state.mapping = {} end
+if type(state.pressed) ~= "table" then state.pressed = {} end
+state.forwarding = false
+
+local WHEEL_COMMAND = "mouse_wheel_invert_change_weapon"
+local function wheel_value()
+	if type(get_console) ~= "function" then return nil end
+	local ok, value = pcall(function() return get_console():get_string(WHEEL_COMMAND) end)
+	if not ok then return nil end
+	value = tonumber(value)
+	return (value == 0 or value == 1) and value or nil
+end
+
+local function set_wheel(value)
+	if type(exec_console_cmd) ~= "function" then return false end
+	local ok = pcall(exec_console_cmd, WHEEL_COMMAND .. " " .. tostring(value))
+	return ok and wheel_value() == value
+end
+
+-- This is a lease on ONE native runtime flag, not a key rebind or cfg_save.
+-- Never restore over a value another mod/player changed in the meantime.
+local function restore_wheel()
+	if state.wheel_original ~= nil and wheel_value() == 1 - state.wheel_original then
+		set_wheel(state.wheel_original)
+	end
+end
+
+local function apply_wheel()
+	if state.wheel_original == nil then return true end
+	local current = wheel_value()
+	if current == 1 - state.wheel_original then return true end
+	return current == state.wheel_original and set_wheel(1 - state.wheel_original)
+end
+
+local function now_ms(value)
+	value = tonumber(value)
+	if value ~= nil then return value end
+	return type(time_global) == "function" and time_global() or 0
+end
+
+-- A process environment variable is volatile state owned by this running
+-- Anomaly process.  It survives F9 rebuilding the Lua VM, but Windows drops it
+-- automatically when the game process exits.  No savegame, USER.ltx or other
+-- settings file is read or written.
+local function session_store_available()
+	if not ffi_ok or kernel32 == nil then return false end
+	local read_ok = pcall(function() return kernel32.GetEnvironmentVariableA end)
+	local write_ok = pcall(function() return kernel32.SetEnvironmentVariableA end)
+	return read_ok and write_ok
+end
+
+local function session_store_write(value)
+	if not session_store_available() then return false end
+	local ok, result = pcall(kernel32.SetEnvironmentVariableA, SESSION_ENV, value)
+	return ok and tonumber(result) ~= 0
+end
+
+local function session_store_read()
+	if not session_store_available() then return nil end
+	local ok, required = pcall(kernel32.GetEnvironmentVariableA,
+		SESSION_ENV, nil, 0)
+	required = ok and tonumber(required) or 0
+	if required <= 1 or required > 4096 then return nil end
+	local buffer = ffi.new("char[?]", required)
+	local read_ok, length = pcall(kernel32.GetEnvironmentVariableA,
+		SESSION_ENV, buffer, required)
+	length = read_ok and tonumber(length) or 0
+	if length <= 0 or length >= required then return nil end
+	return ffi.string(buffer, length)
+end
+
+local function session_store_clear()
+	if not session_store_available() then return end
+	pcall(kernel32.SetEnvironmentVariableA, SESSION_ENV, nil)
+end
+
+local function serialize_state()
+	local sources = {}
+	for source, target in pairs(state.mapping) do
+		if type(source) == "number" and source > 0 and source % 1 == 0 and
+			type(target) == "number" and target > 0 and target % 1 == 0 then
+			sources[#sources + 1] = source
+		end
+	end
+	table.sort(sources)
+	local pairs_list = {}
+	for _, source in ipairs(sources) do
+		pairs_list[#pairs_list + 1] = tostring(source) .. "=" ..
+			tostring(state.mapping[source])
+	end
+	return "2|" .. tostring(math.floor(state.expires_at)) .. "|" ..
+		(state.wheel_original ~= nil and tostring(state.wheel_original) or "-") .. "|" ..
+		table.concat(pairs_list, ",")
+end
+
+local function restore_session_state()
+	if state.active then return true end
+	local encoded = session_store_read()
+	if type(encoded) ~= "string" then return false end
+	local version, expires_text, wheel_text, mapping_text = encoded:match("^(2)|(%d+)|([01%-])|(.*)$")
+	if version == nil then
+		version, expires_text, mapping_text = encoded:match("^(1)|(%d+)|(.+)$")
+	end
+	local wheel_original = tonumber(wheel_text)
+	local expires_at = tonumber(expires_text)
+	local current = now_ms()
+	if (version ~= "1" and version ~= "2") or expires_at == nil or expires_at <= current or
+		expires_at > current + 600000 then
+		if expires_at and expires_at <= current and wheel_original ~= nil and wheel_value() == 1 - wheel_original then
+			set_wheel(wheel_original)
+		end
+		session_store_clear()
+		return false
+	end
+	local mapping, count, targets = {}, 0, {}
+	for pair in mapping_text:gmatch("[^,]+") do
+		local source_text, target_text = pair:match("^(%d+)=(%d+)$")
+		local source, target = tonumber(source_text), tonumber(target_text)
+		if source == nil or target == nil or source <= 0 or target <= 0 or
+			source % 1 ~= 0 or target % 1 ~= 0 or mapping[source] ~= nil or
+			targets[target] then
+			session_store_clear()
+			return false
+		end
+		mapping[source], targets[target] = target, true
+		count = count + 1
+	end
+	if count < 2 and wheel_original == nil then
+		session_store_clear()
+		return false
+	end
+	state.active = true
+	state.expires_at = expires_at
+	state.mapping = mapping
+	state.wheel_original = wheel_original
+	state.pressed = {}
+	state.forwarding = false
+	return true
+end
+
+local function parse_boolean(value, default_value, error_code)
+	if value == nil then return default_value end
+	if value == true or value == "true" then return true end
+	if value == false or value == "false" then return false end
+	return nil, error_code
+end
+
+local function action(name)
+	-- Luabind exposes key_bindings as an indexable class object, whose Lua type
+	-- is not guaranteed to be "table" on every compatible executable.
+	if key_bindings == nil then return nil end
+	local ok, value = pcall(function() return key_bindings[name] end)
+	if not ok or type(value) ~= "number" then return nil end
+	return value
+end
+
+local function bound_dik(action_id)
+	if type(action_id) ~= "number" or type(bind_to_dik) ~= "function" then return nil end
+	local ok, dik = pcall(bind_to_dik, action_id)
+	if not ok or type(dik) ~= "number" or dik <= 0 then return nil end
+	return dik
+end
+
+local function assigned_actions(names)
+	local result, seen_actions, seen_diks = {}, {}, {}
+	for _, name in ipairs(names) do
+		local action_id = action(name)
+		local dik = bound_dik(action_id)
+		if action_id ~= nil and dik ~= nil and not seen_actions[action_id] and
+			not seen_diks[dik] then
+			seen_actions[action_id] = true
+			seen_diks[dik] = true
+			result[#result + 1] = action_id
+		end
+	end
+	return result
+end
+
+-- Sattolo's algorithm creates one random cycle, so no action can keep its
+-- original key.  Unassigned or duplicate bindings were filtered above.
+local function add_random_cycle(mapping, names)
+	local sources = assigned_actions(names)
+	if #sources < 2 then return 0 end
+	local targets = {}
+	for index, action_id in ipairs(sources) do targets[index] = action_id end
+	for index = #targets, 2, -1 do
+		local other = math.random(index - 1)
+		targets[index], targets[other] = targets[other], targets[index]
+	end
+	for index, source in ipairs(sources) do mapping[source] = targets[index] end
+	return #sources
+end
+
+local function add_opposite_pair(mapping, first_name, second_name)
+	local first, second = action(first_name), action(second_name)
+	if first == nil or second == nil or first == second or
+		bound_dik(first) == nil or bound_dik(second) == nil then return 0 end
+	mapping[first], mapping[second] = second, first
+	return 2
+end
+
+local function build_mapping(options)
+	local mapping, count = {}, 0
+	if options.mix_stance then
+		count = count + add_random_cycle(mapping,
+			{ "kCROUCH", "kACCEL", "kJUMP", "kSPRINT_TOGGLE" })
+	end
+	if options.mix_quick_slots then
+		count = count + add_random_cycle(mapping,
+			{ "kQUICK_USE_1", "kQUICK_USE_2", "kQUICK_USE_3", "kQUICK_USE_4" })
+	end
+	if options.mix_equipment then
+		count = count + add_random_cycle(mapping,
+			{ "kINVENTORY", "kACTIVE_JOBS", "kCUSTOM20", "kDETECTOR", "kTORCH" })
+	end
+	if options.mix_weapon_slots then
+		count = count + add_random_cycle(mapping,
+			{ "kWPN_1", "kWPN_2", "kWPN_3", "kWPN_4", "kWPN_5", "kWPN_6" })
+	end
+	if options.swap_fire_aim then
+		count = count + add_opposite_pair(mapping, "kWPN_FIRE", "kWPN_ZOOM")
+	end
+	if options.swap_lookout then
+		count = count + add_opposite_pair(mapping, "kL_LOOKOUT", "kR_LOOKOUT")
+	end
+	if options.invert_movement then
+		count = count + add_opposite_pair(mapping, "kFWD", "kBACK")
+		count = count + add_opposite_pair(mapping, "kL_STRAFE", "kR_STRAFE")
+	end
+	return mapping, count
+end
+
+local function forward(method, dik)
+	if type(method) ~= "function" or type(dik) ~= "number" then return false end
+	state.forwarding = true
+	local ok = pcall(method, dik)
+	state.forwarding = false
+	return ok
+end
+
+local function release_forwarded()
+	local released = {}
+	for source_dik, target_dik in pairs(state.pressed) do
+		if not released[target_dik] then
+			forward(level and level.release_action or nil, target_dik)
+			released[target_dik] = true
+		end
+		state.pressed[source_dik] = nil
+	end
+end
+
+local function release_mapped_targets()
+	local released = {}
+	for _, target_action in pairs(state.mapping) do
+		local target_dik = bound_dik(target_action)
+		if target_dik ~= nil and not released[target_dik] then
+			forward(level and level.release_action or nil, target_dik)
+			released[target_dik] = true
+		end
+	end
+	state.pressed = {}
+end
+
+local function clear_state()
+	release_forwarded()
+	restore_wheel()
+	state.wheel_original = nil
+	state.active = false
+	state.expires_at = 0
+	state.mapping = {}
+	state.pressed = {}
+	state.forwarding = false
+	session_store_clear()
+end
+
+local function expire_if_needed()
+	if not state.active or now_ms() < state.expires_at then return false end
+	clear_state()
+	return true
+end
+
+local function mapped_dik(bind)
+	local target_action = state.mapping[bind]
+	return target_action ~= nil and bound_dik(target_action) or nil
+end
+
+local function on_before_key_press(dik, bind, disabled, flags)
+	if state.forwarding or not state.active or disabled == true or type(flags) ~= "table" then return end
+	if expire_if_needed() then return end
+	local target_dik = mapped_dik(bind)
+	if target_dik == nil then return end
+	if forward(level and level.press_action or nil, target_dik) then
+		state.pressed[dik] = target_dik
+		flags.ret_value = false
+	end
+end
+
+local function on_before_key_hold(dik, bind, disabled, flags)
+	if state.forwarding or not state.active or disabled == true or type(flags) ~= "table" then return end
+	if expire_if_needed() then return end
+	local target_dik = state.pressed[dik] or mapped_dik(bind)
+	if target_dik ~= nil and forward(level and level.hold_action or nil, target_dik) then
+		state.pressed[dik] = target_dik
+		flags.ret_value = false
+	end
+end
+
+local function on_before_key_release(dik, bind, disabled, flags)
+	if state.forwarding or not state.active or type(flags) ~= "table" then return end
+	-- Even while the engine has disabled new input, a release belonging to an
+	-- already-forwarded press must pass through or the synthetic action sticks.
+	if disabled == true and state.pressed[dik] == nil then return end
+	if expire_if_needed() then return end
+	local target_dik = state.pressed[dik] or mapped_dik(bind)
+	if target_dik ~= nil and forward(level and level.release_action or nil, target_dik) then
+		state.pressed[dik] = nil
+		flags.ret_value = false
+	end
+end
+
+local function parse_options(params)
+	local duration, duration_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 30, 10, 600, "dementia_duration_invalid")
+	if duration == nil then return nil, duration_error end
+	local options = { duration = duration }
+	for _, item in ipairs({
+		{ "mix_stance", true }, { "mix_quick_slots", true },
+		{ "mix_equipment", true }, { "mix_weapon_slots", true }, { "swap_fire_aim", true },
+		{ "swap_lookout", true }, { "invert_movement", false }
+	}) do
+		local value, reason = parse_boolean(params[item[1]], item[2],
+			"dementia_" .. item[1] .. "_invalid")
+		if value == nil then return nil, reason end
+		options[item[1]] = value
+	end
+	return options
+end
+
+local function dementia_can(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		duration_seconds = true, mix_stance = true, mix_quick_slots = true,
+		mix_equipment = true, swap_fire_aim = true, swap_lookout = true,
+		invert_movement = true, mix_weapon_slots = true
+	})
+	if not valid then return false, "rejected", reason end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if not state.callbacks_registered then
+		return false, "rejected", "dementia_input_callbacks_unavailable"
+	end
+	local options, parse_error = parse_options(params)
+	if options == nil then return false, "rejected", parse_error end
+	local any_enabled = options.mix_stance or options.mix_quick_slots or
+		options.mix_equipment or options.swap_fire_aim or options.swap_lookout or
+		options.invert_movement or options.mix_weapon_slots
+	if not any_enabled then return false, "rejected", "dementia_no_groups_enabled" end
+	options.mapping, options.mapped_count = build_mapping(options)
+	options.invert_wheel = options.mix_weapon_slots and wheel_value() ~= nil and type(exec_console_cmd) == "function"
+	if options.mapped_count < 2 and not options.invert_wheel then
+		return false, "rejected", "dementia_not_enough_bound_actions"
+	end
+	context.options = options
+	return true
+end
+
+local function dementia_execute(context)
+	clear_state()
+	state.mapping = context.options.mapping
+	-- Clear the primary stock actions at the activation boundary as another
+	-- guard for donations received while a configured key is already held.
+	for source_action in pairs(state.mapping) do
+		local source_dik = bound_dik(source_action)
+		if source_dik ~= nil then
+			forward(level and level.release_action or nil, source_dik)
+		end
+	end
+	state.active = true
+	state.expires_at = now_ms(context.now) + context.options.duration * 1000
+	-- Capture AFTER clearing a previous invocation: repeat donations must not
+	-- stack inversions or save an already-inverted value as the new baseline.
+	state.wheel_original = context.options.mix_weapon_slots and type(exec_console_cmd) == "function" and wheel_value() or nil
+	if not session_store_write(serialize_state()) then
+		clear_state()
+		return "rejected", "dementia_session_store_write_failed"
+	end
+	if not apply_wheel() then
+		clear_state()
+		return "rejected", "dementia_wheel_apply_failed"
+	end
+	return "executed", "dementia_seconds_" .. tostring(context.options.duration) ..
+		"_actions_" .. tostring(context.options.mapped_count)
+end
+
+local function dementia_update(now)
+	if state.active and now_ms(now) >= state.expires_at then clear_state() end
+end
+
+local function dementia_preserve_timer()
+	-- F9 may rebuild the complete Lua VM. Restore the mapping from volatile
+	-- process state, then release any synthetic action that was held while the
+	-- loading screen took ownership of input.
+	restore_session_state()
+	release_forwarded()
+	-- A rebuilt Lua VM has forgotten which synthetic key was held. Releasing
+	-- every mapped target is harmless and guarantees that aim, fire or movement
+	-- cannot remain latched across the loading screen.
+	release_mapped_targets()
+	if state.active then
+		if now_ms() >= state.expires_at then clear_state()
+		elseif not apply_wheel() then clear_state() end
+	end
+end
+
+local function dementia_actor_destroy()
+	-- Runs before normal disconnect/exit writes engine preferences. Keep only
+	-- the process-local lease/timer for F9; no inverted flag leaks into user.ltx.
+	release_forwarded()
+	restore_wheel()
+end
+
+local function dementia_supported(context)
+	local actor = context and context.actor or (db and db.actor or nil)
+	if actor == nil then return false, "actor_unavailable" end
+	if not state.callbacks_registered then
+		return false, "dementia_input_callbacks_unavailable"
+	end
+	if type(bind_to_dik) ~= "function" or action("kJUMP") == nil then
+		return false, "dementia_key_binding_api_unavailable"
+	end
+	if level == nil or type(level.press_action) ~= "function" or
+		type(level.hold_action) ~= "function" or type(level.release_action) ~= "function" then
+		return false, "dementia_action_forwarding_api_unavailable"
+	end
+	if not session_store_available() then
+		return false, "dementia_session_store_unavailable"
+	end
+	return true
+end
+
+function on_game_start()
+	-- Be resilient to a quick-load rebuilding callback tables but retaining
+	-- some global Lua state. Remove the previous function objects when possible,
+	-- then register exactly the callbacks belonging to this module instance.
+	if type(state.callback_functions) == "table" and
+		type(UnregisterScriptCallback) == "function" then
+		pcall(UnregisterScriptCallback, "on_before_key_press",
+			state.callback_functions.press)
+		pcall(UnregisterScriptCallback, "on_before_key_hold",
+			state.callback_functions.hold)
+		pcall(UnregisterScriptCallback, "on_before_key_release",
+			state.callback_functions.release)
+		if state.callback_functions.destroy then
+			pcall(UnregisterScriptCallback, "actor_on_net_destroy", state.callback_functions.destroy)
+		end
+	end
+	state.callbacks_registered = false
+	state.callback_functions = nil
+	if type(RegisterScriptCallback) == "function" then
+		local press_ok = pcall(RegisterScriptCallback,
+			"on_before_key_press", on_before_key_press)
+		local hold_ok = pcall(RegisterScriptCallback,
+			"on_before_key_hold", on_before_key_hold)
+		local release_ok = pcall(RegisterScriptCallback,
+			"on_before_key_release", on_before_key_release)
+		local destroy_ok = pcall(RegisterScriptCallback,
+			"actor_on_net_destroy", dementia_actor_destroy)
+		state.callbacks_registered = press_ok and hold_ok and release_ok and destroy_ok
+		if state.callbacks_registered then
+			state.callback_functions = {
+				press = on_before_key_press,
+				hold = on_before_key_hold,
+				release = on_before_key_release,
+				destroy = dementia_actor_destroy
+			}
+		end
+	end
+	restore_session_state()
+	local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+		can_execute = dementia_can,
+		execute = dementia_execute,
+		update = dementia_update,
+		on_game_load = dementia_preserve_timer,
+		on_level_changing = dementia_preserve_timer,
+		is_supported = dementia_supported,
+		support_probe_is_hint = true
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] dementia registration failed: %s", tostring(reason))
+	end
+end

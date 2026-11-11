@@ -1,0 +1,336 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"teleport_random_level",
+  "displayName":"Телепортация на случайную локацию",
+  "description":"Выбирает одну из отмеченных локаций и после загрузки перемещает персонажа в случайную доступную точку по всей карте.",
+  "category":"world",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"level_sections","displayName":"Доступные локации для телепортации","kind":"MultiChoice","catalogKind":"Level","defaultValue":""},
+    {"key":"level_options","displayName":"Ограничения","kind":"MultiChoice","options":["visited_only"],"optionLabels":{"visited_only":"Телепортировать только в посещённые локации"},"defaultValue":"","minimumSelections":0}
+  ],
+  "parameters":{"level_sections":"","level_options":""}
+}
+ADB_PRESET_END]]
+
+local pending_change = false
+local pending_until = 0
+local arrival_job
+local arrival_restore_pending = true
+local ARRIVAL_KEY = "adb_random_level_arrival_v1"
+local ARRIVAL_READY_FRAMES = 15
+local ARRIVAL_WAIT_MS = 120000
+
+local function report_arrival(job, status, reason)
+	if not job or type(printf)~="function" then return end
+	-- One delayed warning / terminal failure per request, never per-frame spam.
+	reason=tostring(reason or "unspecified"):gsub("[%z\1-\31\127]"," "):sub(1,180)
+	pcall(printf,"[ADB] random level arrival %s: %s -> %s (%s)",
+		status,tostring(job.source),tostring(job.target),reason)
+end
+
+local function waiting(job, reason, now)
+	job.wait_reason=reason
+	if not job.wait_reported and now-(job.loaded_at or now)>=15000 then
+		job.wait_reported=true;report_arrival(job,"waiting",reason)
+	end
+end
+
+local function supported()
+	return level ~= nil and type(level.name) == "function" and
+		type(JumpToLevel) == "function", "jump_to_level_unavailable"
+end
+
+local function now_ms()
+	if type(time_global) ~= "function" then return 0 end
+	local ok, value = pcall(time_global)
+	return ok and tonumber(value) or 0
+end
+
+local function travel_storage()
+	if not alife_storage_manager or type(alife_storage_manager.get_state) ~= "function" then return end
+	local ok, data = pcall(alife_storage_manager.get_state)
+	return ok and type(data) == "table" and data or nil
+end
+
+local function persist_arrival(job)
+	local data = travel_storage()
+	if data then data[ARRIVAL_KEY] = job and {
+		version = 1, source = job.source, target = job.target
+	} or nil;return true end
+	return false
+end
+
+local function clear_arrival(reason)
+	if reason then report_arrival(arrival_job,"cancelled",reason) end
+	arrival_job = nil
+	arrival_restore_pending = false
+	pending_change = false
+	persist_arrival(nil)
+end
+
+local function load_arrival()
+	local data = travel_storage()
+	local saved
+	if data then saved = data[ARRIVAL_KEY] else saved = arrival_job end
+	pending_change = false
+	if type(saved) ~= "table" or saved.version ~= 1 or
+		not anomaly_donation_bridge_common.valid_section_id(saved.source) or
+		not anomaly_donation_bridge_common.valid_section_id(saved.target) or saved.source == saved.target then
+		clear_arrival();arrival_restore_pending=true;return
+	end
+	-- Only a request from THIS save may randomize its destination. Ordinary
+	-- F9 loads have no marker, and loading the source cancels rather than jumps.
+	arrival_job = {version=1, source=saved.source, target=saved.target,
+		loaded=true, loaded_at=now_ms(), deadline=now_ms()+ARRIVAL_WAIT_MS, attempts=0}
+	arrival_restore_pending=false
+end
+
+local function reset_ready(job)
+	job.ready_frame, job.last_frame = nil, nil
+end
+
+local function playable_actor()
+	-- These are stock engine/UI readiness checks, NOT graph probes. The ALife
+	-- load callback can precede the renderer's precache and usable actor by a
+	-- long time. pcall cannot recover a native access violation in that window.
+	local ok, actor, frame, reason = pcall(function()
+		if not level or type(level.present)~="function" or not level.present() then return nil,nil,"level_unavailable" end
+		if type(app_ready)=="function" and not app_ready() then return nil,nil,"app_loading" end
+		if type(device)~="function" then return nil,nil,"device_unavailable" end
+		local d=device()
+		if not d then return nil,nil,"device_unavailable" end
+		if d:is_paused() then return nil,nil,"paused" end
+		if (tonumber(d.precache_frame) or 0)>0 then return nil,nil,"precache" end
+		if (tonumber(d.f_time_delta) or 0)<=0 then return nil,nil,"frame_not_advancing" end
+		if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return nil,nil,"actor_menu_open" end
+		if type(Check_UI)=="function" and Check_UI() then return nil,nil,"ui_open" end
+		if type(_GUIs)=="table" and next(_GUIs)~=nil then return nil,nil,"ui_registered" end
+		local a=db and db.actor
+		if a and type(a.alive)=="function" and not a:alive() then return nil,nil,"dead" end
+		if not a or type(a.alive)~="function" or
+			type(a.set_actor_position)~="function" or type(a.position)~="function" or
+			type(a.level_vertex_id)~="function" then return nil,nil,"actor_api_unavailable" end
+		if type(a.is_talking)=="function" and a:is_talking() then return nil,nil,"actor_talking" end
+		if type(a.get_current_holder)=="function" and a:get_current_holder()~=nil then return nil,nil,"actor_in_vehicle" end
+		local frame=tonumber(d.frame)
+		if not frame then return nil,nil,"frame_api_unavailable" end
+		return a,frame
+	end)
+	if ok and actor and frame then return actor,frame end
+	if ok then return nil,nil,reason end
+	return nil,nil,"readiness_error:"..tostring(actor)
+end
+
+local function update_arrival(now)
+	-- Marshal storage can be restored after BOTH load callbacks in modpacks.
+	-- Recover its plain request lazily; this does not touch actor/navigation.
+	if not arrival_job and arrival_restore_pending then
+		local data=travel_storage()
+		if data and data[ARRIVAL_KEY]~=nil then load_arrival() end
+	end
+	local job = arrival_job
+	if not job then return end
+	now = tonumber(now) or now_ms()
+	if not job.loaded then
+		-- Once the engine acknowledged a transition, a long level load is not
+		-- the same as a failed ten-second request. Preserve the save marker for
+		-- the destination's load/first-actor-update callback.
+		if now >= (job.travelling and job.travel_deadline or pending_until) then clear_arrival("transition_not_loaded") end
+		return
+	end
+	if now >= job.deadline then clear_arrival("timeout:"..(job.wait_reason or "no_playable_update"));return end
+	local actor,frame,reason=playable_actor()
+	if reason=="dead" then clear_arrival();return end
+	if not actor then waiting(job,reason or "actor_unavailable",now);reset_ready(job);return end
+	local ok,current=pcall(level.name)
+	if not ok then waiting(job,"level_name_unavailable",now);reset_ready(job);return end
+	if current~=job.target then clear_arrival("different_level:"..tostring(current));return end
+	if job.last_frame==frame then waiting(job,"render_frame_stalled",now);return end
+	if not job.ready_frame or job.last_frame and frame<job.last_frame then job.ready_frame=frame end
+	job.last_frame=frame
+	-- Count the engine's rendered frames, not 100ms runtime polls. Loading,
+	-- pause/UI/precache resets this baseline before any navigation work.
+	if frame-job.ready_frame<ARRIVAL_READY_FRAMES then waiting(job,"post_spawn_frames",now);return end
+	if now<(job.next_attempt or 0) then return end
+	job.next_attempt=now+250
+	-- vector is a luabind class (callable userdata), not a Lua function.
+	-- Do not reject its real constructor before the shared sampler can run.
+	if type(level.vertex_in_direction)~="function" then clear_arrival("vertex_in_direction_unavailable");return end
+	if type(level.vertex_position)~="function" then clear_arrival("vertex_position_unavailable");return end
+	local located,start=pcall(function() return actor:level_vertex_id() end)
+	-- Never invent vertex 0 while the new actor's navigation location is still
+	-- invalid. Wait for its real location, then start the safety interval again.
+	if not located or not anomaly_donation_bridge_common.valid_vertex(start) then waiting(job,"actor_vertex_invalid",now);reset_ready(job);return end
+	-- Reuse the current-level teleport's entire-AI-grid sampler. No distance
+	-- or height band: this also works in underground maps and at entry (0,0,0).
+	local sampled, point, point_error = pcall(anomaly_donation_bridge_common.random_safe_point,
+		actor, 0, math.huge, 720, math.huge, start)
+	job.attempts = job.attempts + 1
+	-- accessible() is exposed on every game_object, but its native
+	-- implementation requires CCustomMonster; it always rejects CActor.
+	-- Use the SAME real level.ai sampler as ordinary actor teleport instead.
+	if not sampled or not point then
+		waiting(job,sampled and (point_error or "destination_unavailable") or "sampler_error:"..tostring(point),now)
+		if job.attempts >= 32 then clear_arrival(job.wait_reason) end
+		return
+	end
+	local destination = point.position
+	local still_ready,still_frame=playable_actor()
+	local same_level,name=pcall(level.name)
+	if not still_ready or still_frame~=frame or not same_level or name~=job.target then waiting(job,"readiness_changed_after_sampling",now);reset_ready(job);return end
+	-- Consume BEFORE the native setter: a partial/unknown result cannot cause
+	-- repeated teleports or repeat when this save is loaded with F9.
+	if not persist_arrival(nil) then waiting(job,"storage_unavailable_before_move",now);return end
+	arrival_job,pending_change,arrival_restore_pending=nil,false,false
+	local moved, reason = pcall(function() actor:set_actor_position(destination) end)
+	if not moved then report_arrival(job,"failed","position_setter:"..tostring(reason));return end
+	-- Match ordinary current-level teleport: a native no-op is not success.
+	-- Report it once, without repeating a setter with an uncertain result.
+	local confirmed,actual=pcall(function() return actor:position() end)
+	if not confirmed or not actual then report_arrival(job,"failed","position_confirmation_unavailable");return end
+	local dx,dy,dz=actual.x-destination.x,actual.y-destination.y,actual.z-destination.z
+	if dx*dx+dz*dz>9 or math.abs(dy)>3 then report_arrival(job,"failed","position_confirmation_mismatch") end
+end
+
+local function visited_only_enabled(value)
+	value = tostring(value or "")
+	if value == "" then return false end
+	local selections, parse_error = anomaly_donation_bridge_common.split_csv(value)
+	if selections == nil then return nil, parse_error end
+	if #selections ~= 1 or selections[1] ~= "visited_only" then
+		return nil, "level_options_invalid"
+	end
+	return true
+end
+
+local function actor_has_visited_level(level_name)
+	if game_statistics == nil or
+		type(game_statistics.has_actor_visited_level) ~= "function" then
+		return nil, "visited_levels_api_unavailable"
+	end
+	local checked, visited = pcall(game_statistics.has_actor_visited_level, level_name)
+	if not checked then return nil, "visited_levels_check_failed" end
+	return visited == true
+end
+
+local function safe_selected_levels(params)
+	local sections, parse_error =
+		anomaly_donation_bridge_common.split_csv(params.level_sections)
+	if sections == nil then return nil, parse_error end
+	local entries = {}
+	for _, section in ipairs(sections) do
+		local single_params = {
+			level_sections = section,
+			catalog_revision = params.catalog_revision
+		}
+		local validated, validation_error =
+			anomaly_donation_bridge_catalog.validate_sections(
+				single_params, "level_sections", "level")
+		if validated ~= nil then
+			entries[#entries + 1] = validated[1]
+		elseif validation_error ~= "catalog_selection_stale_or_quarantined" then
+			return nil, validation_error
+		end
+	end
+	if #entries == 0 then return nil, "no_safe_level_selected" end
+	return entries
+end
+
+local function can_execute(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params,
+		{ level_sections = true, level_options = true, catalog_revision = true })
+	if not valid then return false, "rejected", reason end
+	local visited_only, option_error = visited_only_enabled(params.level_options)
+	if visited_only == nil then return false, "rejected", option_error end
+	local ready, api_reason = supported()
+	if not ready then return false, "rejected", api_reason end
+	if pending_change and now_ms() >= pending_until then clear_arrival() end
+	if pending_change or arrival_job and arrival_job.loaded then return false, "rejected", "level_change_already_requested" end
+	local entries, catalog_error = safe_selected_levels(params)
+	if entries == nil then return false, "rejected", catalog_error end
+	local current_ok, current = pcall(function() return level.name() end)
+	if not current_ok or type(current) ~= "string" or current == "" then
+		return false, "rejected", "current_level_unavailable"
+	end
+	local selected_levels = {}
+	for _, entry in ipairs(entries) do
+		selected_levels[#selected_levels + 1] = entry.faction
+	end
+	local visited_levels = selected_levels
+	if visited_only then
+		visited_levels = {}
+		for _, level_name in ipairs(selected_levels) do
+			local visited, visited_error = actor_has_visited_level(level_name)
+			if visited == nil then return false, "rejected", visited_error end
+			if visited then visited_levels[#visited_levels + 1] = level_name end
+		end
+		if #visited_levels == 0 then
+			return false, "rejected", "no_visited_level_selected"
+		end
+	end
+	local destinations = {}
+	for _, level_name in ipairs(visited_levels) do
+		if level_name ~= current then
+			destinations[#destinations + 1] = level_name
+		end
+	end
+	if #destinations == 0 then return false, "rejected", "no_other_level_selected" end
+	context.options = {
+		target = destinations[math.random(1, #destinations)], current = current
+	}
+	return true
+end
+
+local function execute(context)
+	if pending_change and now_ms() >= pending_until then clear_arrival() end
+	if pending_change or arrival_job and arrival_job.loaded then return "rejected", "level_change_already_requested" end
+	local current_ok, current = pcall(function() return level.name() end)
+	if not current_ok or current ~= context.options.current then
+		return "rejected", "level_changed_before_request"
+	end
+	pending_change = true
+	pending_until = now_ms() + 10000
+	arrival_job = {version=1,source=current,target=context.options.target,
+		travel_deadline=now_ms()+ARRIVAL_WAIT_MS}
+	persist_arrival(arrival_job) -- ChangeLevel's save must already own the request.
+	-- Delegate the entry-point lookup and travel to Anomaly's JumpToLevel.
+	-- The effect itself must not require a direct game_graph/ALife binding.
+	local requested, result = pcall(JumpToLevel, context.options.target)
+	if not requested then
+		clear_arrival()
+		if type(printf) == "function" then
+			printf("[ADB] JumpToLevel failed: %s", tostring(result))
+		end
+		return "rejected", "level_jump_failed"
+	end
+	if result ~= true then
+		clear_arrival()
+		return "rejected", "destination_level_entry_unavailable"
+	end
+	return "executed", "level_jump_requested_" .. context.options.target
+end
+
+function on_game_start()
+	pending_change = false
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"teleport_random_level", {
+			can_execute = can_execute, execute = execute, update = update_arrival,
+			is_supported = supported,
+			on_game_load = load_arrival,
+			on_level_changing = function()
+				if arrival_job and arrival_job.loaded then clear_arrival()
+				elseif arrival_job then arrival_job.travelling=true end
+				pending_change = false
+			end
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] teleport_random_level registration failed: %s", tostring(reason))
+	end
+	if ok and type(RegisterScriptCallback)=="function" then
+		-- Some packs restore storage later than on_game_load. Recover again on
+		-- the first actor update, still without touching the navigation graph.
+		RegisterScriptCallback("actor_on_first_update", load_arrival)
+	end
+end

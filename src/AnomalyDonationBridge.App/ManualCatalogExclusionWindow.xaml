@@ -1,0 +1,38 @@
+<Window x:Class="AnomalyDonationBridge.App.ManualCatalogExclusionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Добавить исключение вручную — Anomaly Donation Bridge"
+        Width="560" SizeToContent="Height" ResizeMode="NoResize"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" UseLayoutRounding="True">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="Добавить исключение вручную" FontSize="20" FontWeight="SemiBold" />
+            <TextBlock Text="Укажите точный ID игровой секции. Тип нужен, чтобы приложение правильно фильтровало каталог."
+                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+        </StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,0,0,12">
+            <TextBlock Text="ТИП СЕКЦИИ" Foreground="{DynamicResource MutedBrush}" FontWeight="SemiBold" Margin="0,0,0,5" />
+            <ComboBox x:Name="KindBox" DisplayMemberPath="Label" SelectedValuePath="Kind" SelectedIndex="0" />
+        </StackPanel>
+        <StackPanel Grid.Row="2" Margin="0,0,0,12">
+            <TextBlock Text="ID СЕКЦИИ" Foreground="{DynamicResource MutedBrush}" FontWeight="SemiBold" Margin="0,0,0,5" />
+            <TextBox x:Name="SectionIdBox" />
+        </StackPanel>
+        <StackPanel Grid.Row="3">
+            <TextBlock Text="НАЗВАНИЕ (НЕОБЯЗАТЕЛЬНО)" Foreground="{DynamicResource MutedBrush}" FontWeight="SemiBold" Margin="0,0,0,5" />
+            <TextBox x:Name="DisplayNameBox" />
+        </StackPanel>
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Content="Отмена" IsCancel="True" MinWidth="90" Margin="0,0,8,0" />
+            <Button Content="Добавить" Click="Add_Click" IsDefault="True"
+                    Style="{StaticResource PrimaryButtonStyle}" MinWidth="110" />
+        </StackPanel>
+    </Grid>
+</Window>

@@ -3,3 +3,14 @@
 *.txt text eol=lf
 *.json text eol=lf
 *.png binary
+*.ico binary
+*.dds binary
+*.ogf binary
+*.ogg binary
+
+# The addon manifest verifies exact file bytes, including original line endings
+# and Windows-1251 resources. Git must not normalize those files on checkout.
+game-addon/** -text
+effects/** -text
+optional-effects/** -text
+deferred-effects/** -text

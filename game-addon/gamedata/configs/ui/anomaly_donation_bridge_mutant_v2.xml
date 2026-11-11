@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<w>
+    <aim_label x="250" y="424" width="524" height="28"><text font="letterica18" align="c" r="240" g="217" b="182"/></aim_label>
+    <panel x="54" y="110" width="916" height="548" stretch="1"><texture>adb_mc2_panel</texture></panel>
+    <header_line x="76" y="174" width="872" height="1" stretch="1"><texture r="105" g="108" b="105" a="180">adb_mc2_pixel</texture></header_line>
+    <column_line x="535" y="195" width="1" height="430" stretch="1"><texture r="105" g="108" b="105" a="150">adb_mc2_pixel</texture></column_line>
+    <order_line x="554" y="286" width="394" height="1" stretch="1"><texture r="105" g="108" b="105" a="140">adb_mc2_pixel</texture></order_line>
+    <combat_line x="554" y="373" width="394" height="1" stretch="1"><texture r="105" g="108" b="105" a="140">adb_mc2_pixel</texture></combat_line>
+    <distance_line x="554" y="466" width="394" height="1" stretch="1"><texture r="105" g="108" b="105" a="140">adb_mc2_pixel</texture></distance_line>
+    <footer_line x="554" y="573" width="394" height="1" stretch="1"><texture r="105" g="108" b="105" a="140">adb_mc2_pixel</texture></footer_line>
+    <title x="76" y="134" width="760" height="28"><text font="letterica18" r="238" g="175" b="70"/></title>
+    <close x="916" y="128" width="32" height="28"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></close>
+    <list_heading x="76" y="195" width="446" height="22"><text font="letterica16" r="170" g="175" b="170"/></list_heading>
+    <status_heading x="554" y="195" width="394" height="22"><text font="letterica16" r="170" g="175" b="170"/></status_heading>
+    <list x="76" y="228" width="446" height="336" item_height="28" can_select="1" always_show_scroll="0"><font font="letterica16" r="235" g="235" b="235"/></list>
+    <previous_page x="76" y="574" width="44" height="28"><texture>adb_mc2_button</texture><text font="letterica16"/></previous_page>
+    <page_number x="130" y="577" width="338" height="24"><text font="letterica16" align="c" r="185" g="185" b="185"/></page_number>
+    <next_page x="478" y="574" width="44" height="28"><texture>adb_mc2_button</texture><text font="letterica16"/></next_page>
+    <selection x="76" y="610" width="446" height="24"><text font="letterica16" r="185" g="185" b="185"/></selection>
+    <health_label x="554" y="230" width="132" height="24"><text font="letterica16" r="185" g="185" b="185"/></health_label>
+    <health_value x="690" y="230" width="258" height="24"><text font="letterica16" r="240" g="240" b="240"/></health_value>
+    <health_scale x="554" y="260" width="394" height="20"><text font="letterica16" r="185" g="185" b="185"/></health_scale>
+    <order_label x="554" y="301" width="72" height="24"><text font="letterica16" r="185" g="185" b="185"/></order_label>
+    <order_value x="630" y="301" width="318" height="24"><text font="letterica16" r="240" g="240" b="240"/></order_value>
+    <follow x="554" y="332" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></follow>
+    <stay x="689" y="332" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></stay>
+    <rest x="824" y="332" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></rest>
+    <combat_label x="554" y="389" width="102" height="24"><text font="letterica16" r="185" g="185" b="185"/></combat_label>
+    <combat_value x="660" y="389" width="288" height="24"><text font="letterica16" r="240" g="240" b="240"/></combat_value>
+    <assist x="554" y="420" width="108" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></assist>
+    <defend x="673" y="420" width="108" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></defend>
+    <passive x="792" y="420" width="156" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></passive>
+    <distance_label x="554" y="481" width="274" height="24"><text font="letterica16" r="230" g="230" b="230"/></distance_label>
+    <distance_value x="832" y="481" width="116" height="24"><text font="letterica16" align="r" r="235" g="235" b="235"/></distance_value>
+    <less x="554" y="512" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></less>
+    <reset x="689" y="512" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></reset>
+    <more x="824" y="512" width="124" height="32"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></more>
+    <refresh x="554" y="589" width="394" height="36"><texture>adb_mc2_button</texture><text font="letterica16" r="235" g="235" b="235"/></refresh>
+</w>

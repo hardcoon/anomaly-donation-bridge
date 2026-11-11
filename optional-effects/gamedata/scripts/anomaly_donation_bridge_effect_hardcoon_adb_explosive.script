@@ -1,0 +1,415 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.explosive",
+  "displayName": "РАЗРЫВНАЯ",
+  "description": "Создаёт перед лицом героя случайную выбранную ручную гранату. Гранату нельзя подобрать: она падает на землю и взрывается через свой штатный интервал; если впереди стена, используется ближайшая доступная вершина.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"grenade_sections","displayName":"Допустимые гранаты","kind":"MultiChoice","catalogKind":"Item","catalogCategories":["grenades"],"minimumSelections":1,"defaultValue":""},
+    {"key":"distance_meters","displayName":"Дальность появления, м","kind":"Integer","minimum":0,"maximum":10,"defaultValue":"5"}
+  ],
+  "parameters": {"grenade_sections":"","distance_meters":"5"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.explosive"
+local STATE_KEY = "__anomaly_donation_bridge_explosive_v1"
+local MAX_PENDING = 32
+local MAX_OBJECT_ID = 65534
+local DEFAULT_FUSE_MS = 3000
+local MIN_FUSE_MS = 500
+local MAX_FUSE_MS = 10000
+local CLIENT_GRACE_MS = 5000
+local LOAD_GRACE_MS = 500
+local ZERO_DISTANCE_OFFSET = 0.65
+local FALLBACK_MAX_RADIUS = 10
+local INVALID_LEVEL_VERTEX_ID = 4294967295
+
+local HAND_GRENADE_CLASSES = {
+	G_F1 = true, G_RGD5 = true, G_F1_S = true, G_RGD5_S = true
+}
+
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = { pending = {}, load_pending = false }
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.pending) ~= "table" then state.pending = {} end
+if type(state.load_pending) ~= "boolean" then state.load_pending = false end
+if type(state.callbacks_registered) ~= "boolean" then state.callbacks_registered = false end
+state.pickup_flags_to_reset = nil
+
+local function now_ms(value)
+	if type(value) == "number" then return value end
+	if type(time_global) == "function" then
+		local ok, current = pcall(time_global)
+		if ok and type(current) == "number" then return current end
+	end
+	if type(device) == "function" then
+		local ok, current = pcall(function() return device():time_global() end)
+		if ok and type(current) == "number" then return current end
+	end
+	return 0
+end
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function finite(value)
+	return type(value) == "number" and value == value and
+		value > -1000000 and value < 1000000
+end
+
+local function valid_vertex(vertex_id)
+	vertex_id = tonumber(vertex_id)
+	if vertex_id == nil or vertex_id < 0 or vertex_id >= INVALID_LEVEL_VERTEX_ID or
+		vertex_id ~= math.floor(vertex_id) or level == nil or
+		type(level.vertex_position) ~= "function" then return false end
+	local ok, position = pcall(level.vertex_position, vertex_id)
+	return ok and position ~= nil
+end
+
+local function grenade_class(section)
+	if type(system_ini) ~= "function" then return nil end
+	local ok, ini = pcall(system_ini)
+	if not ok or ini == nil then return nil end
+	local value = anomaly_donation_bridge_common.ini_string(ini, section, "class")
+	return value and value:upper() or nil
+end
+
+local function is_hand_grenade(section)
+	return anomaly_donation_bridge_catalog.is_available(section, "item") and
+		HAND_GRENADE_CLASSES[grenade_class(section)] == true
+end
+
+local function grenade_fuse(section)
+	if type(system_ini) ~= "function" then return DEFAULT_FUSE_MS end
+	local ok, ini = pcall(system_ini)
+	if not ok or ini == nil then return DEFAULT_FUSE_MS end
+	local value = tonumber(anomaly_donation_bridge_common.ini_string(
+		ini, section, "destroy_time"))
+	if value == nil then return DEFAULT_FUSE_MS end
+	return math.max(MIN_FUSE_MS, math.min(MAX_FUSE_MS, math.floor(value)))
+end
+
+local function camera_origin_and_direction(actor)
+	local origin, direction = nil, nil
+	if type(device) == "function" then
+		local ok, camera_position, camera_direction = pcall(function()
+			local render_device = device()
+			return render_device.cam_pos, render_device.cam_dir
+		end)
+		if ok then origin, direction = camera_position, camera_direction end
+	end
+	if origin == nil then
+		local ok, position = pcall(function() return actor:position() end)
+		if not ok or position == nil then return nil, nil end
+		origin = vector():set(position.x, position.y + 1.6, position.z)
+	end
+	if direction == nil then
+		local ok, value = pcall(function() return actor:direction() end)
+		if not ok then return nil, nil end
+		direction = value
+	end
+	local ok, ox, oy, oz, dx, dz = pcall(function()
+		return origin.x, origin.y, origin.z, direction.x, direction.z
+	end)
+	if not ok or not finite(ox) or not finite(oy) or not finite(oz) or
+		not finite(dx) or not finite(dz) then return nil, nil end
+	local magnitude = math.sqrt(dx * dx + dz * dz)
+	if magnitude <= 0.0001 then return nil, nil end
+	return vector():set(ox, oy, oz), vector():set(dx / magnitude, 0, dz / magnitude)
+end
+
+local function ray_is_clear(origin, direction, distance, actor)
+	if distance <= 0.05 then return true end
+	if ray_pick == nil or rq_target == nil or rq_target.rqtStatic == nil then
+		return false
+	end
+	local ok, pick = pcall(function()
+		return ray_pick(origin, direction, distance + 0.20,
+			rq_target.rqtStatic, actor)
+	end)
+	if not ok or pick == nil then return false end
+	local query_ok, hit = pcall(function() return pick:query() end)
+	if not query_ok then return false end
+	if hit ~= true then return true end
+	local distance_ok, hit_distance = pcall(function() return pick:get_distance() end)
+	return distance_ok and type(hit_distance) == "number" and
+		hit_distance > distance + 0.15
+end
+
+local function direct_spawn_point(actor, distance)
+	local start_ok, start_vertex = pcall(function() return actor:level_vertex_id() end)
+	if not start_ok or not valid_vertex(start_vertex) then return nil end
+	local origin, direction = camera_origin_and_direction(actor)
+	if origin == nil then return nil end
+	local actual_distance = distance == 0 and ZERO_DISTANCE_OFFSET or distance
+	if not ray_is_clear(origin, direction, actual_distance, actor) then return nil end
+	local vertex_ok, vertex_id = pcall(function()
+		return level.vertex_in_direction(start_vertex, direction, actual_distance)
+	end)
+	if not vertex_ok or not valid_vertex(vertex_id) then return nil end
+	return {
+		vertex_id = vertex_id,
+		position = vector():set(
+			origin.x + direction.x * actual_distance,
+			origin.y,
+			origin.z + direction.z * actual_distance),
+		fallback = false
+	}
+end
+
+local function fallback_spawn_point(actor)
+	local start_ok, start_vertex = pcall(function() return actor:level_vertex_id() end)
+	if not start_ok or not valid_vertex(start_vertex) then return nil end
+	local origin, forward = camera_origin_and_direction(actor)
+	if origin == nil then return nil end
+	local base_angle = math.atan2(forward.z, forward.x)
+	local used = {}
+	for radius_step = 1, FALLBACK_MAX_RADIUS * 2 do
+		local radius = radius_step * 0.5
+		for angle_step = 0, 15 do
+			local angle = base_angle + angle_step * math.pi / 8
+			local direction = vector():set(math.cos(angle), 0, math.sin(angle))
+			local vertex_ok, vertex_id = pcall(function()
+				return level.vertex_in_direction(start_vertex, direction, radius)
+			end)
+			if vertex_ok and valid_vertex(vertex_id) and not used[vertex_id] then
+				used[vertex_id] = true
+				local position_ok, snapped = pcall(level.vertex_position, vertex_id)
+				if position_ok and snapped ~= nil then
+					local dx, dz = snapped.x - origin.x, snapped.z - origin.z
+					local distance = math.sqrt(dx * dx + dz * dz)
+					if distance >= 0.5 and distance <= FALLBACK_MAX_RADIUS and
+						math.abs(snapped.y - origin.y) <= 4 then
+						local candidate_direction = vector():set(dx / distance, 0, dz / distance)
+						if ray_is_clear(origin, candidate_direction, distance, actor) then
+							return {
+								vertex_id = vertex_id,
+								position = vector():set(snapped.x, origin.y, snapped.z),
+								fallback = true
+							}
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function spawn_point(actor, distance)
+	return direct_spawn_point(actor, distance) or fallback_spawn_point(actor)
+end
+
+local function pending_count()
+	local count = 0
+	for _ in pairs(state.pending) do count = count + 1 end
+	return count
+end
+
+local function object_id(object)
+	if object == nil then return nil end
+	local ok, id = pcall(function() return object.id end)
+	id = ok and tonumber(id) or nil
+	if id == nil or id <= 0 or id > MAX_OBJECT_ID or id ~= math.floor(id) then
+		return nil
+	end
+	return id
+end
+
+local function client_object_id(object)
+	if object == nil then return nil end
+	local ok, id = pcall(function() return object:id() end)
+	id = ok and tonumber(id) or nil
+	if id == nil or id <= 0 or id > MAX_OBJECT_ID or id ~= math.floor(id) then
+		return nil
+	end
+	return id
+end
+
+local function actor_on_item_before_pickup(item, flags)
+	local id = client_object_id(item)
+	if id == nil or state.pending[id] == nil or type(flags) ~= "table" then return end
+	-- This is Anomaly's stock pickup veto.  Remember the flag table because the
+	-- unpatched 1.5.x binder reused it between calls; update() restores the value
+	-- after the engine has consumed this result.
+	flags.ret_value = false
+	state.pickup_flags_to_reset = flags
+end
+
+local function client_object(id)
+	if level == nil or type(level.object_by_id) ~= "function" then return nil end
+	local ok, object = pcall(level.object_by_id, id)
+	return ok and object or nil
+end
+
+local function drop_if_actor_picked_up(object)
+	local actor = db and db.actor or nil
+	if object == nil or actor == nil then return end
+	local parent_ok, parent = pcall(function() return object:parent() end)
+	if not parent_ok or parent == nil then return end
+	local parent_id = client_object_id(parent)
+	local actor_id = client_object_id(actor)
+	if parent_id ~= nil and parent_id == actor_id then
+		pcall(function() actor:drop_item(object) end)
+	end
+end
+
+local function server_identity_matches(server, section)
+	if server == nil then return false end
+	local ok, current = pcall(function() return server:section_name() end)
+	return ok and tostring(current or "") == section
+end
+
+local function release_record(record)
+	local life = life_object()
+	if life == nil then return false end
+	local object_ok, server = pcall(function() return life:object(record.id, true) end)
+	if not object_ok or not server_identity_matches(server, record.section) then return false end
+	return pcall(function() life:release(server, true) end)
+end
+
+local function parse_options(params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		grenade_sections = true, distance_meters = true, catalog_revision = true
+	})
+	if not valid then return nil, reason end
+	local distance, distance_error = anomaly_donation_bridge_common.parse_integer(
+		params.distance_meters, 5, 0, 10, "explosive_distance_invalid")
+	if distance == nil then return nil, distance_error end
+	local entries, catalog_error = anomaly_donation_bridge_catalog.validate_sections(
+		params, "grenade_sections", "item")
+	if entries == nil then return nil, catalog_error end
+	if #entries < 1 then return nil, "explosive_grenade_pool_empty" end
+	for _, entry in ipairs(entries) do
+		if not is_hand_grenade(entry.section_id) then
+			return nil, "explosive_selection_contains_non_grenade"
+		end
+	end
+	return { distance = distance, entries = entries }
+end
+
+local function can_execute(context, params)
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if pending_count() >= MAX_PENDING then
+		return false, "deferred", "explosive_pending_limit_reached"
+	end
+	local options, parse_error = parse_options(params)
+	if options == nil then return false, "rejected", parse_error end
+	local point = spawn_point(context.actor, options.distance)
+	if point == nil then return false, "deferred", "explosive_spawn_point_unavailable" end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return context.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok or type(game_vertex_id) ~= "number" then
+		return false, "deferred", "actor_game_vertex_invalid"
+	end
+	local entry = options.entries[math.random(#options.entries)]
+	context.options = {
+		section = entry.section_id,
+		distance = options.distance,
+		point = point,
+		game_vertex_id = game_vertex_id,
+		fuse = grenade_fuse(entry.section_id)
+	}
+	return true
+end
+
+local function execute(context)
+	local options = context.options
+	if not is_hand_grenade(options.section) then
+		return "rejected", "explosive_grenade_became_unavailable"
+	end
+	local ok, object = pcall(alife_create, options.section, options.point.position,
+		options.point.vertex_id, options.game_vertex_id)
+	if not ok or object == nil then return "uncertain", "explosive_spawn_failed" end
+	local id = object_id(object)
+	if id == nil or state.pending[id] ~= nil then
+		anomaly_donation_bridge_common.rollback_server_objects({ object })
+		return "rejected", "explosive_object_id_invalid"
+	end
+	local current = now_ms(context.now)
+	state.pending[id] = {
+		id = id,
+		section = options.section,
+		explode_at = current + options.fuse,
+		forget_at = current + options.fuse + CLIENT_GRACE_MS
+	}
+	local life = life_object()
+	if life ~= nil then
+		pcall(function() life:set_switch_online(id, true) end)
+		pcall(function() life:set_switch_offline(id, false) end)
+	end
+	return "executed", "explosive_grenade_" .. options.section ..
+		"_distance_" .. tostring(options.distance) .. "m_fuse_" ..
+		tostring(options.fuse) .. "ms_" ..
+		(options.point.fallback and "fallback_vertex" or "in_front")
+end
+
+local function update(now)
+	if type(state.pickup_flags_to_reset) == "table" then
+		state.pickup_flags_to_reset.ret_value = true
+		state.pickup_flags_to_reset = nil
+	end
+	local current = now_ms(now)
+	if state.load_pending then
+		state.load_pending = false
+		for _, record in pairs(state.pending) do
+			record.explode_at = math.max(current + LOAD_GRACE_MS,
+				tonumber(record.explode_at) or 0)
+			record.forget_at = math.max(record.explode_at + CLIENT_GRACE_MS,
+				tonumber(record.forget_at) or 0)
+		end
+	end
+	for id, record in pairs(state.pending) do
+		if type(record) ~= "table" or tonumber(record.id) ~= tonumber(id) or
+			type(record.section) ~= "string" then
+			state.pending[id] = nil
+		else
+			local object = client_object(id)
+			if object ~= nil then drop_if_actor_picked_up(object) end
+			if current >= tonumber(record.explode_at or 0) then
+			if object ~= nil then
+				local section_ok, section = pcall(function() return object:section() end)
+				if section_ok and section == record.section then
+					pcall(function() object:explode(0) end)
+				end
+				state.pending[id] = nil
+			elseif current >= tonumber(record.forget_at or 0) then
+				release_record(record)
+				state.pending[id] = nil
+			end
+			end
+		end
+	end
+end
+
+local function on_game_load()
+	state.pickup_flags_to_reset = nil
+	state.load_pending = true
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+		can_execute = can_execute,
+		execute = execute,
+		update = update,
+		on_game_load = on_game_load
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] explosive registration failed: %s", tostring(reason))
+	end
+	if not state.callbacks_registered and type(RegisterScriptCallback) == "function" then
+		RegisterScriptCallback("actor_on_item_before_pickup", actor_on_item_before_pickup)
+		state.callbacks_registered = true
+	end
+end

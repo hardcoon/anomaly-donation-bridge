@@ -1,0 +1,286 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "drop_active_weapon",
+  "displayName": "Выбить оружие",
+  "description": "Выбивает текущее оружие один раз либо не даёт удерживать оружие в руках в течение выбранного времени.",
+  "category": "inventory",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "wait_seconds",
+      "displayName": "Ждать оружие в руках, сек.",
+      "kind": "Integer",
+      "minimum": 0,
+      "maximum": 300,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "30",
+      "catalogKind": null,
+      "minimumSelections": 0
+    },
+    {
+      "key": "duration_seconds",
+      "displayName": "Выбрасывать оружие в течение, сек. (0 — один раз)",
+      "kind": "Integer",
+      "minimum": 0,
+      "maximum": 600,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "0",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "wait_seconds": "30",
+    "duration_seconds": "0"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_weapon_drop_v2"
+local SAVE_KEY = "adb_weapon_drop_timer_v1"
+local MAX_DURATION_MS = 600000
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false, expires_at = 0, next_check_at = 0,
+		next_persist_at = 0, load_pending = false, weapon_waits = {}
+	}
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.weapon_waits) ~= "table" then state.weapon_waits = {} end
+
+local function now_ms(value)
+	return tonumber(value) or (time_global and time_global() or 0)
+end
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function actor_id(actor)
+	if actor == nil then return nil end
+	local ok, id = pcall(function() return tonumber(actor:id()) end)
+	return ok and id and id >= 0 and id or nil
+end
+
+local function active_weapon(actor)
+	if actor == nil then return nil end
+	local ok, slot, item = pcall(function()
+		return tonumber(actor:active_slot()), actor:active_item()
+	end)
+	if not ok or (slot ~= 2 and slot ~= 3) or item == nil then return nil end
+	return item
+end
+
+local function clear_saved(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	return pcall(se_save_var, id, nil, SAVE_KEY, nil)
+end
+
+local function clear_timer(actor, erase_saved)
+	state.active = false
+	state.expires_at = 0
+	state.next_check_at = 0
+	state.next_persist_at = 0
+	state.load_pending = false
+	if erase_saved then clear_saved(actor) end
+end
+
+local function persist_timer(actor, now)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	if not state.active then return clear_saved(actor) end
+	local remaining = math.floor((tonumber(state.expires_at) or 0) - now_ms(now))
+	if remaining <= 0 then return clear_saved(actor) end
+	if remaining > MAX_DURATION_MS then remaining = MAX_DURATION_MS end
+	return pcall(se_save_var, id, nil, SAVE_KEY, {
+		version = 1, active = true, remaining_ms = remaining
+	})
+end
+
+local function load_timer(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_load_var) ~= "function" then return nil end
+	local ok, saved = pcall(se_load_var, id, nil, SAVE_KEY)
+	local remaining = ok and type(saved) == "table" and
+		tonumber(saved.remaining_ms) or nil
+	if not ok or type(saved) ~= "table" or saved.version ~= 1 or
+		saved.active ~= true or remaining == nil or remaining <= 0 or
+		remaining > MAX_DURATION_MS then
+		clear_saved(actor)
+		return nil
+	end
+	return math.floor(remaining)
+end
+
+local function drop_item(actor, item)
+	if actor == nil or item == nil then return false, "active_weapon_unavailable" end
+	if anomaly_donation_bridge_common.protected_object(item) then
+		return false, "weapon_is_protected"
+	end
+	local section_ok, section = pcall(function() return item:section() end)
+	local dropped = pcall(function() actor:drop_item(item) end)
+	if not dropped then return false, "weapon_drop_failed" end
+	return true, section_ok and tostring(section) or "unknown"
+end
+
+local function parse_options(params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		wait_seconds = true, duration_seconds = true
+	})
+	if not valid then return nil, reason end
+	local wait_seconds, wait_error = anomaly_donation_bridge_common.parse_integer(
+		params.wait_seconds, 30, 0, 300, "weapon_wait_seconds_invalid")
+	if wait_seconds == nil then return nil, wait_error end
+	local duration, duration_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 0, 0, 600, "weapon_drop_duration_invalid")
+	if duration == nil or (duration > 0 and duration < 10) then
+		return nil, duration_error or "weapon_drop_duration_invalid"
+	end
+	return { wait_seconds = wait_seconds, duration = duration }
+end
+
+local function drop_weapon_can(context, params)
+	local options, parse_error = parse_options(params)
+	if options == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	local item = active_weapon(context.actor)
+	if options.duration > 0 then
+		context.options = { duration = options.duration }
+		if item ~= nil and not anomaly_donation_bridge_common.protected_object(item) then
+			context.options.item = item
+		end
+		return true
+	end
+
+	local command = context.command or {}
+	local wait_key = tostring(command.donation_id or command.command_id or "")
+	local current = now_ms(context.now)
+	for key, pending in pairs(state.weapon_waits) do
+		if type(pending) ~= "table" or
+			current > tonumber(pending.expires_at or 0) + 60000 then
+			state.weapon_waits[key] = nil
+		end
+	end
+	if item == nil then
+		local pending = wait_key ~= "" and state.weapon_waits[wait_key] or nil
+		if pending == nil then
+			pending = { expires_at = current + options.wait_seconds * 1000 }
+			if wait_key ~= "" then state.weapon_waits[wait_key] = pending end
+		end
+		if current < pending.expires_at then
+			return false, "deferred", "waiting_for_active_weapon"
+		end
+		if wait_key ~= "" then state.weapon_waits[wait_key] = nil end
+		return false, "rejected", "active_weapon_wait_expired"
+	end
+	if wait_key ~= "" then state.weapon_waits[wait_key] = nil end
+	if anomaly_donation_bridge_common.protected_object(item) then
+		return false, "rejected", "weapon_is_protected"
+	end
+	context.options = { duration = 0, item = item }
+	return true
+end
+
+local function drop_weapon_execute(context)
+	local current = now_ms(context.now)
+	local duration = tonumber(context.options.duration) or 0
+	if duration > 0 then
+		state.active = true
+		state.expires_at = math.max(tonumber(state.expires_at) or 0,
+			current + duration * 1000)
+		state.next_check_at = current
+		state.next_persist_at = current + 1000
+		persist_timer(context.actor, current)
+		if context.options.item ~= nil then
+			local dropped, detail = drop_item(context.actor, context.options.item)
+			if not dropped then return "uncertain", detail end
+			return "executed", "weapon_drop_period_seconds_" .. tostring(duration) ..
+				"_dropped_" .. detail
+		end
+		return "executed", "weapon_drop_period_seconds_" .. tostring(duration)
+	end
+	local dropped, detail = drop_item(context.actor, context.options.item)
+	if not dropped then return "uncertain", detail end
+	return "executed", "weapon_dropped_" .. detail
+end
+
+local function drop_weapon_update(now)
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	local current = now_ms(now)
+	if state.load_pending then
+		state.load_pending = false
+		local remaining = load_timer(actor)
+		clear_timer(actor, false)
+		if remaining ~= nil then
+			state.active = true
+			state.expires_at = current + remaining
+			state.next_check_at = current
+			state.next_persist_at = current + 1000
+		end
+	end
+	if not state.active then return end
+	if current >= tonumber(state.expires_at or 0) then
+		clear_timer(actor, true)
+		return
+	end
+	if current >= tonumber(state.next_check_at or 0) then
+		state.next_check_at = current + 100
+		local item = active_weapon(actor)
+		if item ~= nil and not anomaly_donation_bridge_common.protected_object(item) then
+			drop_item(actor, item)
+		end
+	end
+	if current >= tonumber(state.next_persist_at or 0) then
+		persist_timer(actor, current)
+		state.next_persist_at = current + 1000
+	end
+end
+
+local function drop_weapon_load()
+	clear_timer(db and db.actor or nil, false)
+	state.load_pending = true
+	drop_weapon_update(now_ms())
+end
+
+local function drop_weapon_level_changing()
+	if state.active then persist_timer(db and db.actor or nil, now_ms()) end
+end
+
+local function weapon_drop_supported(context)
+	local actor = actor_for_probe(context)
+	if actor == nil then return false, "weapon_drop_api_unsupported" end
+	for _, name in ipairs({ "active_slot", "active_item", "drop_item" }) do
+		local ok, method = pcall(function() return actor[name] end)
+		if not ok or type(method) ~= "function" then
+			return false, "weapon_drop_api_unsupported"
+		end
+	end
+	local supported = type(get_object_story_id) == "function"
+	return supported, supported and nil or "story_id_api_unsupported"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"drop_active_weapon", {
+			can_execute = drop_weapon_can,
+			execute = drop_weapon_execute,
+			update = drop_weapon_update,
+			on_game_load = drop_weapon_load,
+			on_level_changing = drop_weapon_level_changing,
+			is_supported = weapon_drop_supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] drop_active_weapon registration failed: %s", tostring(reason))
+	end
+end

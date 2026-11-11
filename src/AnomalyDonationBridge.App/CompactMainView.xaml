@@ -1,0 +1,312 @@
+<UserControl x:Class="AnomalyDonationBridge.App.CompactMainView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:AnomalyDonationBridge.App"
+             xmlns:vm="clr-namespace:AnomalyDonationBridge.App.ViewModels"
+             x:Name="CompactRoot" FontFamily="Segoe UI" FontSize="13"
+             Foreground="{DynamicResource TextBrush}" Background="{DynamicResource BackgroundBrush}">
+    <UserControl.Resources>
+        <local:CompactExtraPricesConverter x:Key="ExtraPrices" />
+        <local:CompactVisiblePricesConverter x:Key="VisiblePrices" />
+        <local:HistoryStatusMarkerConverter x:Key="CompactHistoryStatusMarker" />
+        <Style x:Key="CompactActionSurfaceStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource PanelBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" /><Setter Property="CornerRadius" Value="3" />
+        </Style>
+        <Style x:Key="CompactIconStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+            <Setter Property="Width" Value="32" /><Setter Property="Height" Value="32" />
+            <Setter Property="MinHeight" Value="0" /><Setter Property="Padding" Value="4" />
+            <Setter Property="Margin" Value="4,0,0,0" />
+        </Style>
+        <Style x:Key="CompactChevronStyle" TargetType="Path">
+            <Setter Property="Data" Value="M 0 0 L 4 4 L 8 0" />
+            <Setter Property="Width" Value="8" /><Setter Property="Height" Value="4" />
+            <Setter Property="Stretch" Value="Uniform" />
+            <Setter Property="Stroke" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+            <Setter Property="StrokeThickness" Value="1.5" />
+            <Setter Property="StrokeStartLineCap" Value="Round" /><Setter Property="StrokeEndLineCap" Value="Round" />
+            <Setter Property="StrokeLineJoin" Value="Round" />
+            <Setter Property="VerticalAlignment" Value="Center" /><Setter Property="IsHitTestVisible" Value="False" />
+        </Style>
+        <DataTemplate x:Key="CompactDropDownLabelTemplate">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="{Binding}" VerticalAlignment="Center" />
+                <Path Style="{StaticResource CompactChevronStyle}" Margin="7,0,0,0" />
+            </StackPanel>
+        </DataTemplate>
+        <Style x:Key="CompactExtraPriceStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+            <Setter Property="Padding" Value="5,1" /><Setter Property="MinHeight" Value="24" />
+            <Setter Property="FontSize" Value="12" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="ContentTemplate" Value="{StaticResource CompactDropDownLabelTemplate}" />
+            <Style.Triggers><Trigger Property="Content" Value=""><Setter Property="Visibility" Value="Collapsed" /></Trigger></Style.Triggers>
+        </Style>
+        <Style x:Key="CompactGroupExpandStyle" TargetType="Button" BasedOn="{StaticResource GhostButtonStyle}">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+                <Border x:Name="GroupSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}" CornerRadius="3">
+                    <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="GroupSurface" Property="Background" Value="{DynamicResource ControlHoverBrush}" /></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="GroupSurface" Property="Background" Value="{DynamicResource PanelAltBrush}" /></Trigger>
+                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="GroupSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5" /></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+        </Style>
+        <DataTemplate x:Key="CompactEditablePriceTemplate">
+            <Button Content="{Binding Label}" Click="PrimaryPrice_Click" ToolTip="Изменить сумму или валюту" Foreground="{DynamicResource AccentForegroundBrush}"
+                    Style="{StaticResource GhostButtonStyle}" Padding="0,1" Margin="0,0,8,0" MinHeight="24" FontSize="12" />
+        </DataTemplate>
+        <DataTemplate x:Key="CompactSharedPriceTemplate">
+            <TextBlock Text="{Binding Label}" Foreground="{DynamicResource AccentForegroundBrush}" FontSize="12" Padding="0,4" Margin="0,0,8,0" ToolTip="Общая цена группы" />
+        </DataTemplate>
+        <Style x:Key="CompactHistoryCommandStyle" TargetType="Button" BasedOn="{StaticResource CompactIconStyle}">
+            <Setter Property="Background" Value="{DynamicResource InputBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True" />
+        </Style>
+        <Style x:Key="CompactNavigationStyle" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent" /><Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="Padding" Value="9,9" /><Setter Property="Margin" Value="0,0,0,5" />
+            <Setter Property="Cursor" Value="Hand" /><Setter Property="MinHeight" Value="42" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="2,0,0,0" Padding="{TemplateBinding Padding}">
+                    <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource TriggerChipBrush}" /><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Trigger>
+                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource TextBrush}" /></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+            <Style.Triggers><DataTrigger Binding="{Binding IsSidebarExpanded, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="False"><Setter Property="Padding" Value="0,9" /><Setter Property="HorizontalContentAlignment" Value="Center" /></DataTrigger></Style.Triggers>
+        </Style>
+        <Style x:Key="CompactHistoryItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" /><Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="Padding" Value="0" />
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+                <Border x:Name="ItemSurface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="2,0,0,0" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Stretch" /></Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="{DynamicResource PanelAltBrush}" /></Trigger>
+                    <Trigger Property="IsSelected" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="{DynamicResource TriggerChipBrush}" /><Setter TargetName="ItemSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                    <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="ItemSurface" Property="BorderBrush" Value="{DynamicResource AccentBrush}" /></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+            <Style.Triggers>
+                <Trigger Property="ItemsControl.AlternationIndex" Value="1"><Setter Property="Background" Value="{DynamicResource PanelBrush}" /></Trigger>
+            </Style.Triggers>
+        </Style>
+        <DataTemplate x:Key="SmallActionRow" DataType="{x:Type vm:ActionViewModel}">
+            <Border Tag="SequenceStepRow" AllowDrop="True" Loaded="ActionRow_Loaded" Background="Transparent">
+                <Border Style="{StaticResource CompactActionSurfaceStyle}" Margin="0,0,0,6" Padding="9,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid x:Name="OrdinalHandle" Grid.RowSpan="2" VerticalAlignment="Top" Background="Transparent" Margin="0,2,5,0">
+                            <TextBlock Text="{Binding VisualDisplayOrdinalLabel}" FontFamily="Consolas" FontSize="11" Foreground="{DynamicResource MutedBrush}">
+                                <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding IsSequenceStep}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                            </TextBlock>
+                            <StackPanel Orientation="Horizontal" Visibility="{Binding IsSequenceStep, Converter={StaticResource BoolToVisibility}}" ToolTip="Перетащите, чтобы изменить порядок шагов" Cursor="SizeAll" AutomationProperties.Name="Переместить шаг">
+                                <TextBlock Text="⠿" Foreground="{DynamicResource MutedBrush}" Margin="0,0,3,0" /><TextBlock Text="{Binding SequenceOrdinal}" Foreground="{DynamicResource AccentForegroundBrush}" FontFamily="Consolas" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip="{Binding Description}" />
+                        <DockPanel Grid.Row="1" Grid.Column="1" Margin="0,3,8,0">
+                            <DockPanel.Style><Style TargetType="DockPanel"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding HasTriggers}" Value="True" /><Condition Binding="{Binding IsSequenceStep}" Value="False" /></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible" /></MultiDataTrigger></Style.Triggers></Style></DockPanel.Style>
+                            <Button DockPanel.Dock="Right" Content="{Binding Triggers.Count, Converter={StaticResource ExtraPrices}}" Click="ExtraPrices_Click" Style="{StaticResource CompactExtraPriceStyle}" VerticalAlignment="Top" ToolTip="Остальные условия суммы и валюты" />
+                            <ItemsControl ItemTemplate="{StaticResource CompactEditablePriceTemplate}">
+                                <ItemsControl.ItemsSource><MultiBinding Converter="{StaticResource VisiblePrices}"><Binding Path="Triggers" /><Binding Path="Triggers.Count" /></MultiBinding></ItemsControl.ItemsSource>
+                                <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            </ItemsControl>
+                        </DockPanel>
+                        <local:CardToolbarPanel Grid.Row="2" Grid.Column="1" Margin="0,7,0,0">
+                            <Button local:ButtonVisual.Glyph="&#xE713;" Content="Настроить" Click="ConfigureAction_Click" Padding="6,4" MinHeight="30" AutomationProperties.Name="Настроить параметры шаблона" />
+                            <Button local:ButtonVisual.Glyph="&#xE768;" Content="Тест" Padding="6,4" MinHeight="30" Style="{StaticResource AccentOutlineButtonStyle}"
+                                    Command="{Binding DataContext.TestCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}"
+                                    IsEnabled="{Binding CanTest}" ToolTip="{Binding AvailabilityHint}" ToolTipService.ShowOnDisabled="True" />
+                        
+                        <Button local:ButtonVisual.Glyph="&#xE710;" local:ButtonVisual.Label="Сумма" Content="+ Сумма" Padding="6,4" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource InverseBooleanConverter}}" Command="{Binding DataContext.AddTriggerCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
+                <Button local:ButtonVisual.Glyph="&#xE734;" Content="В пользовательские" Padding="6,4" Style="{StaticResource AccentOutlineButtonStyle}" Visibility="{Binding IsBuiltInPreset, Converter={StaticResource BoolToVisibility}}" Command="{Binding DataContext.SaveAsUserPresetCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
+                <Button local:ButtonVisual.Glyph="&#xE8FD;" Content="В активные" Padding="6,4" Style="{StaticResource AccentOutlineButtonStyle}" Visibility="{Binding IsUserPreset, Converter={StaticResource BoolToVisibility}}" Command="{Binding DataContext.AddFromPresetCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
+                <Button Content="⋯" Click="ActionMenu_Click" Style="{StaticResource GhostButtonStyle}" Padding="0" MinHeight="28" Width="28" VerticalAlignment="Center" AutomationProperties.Name="Другие действия шаблона" ToolTip="Другие действия" /></local:CardToolbarPanel>
+                        <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Margin="0,5,0,0" Visibility="{Binding DataContext.ShowTemplateDescriptions, RelativeSource={RelativeSource AncestorType=UserControl}, Converter={StaticResource BoolToVisibility}}">
+                            <local:TemplateDescriptionTextBlock Description="{Binding Description}" FontSize="12" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding ParameterSummary}" FontSize="12" Foreground="{DynamicResource SubtleBrush}" TextWrapping="Wrap" Margin="0,3,0,0" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Border>
+        </DataTemplate>
+        <DataTemplate x:Key="SmallGroupRow" DataType="{x:Type vm:ActivePriceGroupViewModel}">
+            <Border Style="{StaticResource CompactActionSurfaceStyle}" Margin="0,0,0,6" Padding="9,8">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="30" /></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <TextBlock Text="{Binding DisplayOrdinalLabel}" FontSize="11" FontFamily="Consolas" Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+                        <Button Grid.Column="1" Click="ExpandGroup_Click" Style="{StaticResource CompactGroupExpandStyle}" Padding="0,2" MinHeight="24" ToolTip="Развернуть или скрыть группу">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="20" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <Grid Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                    <Path RenderTransformOrigin="0.5,0.5">
+                                        <Path.Style><Style TargetType="Path" BasedOn="{StaticResource CompactChevronStyle}">
+                                            <Setter Property="RenderTransform"><Setter.Value><RotateTransform Angle="-90" /></Setter.Value></Setter>
+                                            <Style.Triggers><DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                                <Setter Property="RenderTransform"><Setter.Value><RotateTransform Angle="0" /></Setter.Value></Setter>
+                                            </DataTrigger></Style.Triggers>
+                                        </Style></Path.Style>
+                                    </Path>
+                                </Grid>
+                                <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
+                        <DockPanel Grid.Column="1" Grid.Row="1" Margin="0,3,8,0">
+                            <Button DockPanel.Dock="Right" Content="{Binding SharedTriggers.Count, Converter={StaticResource ExtraPrices}}" Click="ExtraPrices_Click" Style="{StaticResource CompactExtraPriceStyle}" VerticalAlignment="Top" ToolTip="Остальные общие цены группы" />
+                            <ItemsControl ItemTemplate="{StaticResource CompactSharedPriceTemplate}">
+                                <ItemsControl.ItemsSource><MultiBinding Converter="{StaticResource VisiblePrices}"><Binding Path="SharedTriggers" /><Binding Path="SharedTriggers.Count" /></MultiBinding></ItemsControl.ItemsSource>
+                                <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            </ItemsControl>
+                        </DockPanel>
+                        <Button local:ButtonVisual.Glyph="&#xE768;" Grid.Column="2" Grid.RowSpan="2" Content="Тест" Padding="8,4" MinHeight="30" VerticalAlignment="Center" Style="{StaticResource AccentOutlineButtonStyle}" IsEnabled="{Binding CanTest}" Command="{Binding DataContext.TestPriceGroupCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" ToolTip="Проверить все шаги группы" />
+                        <Button Grid.Column="3" Grid.RowSpan="2" Content="⋯" Click="GroupMenu_Click" Style="{StaticResource GhostButtonStyle}" Padding="0" Width="28" MinHeight="28" VerticalAlignment="Center" AutomationProperties.Name="Действия группы" />
+                    </Grid>
+                    <StackPanel Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}" Margin="0,7,0,0">
+                        <WrapPanel Margin="0,0,0,4">
+                            <CheckBox Content="Выполнять строго по порядку" IsChecked="{Binding StrictSequence, Mode=OneWay}" Click="StrictSequence_Click" Margin="0,0,22,6" VerticalAlignment="Center" ToolTip="Следующий шаг ждёт подтверждения запуска предыдущего, а не завершения его таймера." />
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,6" ToolTip="Заменяет глобальную задержку между эффектами одного доната. 0 — без дополнительной паузы.">
+                                <TextBlock Text="Задержка между срабатываниями эффектов:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                <TextBox Text="{Binding GroupDelaySeconds, Mode=OneWay}" Width="64" Padding="7,4" VerticalContentAlignment="Center" MaxLength="5" LostKeyboardFocus="GroupDelay_LostKeyboardFocus" KeyDown="GroupDelay_KeyDown" AutomationProperties.Name="Задержка между срабатываниями эффектов" />
+                                <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
+                            </StackPanel>
+                        </WrapPanel>
+                        <ItemsControl ItemsSource="{Binding Actions}" ItemTemplate="{StaticResource SmallActionRow}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:ActionViewModel}"><ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource SmallActionRow}" /></DataTemplate>
+        <DataTemplate DataType="{x:Type vm:ActiveActionListEntryViewModel}">
+            <ContentControl>
+                <ContentControl.Style><Style TargetType="ContentControl"><Setter Property="Content" Value="{Binding Action}" /><Setter Property="ContentTemplate" Value="{StaticResource SmallActionRow}" /><Style.Triggers><DataTrigger Binding="{Binding IsGroup}" Value="True"><Setter Property="Content" Value="{Binding Group}" /><Setter Property="ContentTemplate" Value="{StaticResource SmallGroupRow}" /></DataTrigger></Style.Triggers></Style></ContentControl.Style>
+            </ContentControl>
+        </DataTemplate>
+    </UserControl.Resources>
+    <Grid Margin="0,8,14,8">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <Grid Grid.ColumnSpan="2" Margin="14,0,0,9">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center"><Image x:Name="SmallLogo" Width="26" Height="26" Margin="0,0,9,0" RenderOptions.BitmapScalingMode="HighQuality" /><TextBlock x:Name="BrandName" Text="ADB" FontWeight="SemiBold" VerticalAlignment="Center" /></StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Click="Theme_Click" Style="{StaticResource CompactIconStyle}" ToolTip="Тема" AutomationProperties.Name="Тема приложения"><TextBlock Text="&#xE790;" FontFamily="Segoe MDL2 Assets" FontSize="15" /></Button>
+                <Button local:ButtonVisual.Glyph="&#xEB05;" Content="Голосования" Click="Voting_Click" Padding="9,4" MinHeight="32" Margin="4,0,0,0" />
+                <Button Click="Profiles_Click" Style="{StaticResource CompactIconStyle}" ToolTip="Профили" AutomationProperties.Name="Профили"><TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="15" /></Button>
+                <Button Click="Settings_Click" Style="{StaticResource CompactIconStyle}" ToolTip="Настройки" AutomationProperties.Name="Настройки"><TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="15" /></Button>
+            </StackPanel>
+        </Grid>
+        <Grid Grid.Row="1" Grid.ColumnSpan="2" Margin="14,0,0,7">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="32" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <Button x:Name="StatusButton" Click="Status_Click" Style="{StaticResource GhostButtonStyle}" Padding="0,4" MinHeight="28" HorizontalContentAlignment="Stretch" ToolTip="Состояние подключений" AutomationProperties.Name="Состояние подключений">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Ellipse Width="6" Height="6" Fill="{DynamicResource AccentBrush}" Margin="0,0,7,0" /><TextBlock Grid.Column="1" Text="{Binding DonationStatus}" FontSize="12" TextTrimming="CharacterEllipsis" /></Grid>
+            </Button>
+            <Button Grid.Column="1" Click="Status_Click" Style="{StaticResource GhostButtonStyle}" Padding="4" MinHeight="28" HorizontalContentAlignment="Stretch" ToolTip="{Binding GameStatus}"><TextBlock Text="{Binding GameStatus}" FontSize="12" TextTrimming="CharacterEllipsis" Foreground="{DynamicResource AccentForegroundBrush}" /></Button>
+            <Button Grid.Column="2" Content="↻" Command="{Binding RefreshCatalogCommand}" IsEnabled="{Binding CanRefreshCatalog}" Style="{StaticResource GhostButtonStyle}" Padding="2" Width="28" Height="28" MinHeight="0" ToolTip="Обновить каталог игры" AutomationProperties.Name="Обновить каталог игры" />
+            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0"><TextBlock Text="Обработка" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0" /><CheckBox IsChecked="{Binding Armed, Mode=TwoWay}" IsEnabled="{Binding CanArm}" Style="{StaticResource SwitchCheckBoxStyle}" ToolTip="{Binding ArmHint}" AutomationProperties.Name="Обработка донатов" /></StackPanel>
+            <Popup x:Name="StatusPopup" Placement="Bottom" PlacementTarget="{Binding ElementName=StatusButton}" VerticalOffset="5" StaysOpen="False" AllowsTransparency="True">
+                <Border Width="340" Padding="14" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderStrongBrush}" BorderThickness="1" CornerRadius="4" TextElement.Foreground="{DynamicResource TextBrush}">
+                    <StackPanel><TextBlock Text="{Binding DonationStatus}" TextWrapping="Wrap" /><TextBlock Text="{Binding GameStatus}" TextWrapping="Wrap" Margin="0,10,0,3" /><TextBlock Text="{Binding CatalogStatus}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedBrush}" /><TextBlock Text="{Binding ExtensionStatus}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" /><TextBlock Text="{Binding ProcessingStatus}" TextWrapping="Wrap" FontSize="12" Margin="0,10,0,0" /></StackPanel>
+                </Border>
+            </Popup>
+        </Grid>
+        <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="14,0,0,0">
+            <Button Content="{Binding BridgeUpdateButtonText}" Command="{Binding InstallBridgeCommand}" Visibility="{Binding ShowBridgeUpdate, Converter={StaticResource BoolToVisibility}}" Style="{StaticResource AccentOutlineButtonStyle}" ToolTip="{Binding BridgeUpdateHint}" HorizontalAlignment="Left" Padding="10,4" Margin="0,0,0,7" />
+            <ProgressBar Height="3" Margin="0,0,0,5" Maximum="100" Value="{Binding CatalogProgressPercent, Mode=OneWay}" IsIndeterminate="{Binding IsCatalogProgressIndeterminate}" Visibility="{Binding IsCatalogSynchronizing, Converter={StaticResource BoolToVisibility}}" ToolTip="{Binding CatalogProgressText}" />
+        </StackPanel>
+        <Border Grid.Row="3" Grid.RowSpan="2" Grid.ColumnSpan="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" IsHitTestVisible="False" />
+        <Border x:Name="SidebarSurface" Grid.Row="3" Grid.RowSpan="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0" Margin="0,0,12,0">
+            <Border.Style><Style TargetType="Border"><Setter Property="Width" Value="192" /><Style.Triggers><DataTrigger Binding="{Binding IsSidebarExpanded, ElementName=CompactRoot}" Value="False"><Setter Property="Width" Value="48" /></DataTrigger></Style.Triggers></Style></Border.Style>
+            <StackPanel Margin="0,5,0,0">
+                <ToggleButton x:Name="ActiveTab" Tag="0" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="Активные" AutomationProperties.Name="Активные"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Активные" Margin="8,0,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding ActiveActions.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
+                <ToggleButton x:Name="UserTab" Tag="1" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="Пользовательские шаблоны" AutomationProperties.Name="Пользовательские шаблоны"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="&#xE734;" FontFamily="Segoe MDL2 Assets" FontSize="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Пользовательские" Margin="8,0,0,0" TextTrimming="CharacterEllipsis" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding UserPresets.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
+                <ToggleButton x:Name="TemplatesTab" Tag="2" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="Шаблоны" AutomationProperties.Name="Шаблоны"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="&#xE8F1;" FontFamily="Segoe MDL2 Assets" FontSize="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Шаблоны" Margin="8,0,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding Presets.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
+                <ToggleButton x:Name="HistoryTab" Tag="3" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="История" AutomationProperties.Name="История"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="&#xE81C;" FontFamily="Segoe MDL2 Assets" FontSize="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="История" Margin="8,0,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding History.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
+            </StackPanel>
+        </Border>
+        <Grid Grid.Row="3" Grid.Column="1" Margin="0,6,0,8" Visibility="{Binding IsHistorySection, ElementName=CompactRoot, Converter={StaticResource InverseBooleanConverter}}">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <ListBox x:Name="CompactCategories" Grid.ColumnSpan="3" SelectedItem="{Binding SelectedBrowser.SelectedCategory, ElementName=CompactRoot, Mode=TwoWay}"
+                     ItemsSource="{x:Static vm:ActionBrowserViewModel.Categories}" SelectionChanged="Categories_SelectionChanged"
+                     Background="Transparent" BorderThickness="0" Padding="0" Width="410" HorizontalAlignment="Left" FontSize="12"
+                     ItemContainerStyle="{DynamicResource CategoryTabStyle}"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                     AutomationProperties.Name="Категории шаблонов">
+                <ListBox.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+                <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" /></DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+            <Border x:Name="CompactSearch" Grid.ColumnSpan="3" Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource BorderStrongBrush}" BorderThickness="1" CornerRadius="3" Width="220" Height="32" VerticalAlignment="Bottom" HorizontalAlignment="Right" Visibility="{Binding ShowTemplateSearch, Converter={StaticResource BoolToVisibility}}">
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="30" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <Button x:Name="SmallSearchButton" Click="Search_Click" Style="{StaticResource GhostButtonStyle}" Padding="0" MinHeight="0" ToolTip="Поиск · Ctrl+F" AutomationProperties.Name="Перейти к поиску шаблонов"><TextBlock Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="15" /></Button>
+                    <Grid Grid.Column="1"><TextBox x:Name="SmallSearchInput" Text="{Binding TemplateSearchText, UpdateSourceTrigger=PropertyChanged}" MaxLength="160" BorderThickness="0" Background="Transparent" Padding="2,3" MinWidth="0" MinHeight="0" VerticalContentAlignment="Center" AutomationProperties.Name="Поиск по названию шаблона" /><TextBlock Text="{Binding TemplateSearchHint}" IsHitTestVisible="False" Foreground="{DynamicResource MutedBrush}" Margin="4,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding TemplateSearchText}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></Grid>
+                    <Button x:Name="SmallClearSearchButton" Grid.Column="2" Content="×" Click="ClearSearch_Click" IsEnabled="{Binding HasTemplateSearchText}" Style="{StaticResource GhostButtonStyle}" Padding="5,0" MinHeight="0" ToolTip="Очистить поиск · Esc" AutomationProperties.Name="Очистить поиск и сбросить фильтр" />
+                </Grid>
+            </Border>
+            <Button Grid.Column="1" Content="Вид" ContentTemplate="{StaticResource CompactDropDownLabelTemplate}" Click="ViewMenu_Click" Height="32" MinHeight="32" VerticalAlignment="Top" Padding="9,4" Margin="6,0,0,0" />
+            <Button Grid.Column="2" Content="⋯" Click="ListMenu_Click" Style="{StaticResource CompactIconStyle}" VerticalAlignment="Top" Visibility="{Binding IsActiveSection, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Действия со списком" ToolTip="Экспорт и сортировка" />
+            <Border Grid.Row="1" Grid.ColumnSpan="3" Visibility="{Binding HasQueueStatus, Converter={StaticResource BoolToVisibility}}" Background="{DynamicResource TriggerChipBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1" CornerRadius="3" Margin="0,6,0,0" Padding="8,4"><TextBlock Text="{Binding QueueStatusText}" FontSize="12" Foreground="{DynamicResource AccentForegroundBrush}" TextTrimming="CharacterEllipsis" ToolTip="{Binding QueueStatusText}" /></Border>
+        </Grid>
+        <Grid Grid.Row="4" Grid.Column="1" Visibility="{Binding IsHistorySection, ElementName=CompactRoot, Converter={StaticResource InverseBooleanConverter}}">
+            <ScrollViewer x:Name="ActionScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsControl x:Name="SmallActionsList" ItemsSource="{Binding VisibleItems, ElementName=CompactRoot}" Margin="0,0,4,0" AlternationCount="2" /></ScrollViewer>
+            <TextBlock Text="Ничего не найдено" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding ElementName=SmallActionsList, Path=HasItems}" Value="False"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+        </Grid>
+        <Grid Grid.Row="3" Grid.RowSpan="2" Grid.Column="1" Visibility="{Binding IsHistorySection, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" Margin="0,6,0,0">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <Button Content="Повторить" Command="{Binding RetryCommand}" Style="{StaticResource AccentOutlineButtonStyle}" Padding="10,4" HorizontalAlignment="Left" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="&#xE945;" Command="{Binding ApplyQueuedImmediatelyCommand}" Style="{StaticResource CompactHistoryCommandStyle}" ToolTip="Применить мгновенно — только выделенные события в очереди, без ожидания пауз" AutomationProperties.Name="Применить мгновенно" />
+                    <Button Content="&#xE8F8;" Command="{Binding AddHistoryExclusionCommand}" Style="{StaticResource CompactHistoryCommandStyle}" ToolTip="В исключения" AutomationProperties.Name="В исключения" />
+                    <Button Content="&#xE72C;" Command="{Binding RefreshEventsCommand}" Style="{StaticResource CompactHistoryCommandStyle}" ToolTip="{Binding RefreshEventsButtonText}" AutomationProperties.Name="Обновить" />
+                    <Button Content="&#xE738;" Command="{Binding RemoveSelectedQueuedCommand}" Style="{StaticResource CompactHistoryCommandStyle}" ToolTip="Удалить выбранное из очереди" AutomationProperties.Name="Удалить выбранное из очереди" />
+                    <Button Content="&#xE74D;" Command="{Binding ClearQueueCommand}" Style="{StaticResource CompactHistoryCommandStyle}" ToolTip="Очистить очередь" AutomationProperties.Name="Очистить очередь" />
+                </StackPanel>
+            </Grid>
+            <ListBox x:Name="SmallHistoryList" Grid.Row="1" ItemsSource="{Binding History}" SelectionMode="Extended" local:HistoryListBehavior.IsEnabled="True" AlternationCount="2" Background="Transparent" Foreground="{DynamicResource TextBrush}" ItemContainerStyle="{StaticResource CompactHistoryItemStyle}" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                <ListBox.ItemTemplate><DataTemplate>
+                    <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,8">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding ActionName}" Foreground="{DynamicResource TextBrush}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0">
+                                    <TextBlock Text="{Binding Amount}" Foreground="{DynamicResource AccentForegroundBrush}" />
+                                    <TextBlock Text="{Binding Currency}" Foreground="{DynamicResource AccentForegroundBrush}" Margin="4,0,0,0" />
+                                </StackPanel>
+                            </Grid>
+                            <WrapPanel Margin="0,3,0,0">
+                                <TextBlock Text="{Binding DonationCreatedAt, StringFormat=dd.MM HH:mm:ss}" FontSize="12" Foreground="{DynamicResource MutedBrush}" Margin="0,0,10,0" />
+                                <TextBlock Text="{Binding DisplayDonor}" FontSize="12" Foreground="{DynamicResource MutedBrush}" />
+                            </WrapPanel>
+                            <TextBlock Text="{Binding Detail}" Foreground="{DynamicResource TextBrush}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" />
+                            <Border Style="{DynamicResource HistoryStatusBadgeStyle}" HorizontalAlignment="Left" ToolTip="{Binding Detail}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding State, Converter={StaticResource CompactHistoryStatusMarker}}" FontWeight="Bold" Width="18" />
+                                    <TextBlock Text="{Binding State, Converter={StaticResource FriendlyValueConverter}}" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                </DataTemplate></ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+        <Grid Grid.Row="5" Grid.ColumnSpan="2" Margin="0,5,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Text="{Binding Notice}" FontSize="11" Foreground="{DynamicResource AccentForegroundBrush}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Notice}" VerticalAlignment="Center" /><TextBlock x:Name="VersionLabel" Grid.Column="1" FontSize="11" Foreground="{DynamicResource SubtleBrush}" Margin="10,0,0,0" VerticalAlignment="Center" ToolTip="{Binding ExtensionStatus}" /></Grid>
+    </Grid>
+</UserControl>

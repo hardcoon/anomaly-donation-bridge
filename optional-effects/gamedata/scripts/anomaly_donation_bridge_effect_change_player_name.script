@@ -1,0 +1,97 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "change_player_name",
+  "displayName": "Сменить имя героя на имя донатчика",
+  "description": "Штатно меняет имя персонажа на имя донатчика. Новое имя хранится в сохранении игры.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [],
+  "parameters": {},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local function life_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function server_actor()
+	local life = life_object()
+	if life == nil then return nil end
+	local ok, actor = pcall(function() return life:actor() end)
+	return ok and actor or nil
+end
+
+local function actor_name_supported(context)
+	if context ~= nil and context.actor == nil then
+		return false, "actor_unavailable"
+	end
+	local actor = server_actor()
+	if actor == nil then return false, "actor_server_object_unavailable" end
+	local read_ok, read_method = pcall(function() return actor.character_name end)
+	local write_ok, write_method = pcall(function() return actor.set_character_name end)
+	local supported = read_ok and write_ok and type(read_method) == "function" and
+		type(write_method) == "function"
+	return supported, supported and nil or "actor_name_api_unsupported"
+end
+
+local function change_name_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+		donor_name = true
+	})
+	if not valid then return false, "rejected", error_code end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+
+	local donor_name = tostring(params.donor_name or "")
+	donor_name = donor_name:match("^%s*(.-)%s*$") or ""
+	donor_name = anomaly_donation_bridge_common.truncate_utf8(donor_name, 128)
+	if donor_name == "" or donor_name:find("[%z\1-\31\127]", 1) ~= nil then
+		return false, "rejected", "actor_name_donor_invalid"
+	end
+	local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(donor_name)
+	if encoded_name == nil or encoded_name == "" then
+		return false, "rejected", "actor_name_encoding_invalid"
+	end
+
+	local supported, reason = actor_name_supported(context)
+	if not supported then return false, "deferred", reason end
+	context.options = { actor = server_actor(), name = encoded_name }
+	if context.options.actor == nil then
+		return false, "deferred", "actor_server_object_unavailable"
+	end
+	return true
+end
+
+local function change_name_execute(context)
+	local actor = context.options and context.options.actor or nil
+	local new_name = context.options and context.options.name or nil
+	if actor == nil or new_name == nil then
+		return "rejected", "actor_name_context_invalid"
+	end
+	local read_ok, previous_name = pcall(function() return actor:character_name() end)
+	if not read_ok then return "deferred", "actor_name_read_failed" end
+	if previous_name == new_name then return "executed", "actor_name_unchanged" end
+
+	local write_ok = pcall(function() actor:set_character_name(new_name) end)
+	if not write_ok then return "uncertain", "actor_name_change_failed" end
+	local confirm_ok, actual_name = pcall(function() return actor:character_name() end)
+	if not confirm_ok or actual_name ~= new_name then
+		return "uncertain", "actor_name_change_not_confirmed"
+	end
+	return "executed", "actor_name_changed"
+end
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin("change_player_name", {
+		can_execute = change_name_can,
+		execute = change_name_execute,
+		is_supported = actor_name_supported
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] change_player_name registration failed: %s", tostring(reason))
+	end
+end

@@ -1,0 +1,220 @@
+-- Hardcoon. No UI, Bridge or modpack dependencies. The adapter owns game APIs.
+local adapter,transaction,last_result
+local serial=0
+local settings={duration_ms=3500}
+function configure(environment,options)
+    adapter=environment
+    for key,value in pairs(options or {}) do
+        if settings[key]~=nil and anomaly_donation_bridge_roulette_catalog.finite(value) then settings[key]=value end
+    end
+    settings.duration_ms=math.max(1000,math.min(30000,settings.duration_ms))
+end
+function current() return transaction end
+function result() return last_result end
+function busy() return transaction~=nil end
+function quote_category(input_id,risk)
+    if not adapter then return nil,"unavailable" end
+    if not anomaly_donation_bridge_roulette_catalog.finite(input_id) or input_id<0 or input_id>65534 or
+        input_id~=math.floor(input_id) then return nil,"input_missing" end
+    local input,why=adapter.snapshot(input_id)
+    if not input then return nil,why or "input_missing" end
+    if not anomaly_donation_bridge_roulette_catalog.finite(input.value) or input.value<=0 then return nil,"empty_item" end
+    local source=anomaly_donation_bridge_roulette_catalog.get(input.section)
+    if not source then return nil,"input_unavailable" end
+    if source.quest then return nil,"quest_item" end
+    if risk~=nil and risk~="low" and risk~="high" then return nil,"invalid_risk" end
+    risk=risk or "low"
+    local entries=anomaly_donation_bridge_roulette_catalog.pool(input.section)
+    if #entries==0 then return nil,"no_candidates" end
+    local lower,higher
+    for _,entry in ipairs(entries) do
+        if entry.tier<source.tier then lower=math.max(lower or 0,entry.tier) end
+        if entry.tier>source.tier then higher=math.min(higher or 6,entry.tier) end
+    end
+    local buckets={lower={},same={},higher={}}
+    for _,entry in ipairs(entries) do
+        local bucket=entry.tier==source.tier and "same" or entry.tier==lower and "lower" or
+            entry.tier==higher and "higher" or nil
+        if bucket then buckets[bucket][#buckets[bucket]+1]=entry end
+    end
+    -- White is the floor: its downgrade is an intentional empty outcome,
+    -- distinct from a failed exchange (which must preserve the stake).
+    if source.tier==1 then
+        lower=0
+        buckets.lower={{section="__adb_roulette_loss__",price=0,tier=0,lost=true}}
+    end
+    local probabilities=risk=="high" and {lower=0.50,same=0.20,higher=0.30} or
+        {lower=0.20,same=0.75,higher=0.05}
+    local missing=0
+    for name,list in pairs(buckets) do
+        if #list==0 then missing=missing+probabilities[name];probabilities[name]=0 end
+    end
+    if #buckets.same>0 then probabilities.same=probabilities.same+missing end
+    local total=probabilities.lower+probabilities.same+probabilities.higher
+    if total<=0 then return nil,"no_candidates" end
+    for name,value in pairs(probabilities) do probabilities[name]=value/total end
+    local display_probabilities={lower=probabilities.lower,same=probabilities.same,higher=probabilities.higher}
+    local jackpot=risk=="high" and .02 or .01
+    for name,value in pairs(probabilities) do probabilities[name]=value*(1-jackpot)end
+    probabilities.jackpot=jackpot
+    local maximum=0
+    for _,entry in ipairs(entries)do maximum=math.max(maximum,entry.tier)end
+    buckets.jackpot={}
+    for _,entry in ipairs(entries)do if entry.tier==maximum then buckets.jackpot[#buckets.jackpot+1]=entry end end
+    local candidates,expected={},0
+    -- Explicit order makes the distribution and replay deterministic.
+    for _,name in ipairs({"lower","same","higher","jackpot"}) do
+        local list=buckets[name]
+        for _,entry in ipairs(list) do
+            local probability=probabilities[name]/#list
+            candidates[#candidates+1]={section=entry.section,price=entry.price,tier=entry.tier,
+                outcome=name,probability=probability,lost=entry.lost==true}
+            expected=expected+entry.price*probability
+        end
+    end
+    local frozen={}
+    for key,value in pairs(input) do
+        if type(value)=="number" or type(value)=="string" or type(value)=="boolean" then frozen[key]=value end
+    end
+    return {input=frozen,input_value=input.value,input_tier=source.tier,category=source.category,
+        candidates=candidates,risk=risk,probabilities=probabilities,display_probabilities=display_probabilities,adjusted=missing>0,
+        tiers={lower=lower,same=source.tier,higher=higher,jackpot=maximum},
+        chance=probabilities.higher+jackpot,expected_value=expected,count=1}
+end
+function start_category(input_id,risk)
+    if transaction then return nil,"busy" end
+    local offer,why=quote_category(input_id,risk)
+    if not offer then return nil,why end
+    local ticket=math.max(0,math.min(1,adapter.random()))
+    local selected=offer.candidates[#offer.candidates]
+    local cumulative=0
+    for _,candidate in ipairs(offer.candidates) do
+        cumulative=cumulative+candidate.probability
+        if ticket<cumulative then selected=candidate;break end
+    end
+    serial=serial+1
+    offer.id=serial;offer.win=not selected.lost;offer.lost=selected.lost
+    offer.target=selected.section;offer.target_value=selected.price;offer.selected_probability=selected.probability
+    offer.target_tier=selected.tier;offer.outcome=selected.outcome
+    offer.improved=selected.tier>offer.input_tier
+    offer.angle=category_angle(adapter.random(),offer.probabilities,offer.outcome)
+    offer.started=adapter.now();offer.duration=settings.duration_ms
+    offer.phase="spinning";offer.reward_ids={};offer.attempts=0
+    offer.candidates=nil -- save only the selected outcome, never a catalogue snapshot
+    transaction=offer;last_result=nil
+    return offer
+end
+function category_angle(random,probabilities,outcome)
+    local start=outcome=="lower" and 0 or outcome=="same" and probabilities.lower or
+        outcome=="higher" and probabilities.lower+probabilities.same or
+        probabilities.lower+probabilities.same+probabilities.higher
+    local span=probabilities[outcome]*360
+    local margin=math.min(1.5,span*0.2)
+    return (start*360+margin+math.max(0,math.min(1,random))*math.max(0,span-margin*2))%360
+end
+function needle(progress,landing)
+    progress=math.max(0,math.min(1,progress))
+    return (1-(1-progress)^3)*(1800+landing)%360
+end
+local function finish(success,reason)
+    last_result={id=transaction.id,win=success,reason=reason,chance=transaction.chance,
+        target=transaction.target,count=transaction.count,angle=transaction.angle,at=adapter.now(),
+        category=transaction.category,improved=transaction.improved,input_value=transaction.input_value,
+        target_value=transaction.target_value,selected_probability=transaction.selected_probability,
+        input_tier=transaction.input_tier,target_tier=transaction.target_tier,outcome=transaction.outcome,risk=transaction.risk,
+        lost=not success and reason=="lost",jackpot=success and transaction.outcome=="jackpot"}
+    transaction.phase="await_claim"
+    if adapter.on_result then adapter.on_result(last_result) end
+    return last_result
+end
+local function rollback_rewards()
+    for _,id in ipairs(transaction.reward_ids) do
+        if adapter.exists(id) then adapter.release(id) end
+    end
+end
+function settle()
+    local t=transaction
+    if not t or not adapter then return end
+    if t.phase=="await_claim" then return end
+    if t.phase=="spinning" then
+        local actual,why=adapter.snapshot(t.input.id)
+        if not actual or actual.section~=t.input.section then return finish(false,why or "input_missing") end
+        -- Keep the offer chosen at the start; wear/price changes during the
+        -- animation do not cancel it. The original item must still be present.
+        t.phase=t.win and "creating" or "consuming"
+    end
+    if t.phase=="creating" then
+        for i=#t.reward_ids+1,t.count do
+            local id,why=adapter.create(t.target)
+            if not id then
+                rollback_rewards()
+                return finish(false,why or "spawn_failed")
+            end
+            t.reward_ids[#t.reward_ids+1]=id
+        end
+        -- Persist these IDs in save_state, so reloading never creates a second
+        -- set of rewards for a transaction which already reached this phase.
+        t.phase="consuming"
+    end
+    if t.phase=="consuming" then
+        t.consume_started=t.consume_started or adapter.now()
+        if adapter.exists(t.input.id) and not t.release_requested then
+            local actual=adapter.snapshot(t.input.id)
+            if not actual or actual.section~=t.input.section then
+                rollback_rewards();return finish(false,"input_missing")
+            end
+            local ok=adapter.release(t.input.id)
+            t.attempts=t.attempts+1
+            if not ok then
+                rollback_rewards();return finish(false,"consume_failed")
+            end
+            t.release_requested=true
+        end
+        if not adapter.exists(t.input.id) then return finish(t.win,t.win and "success" or t.lost and "lost" or "failure") end
+        if adapter.now()-t.consume_started>=3000 then
+            rollback_rewards();return finish(false,"consume_failed")
+        end
+    end
+end
+function update()
+    if not transaction then return end
+    if transaction.phase=="await_claim" then return end
+    if transaction.phase~="spinning" or adapter.now()-transaction.started>=transaction.duration then settle() end
+end
+function claim()
+    if not transaction or transaction.phase~="await_claim" then return nil,"not_ready" end
+    local received=last_result
+    transaction=nil
+    return received
+end
+function save(data)
+    data.anomaly_donation_bridge_roulette={version=2,serial=serial,pending=transaction,last_result=last_result}
+end
+function load(data)
+    local saved=type(data)=="table" and data.anomaly_donation_bridge_roulette or nil
+    transaction=nil;last_result=nil;serial=0
+    if type(saved)~="table" or saved.version~=2 then return false end
+    serial=tonumber(saved.serial) or 0
+    local pending=saved.pending
+    if type(pending)=="table" and type(pending.input)=="table" and
+        anomaly_donation_bridge_roulette_catalog.finite(pending.input.id) and pending.input.id>=0 and pending.input.id<65535 and
+        type(pending.input.section)=="string" and anomaly_donation_bridge_roulette_catalog.finite(pending.input.value) and
+        pending.count==1 and
+        type(pending.win)=="boolean" and anomaly_donation_bridge_roulette_catalog.finite(pending.chance) and pending.chance>=0 and pending.chance<=1 and
+        anomaly_donation_bridge_roulette_catalog.finite(pending.angle) and anomaly_donation_bridge_roulette_catalog.finite(pending.duration) and
+        anomaly_donation_bridge_roulette_catalog.finite(pending.attempts) and
+        (pending.phase=="spinning" or pending.phase=="creating" or pending.phase=="consuming" or pending.phase=="await_claim") and
+        type(pending.target)=="string" and type(pending.reward_ids)=="table" and #pending.reward_ids<=1 and
+        type(pending.probabilities)=="table" and anomaly_donation_bridge_roulette_catalog.finite(pending.probabilities.jackpot) then
+        for _,id in ipairs(pending.reward_ids) do
+            if not anomaly_donation_bridge_roulette_catalog.finite(id) or id<0 or id>65534 then return end
+        end
+        transaction=pending
+        transaction.started=-1000000000 -- complete a saved attempt on the first live update
+        transaction.consume_started=nil
+        transaction.release_requested=nil -- network destruction requests are not saved
+    end
+    last_result=saved.last_result
+    return true
+end
+function reset() transaction=nil;last_result=nil;serial=0 end

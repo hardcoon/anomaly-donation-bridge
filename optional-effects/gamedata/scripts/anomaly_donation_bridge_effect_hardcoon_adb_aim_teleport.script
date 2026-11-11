@@ -1,0 +1,263 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.aim_teleport",
+  "displayName":"Телепортация по прицелу",
+  "description":"Несколько раз переносит героя к текущей точке под прицелом. Первый перенос — через заданный интервал, следующие — с такой же задержкой. Перед каждым повтором точка выбирается заново. Небо и места без опоры или свободного пространства пропускаются. Меню, пауза, загрузка и управление транспортом приостанавливают серию. Остаток серии хранится в памяти игры: сохранения и быстрые загрузки не сбрасывают его. При полном закрытии игры серия заканчивается.",
+  "category":"player_state",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"repeat_count","displayName":"Количество повторений","kind":"Integer","minimum":1,"maximum":99,"defaultValue":"3"},
+    {"key":"interval_seconds","displayName":"Задержка между повторами, сек.","kind":"Integer","minimum":1,"maximum":600,"defaultValue":"3"}
+  ],
+  "parameters":{"repeat_count":"3","interval_seconds":"3"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local ID="hardcoon.adb.aim_teleport"
+local MEMORY="ADB_AIM_TELEPORT_PROCESS_V1"
+local active,registered,last_clock,ready_frame,last_frame
+local ffi_ok,ffi=pcall(require,"ffi")
+local kernel
+if ffi_ok then
+    pcall(ffi.cdef,[[
+        unsigned long __stdcall GetCurrentProcessId(void);
+        unsigned long __stdcall GetEnvironmentVariableA(const char*,char*,unsigned long);
+        int __stdcall SetEnvironmentVariableA(const char*,const char*);
+    ]])
+    local ok,value=pcall(ffi.load,"kernel32");if ok then kernel=value end
+end
+local function common() return anomaly_donation_bridge_common end
+local function finite(value) return type(value)=="number" and value==value and math.abs(value)<1e12 end
+local function log(reason)
+    if type(printf)=="function" then pcall(printf,"[ADB] aim teleport: %s",tostring(reason)) end
+end
+local function read_memory()
+    if not kernel then return end
+    local ok,value=pcall(function()
+        local buffer=ffi.new("char[?]",128)
+        local length=tonumber(kernel.GetEnvironmentVariableA(MEMORY,buffer,128))
+        if length and length>0 and length<128 then return ffi.string(buffer,length) end
+    end)
+    return ok and value or nil
+end
+local function write_memory(record)
+    if not kernel then return false end
+    local ok,result=pcall(function()
+        local value="1|"..tonumber(kernel.GetCurrentProcessId()).."|"..record.left.."|"..
+            record.interval_ms.."|"..math.floor(record.remaining_ms)
+        return kernel.SetEnvironmentVariableA(MEMORY,value)~=0 and read_memory()==value
+    end)
+    return ok and result==true
+end
+local function restore()
+    active=nil;last_clock,ready_frame,last_frame=nil,nil,nil
+    local value=read_memory();if not value then return end
+    local pid,count,interval,remaining=value:match("^1|(%d+)|(%d+)|(%d+)|(%d+)$")
+    pid,count,interval,remaining=tonumber(pid),tonumber(count),tonumber(interval),tonumber(remaining)
+    if not pid or pid~=tonumber(kernel.GetCurrentProcessId()) or not count or count<1 or count>99 or
+        not interval or interval<1000 or interval>600000 or interval%1000~=0 or
+        not remaining or remaining>interval then return end
+    active={left=count,interval_ms=interval,remaining_ms=remaining}
+end
+local function clock() return time_global() end
+local function suspend() last_clock,ready_frame,last_frame=nil,nil,nil end
+local function playable()
+    if not db or not db.actor or not level or type(level.present)~="function" or not level.present() then return end
+    if type(app_ready)=="function" and not app_ready() then return end
+    local dev=device()
+    if not dev or dev:is_paused() or (tonumber(dev.precache_frame) or 0)>0 or
+        (tonumber(dev.f_time_delta) or 0)<=0 then return end
+    local actor=db.actor
+    if not actor:alive() or actor:is_talking() or actor:get_current_holder() then return end
+    if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return end
+    if type(Check_UI)=="function" and Check_UI() then return end
+    if type(_GUIs)=="table" and next(_GUIs) then return end
+    if actor_effects and actor_effects.item_not_in_use==false then return end
+    local st=db.storage and db.storage[actor:id()]
+    if st and (st.disable_input_time~=nil or st.disable_input_idle~=nil) then return end
+    local registry=anomaly_donation_bridge_registry
+    if registry and type(registry.busy_reason)=="function" and registry.busy_reason(ID) then return end
+    if not finite(dev.frame) then return end
+    return actor,dev.frame
+end
+local function ready()
+    local actor,frame=playable()
+    if not actor then suspend();return end
+    if not ready_frame or last_frame and frame<last_frame then ready_frame=frame;last_clock=nil end
+    last_frame=frame
+    -- Scene/physics queries only after rendered post-load frames, as for
+    -- ordinary actor teleport. No navigation/actor access in load callbacks.
+    if frame-ready_frame<15 then last_clock=nil;return end
+    return actor,frame
+end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function point(x,y,z) return {x=x,y=y,z=z} end
+local function valid_point(p) return p and finite(p.x) and finite(p.y) and finite(p.z) end
+local function direction(from,to)
+    local x,y,z=to.x-from.x,to.y-from.y,to.z-from.z
+    local length=math.sqrt(x*x+y*y+z*z)
+    if length<0.001 then return end
+    return point(x/length,y/length,z/length),length
+end
+local function cast(origin,dir,length,actor)
+    local travelled=0
+    for _=1,12 do
+        -- The native API in older Modded Exes does not clear stale result
+        -- fields. Always allocate a new result, and honour its hit boolean.
+        local hit=rq_result()
+        local from=point(origin.x+dir.x*travelled,origin.y+dir.y*travelled,origin.z+dir.z*travelled)
+        if not level.ray_pick(vec(from),vec(dir),length-travelled,rq_target.rqtBoth,hit,actor) then return end
+        local distance=tonumber(hit.range)
+        if not finite(distance) or distance<0 or distance>length-travelled then return {invalid=true} end
+        local flags=not hit.object and hit.material_flags
+        if type(flags)~="number" or math.floor(flags/128)%2~=1 then
+            return {range=travelled+distance,object=hit.object}
+        end
+        -- flPassable grass/leaves do not support or obstruct the actor.
+        travelled=travelled+math.max(.02,distance+.02)
+        if travelled>=length then return end
+    end
+    return {invalid=true} -- layered/unknown geometry is never assumed empty
+end
+local function clear_segment(from,to,actor)
+    local dir,length=direction(from,to)
+    if not dir then return true end
+    local hit=cast(from,dir,length,actor)
+    return not hit
+end
+local function landing(x,z,aim,camera,actor)
+    local floor=-math.huge
+    local lowest=math.huge
+    -- Support the entire standing footprint, not just a point on a ledge.
+    for _,dx in ipairs({-.3,0,.3}) do for _,dz in ipairs({-.3,0,.3}) do
+        local origin=point(x+dx,aim.y+.5,z+dz)
+        local hit=cast(origin,point(0,-1,0),3,actor)
+        if not hit or hit.invalid or hit.object then return end
+        local y=origin.y-hit.range
+        floor=math.max(floor,y);lowest=math.min(lowest,y)
+    end end
+    if floor-lowest>.55 then return end
+    -- Check headroom and body width; never snap a wall/ceiling hit through
+    -- a surface to an unrelated AI node. Roofs don't need an NPC AI mesh.
+    for _,dx in ipairs({-.35,0,.35}) do for _,dz in ipairs({-.35,0,.35}) do
+        if cast(point(x+dx,floor+.12,z+dz),point(0,1,0),1.8,actor) then return end
+    end end
+    for _,height in ipairs({.25,.9,1.7}) do
+        for _,offset in ipairs({-.35,0,.35}) do
+            if not clear_segment(point(x-.4,floor+height,z+offset),point(x+.4,floor+height,z+offset),actor) or
+                not clear_segment(point(x+offset,floor+height,z-.4),point(x+offset,floor+height,z+.4),actor) then return end
+        end
+    end
+    if not clear_segment(camera,point(x,floor+.9,z),actor) then return end
+    return point(x,floor+.05,z)
+end
+local function destination(actor)
+    local dev=device();local camera,dir=dev.cam_pos,dev.cam_dir
+    if not valid_point(camera) or not valid_point(dir) then return nil,"camera_unavailable" end
+    local size=math.sqrt(dir.x*dir.x+dir.y*dir.y+dir.z*dir.z)
+    if size<.001 then return nil,"camera_direction_invalid" end
+    dir=point(dir.x/size,dir.y/size,dir.z/size)
+    local hit=cast(camera,dir,5000,actor)
+    if not hit or hit.invalid then return nil,"no_surface_under_crosshair" end
+    local aim=point(camera.x+dir.x*hit.range,camera.y+dir.y*hit.range,camera.z+dir.z*hit.range)
+    local n=math.sqrt(dir.x*dir.x+dir.z*dir.z)
+    local back=n>.001 and point(-dir.x/n,0,-dir.z/n) or point(0,0,-1)
+    -- Aim point first; small near-side offsets allow a wall/NPC target
+    -- without placing the actor inside it. No remote/random fallback.
+    for _,offset in ipairs({0,.6,1.2}) do
+        local p=landing(aim.x+back.x*offset,aim.z+back.z*offset,aim,camera,actor)
+        if p then return p end
+    end
+    return nil,"no_room_at_crosshair"
+end
+local function account()
+    if not active then return true end
+    local current=clock()
+    local delta=last_clock and math.max(0,current-last_clock) or 0
+    last_clock=current
+    local next={left=active.left,interval_ms=active.interval_ms,remaining_ms=math.max(0,active.remaining_ms-delta)}
+    if not write_memory(next) then log("process_memory_write_failed");return false end
+    active=next;return true
+end
+local update_frame
+local function update()
+    local actor,frame=ready()
+    if not actor or update_frame==frame then return end
+    update_frame=frame
+    if not active or not account() or active.remaining_ms>0 then return end
+    local ok,target,reason=pcall(destination,actor)
+    -- Recheck after scene queries. Do not commit a repeat if a UI/transition
+    -- callback suspended gameplay while the destination was being resolved.
+    local still_actor,still_frame=ready()
+    if not still_actor or still_actor:id()~=actor:id() or still_frame~=frame then return end
+    -- Consume the scheduled attempt BEFORE the setter, including an invalid
+    -- aim. A partial native result or F9 must not repeat a previous jump.
+    local next={left=active.left-1,interval_ms=active.interval_ms,remaining_ms=active.interval_ms}
+    if not write_memory(next) then log("process_memory_write_failed");return end
+    active=next.left>0 and next or nil
+    if not ok or not target then
+        log(ok and reason or target)
+        if news_manager and type(news_manager.send_tip)=="function" then
+            pcall(news_manager.send_tip,actor,common().game_text_cp1251("Телепортация: под прицелом нет свободного места."),nil,nil,2500)
+        end
+        return
+    end
+    local moved,why=pcall(actor.set_actor_position,actor,vec(target))
+    if not moved then log("position_setter: "..tostring(why));return end
+    local confirmed,p=pcall(actor.position,actor)
+    if not confirmed or not valid_point(p) or (p.x-target.x)^2+(p.z-target.z)^2>9 or math.abs(p.y-target.y)>3 then
+        log("position_not_confirmed")
+    end
+end
+local function supported()
+    return kernel~=nil and type(RegisterScriptCallback)=="function" and type(device)=="function" and
+        type(time_global)=="function" and level and type(level.present)=="function" and
+        type(level.ray_pick)=="function" and vector~=nil and rq_result~=nil and rq_target and rq_target.rqtBoth~=nil,
+        "aim_teleport_api_unavailable"
+end
+local function can_execute(context,params)
+    params=params or {}
+    local valid,reason=common().params_only(params,{repeat_count=true,interval_seconds=true})
+    if not valid then return false,"rejected",reason end
+    local count,why=common().parse_integer(params.repeat_count,3,1,99,"aim_teleport_count_invalid")
+    if not count then return false,"rejected",why end
+    local delay,error_code=common().parse_integer(params.interval_seconds,3,1,600,"aim_teleport_interval_invalid")
+    if not delay then return false,"rejected",error_code end
+    if not supported() then return false,"rejected","aim_teleport_api_unavailable" end
+    if active then return false,"deferred","aim_teleport_series_active" end
+    local actor=ready()
+    if not actor then return false,"deferred","aim_teleport_waiting_gameplay" end
+    if type(actor.set_actor_position)~="function" then return false,"rejected","actor_teleport_api_unavailable" end
+    context.options={count=count,delay=delay};return true
+end
+local function execute(context)
+    if not context.options then return "rejected","aim_teleport_options_missing" end
+    local ctx={};local ok,status,why=can_execute(ctx,{repeat_count=tostring(context.options.count),interval_seconds=tostring(context.options.delay)})
+    if not ok then return status,why end
+    local next={left=ctx.options.count,interval_ms=ctx.options.delay*1000,remaining_ms=ctx.options.delay*1000}
+    if not write_memory(next) then return "rejected","aim_teleport_memory_unavailable" end
+    active=next;last_clock=clock()
+    return "executed","aim_teleport_series_started"
+end
+function on_game_start()
+    if registered then return end;registered=true
+    restore()
+    anomaly_donation_bridge_registry.register(ID,{is_supported=supported,can_execute=can_execute,execute=execute,
+        update=update,on_game_load=function() restore();update_frame=nil end,on_level_changing=suspend})
+    -- Only scalar progress lives in the current game's PROCESS environment,
+    -- never USER.ltx, the app, a file or a game save. Survives even Lua reset.
+    -- Loading an older save cannot add spent repetitions or re-arm completion.
+    RegisterScriptCallback("actor_on_net_destroy",suspend)
+    RegisterScriptCallback("on_before_load_input",suspend)
+    RegisterScriptCallback("main_menu_on_init",suspend)
+    RegisterScriptCallback("main_menu_on_quit",suspend)
+    RegisterScriptCallback("GUI_on_show",suspend)
+    RegisterScriptCallback("GUI_on_hide",suspend)
+    RegisterScriptCallback("ActorMenu_on_mode_changed",suspend)
+    RegisterScriptCallback("actor_on_before_death",suspend)
+    RegisterScriptCallback("on_console_execute",function(command)
+        if command=="load" or command=="start" or command=="disconnect" or command=="quit" then suspend() end
+    end)
+end

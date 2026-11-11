@@ -1,0 +1,1171 @@
+<Window x:Class="AnomalyDonationBridge.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:youtube="clr-namespace:AnomalyDonationBridge.YouTubeChat;assembly=AnomalyDonationBridge.YouTubeChat"
+        Title="Настройки — Anomaly Donation Bridge"
+        Width="1120" Height="780" MinWidth="900" MinHeight="640"
+        Background="{DynamicResource BackgroundBrush}"
+        Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13"
+        UseLayoutRounding="True"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Window.Resources>
+        <Style x:Key="SettingsCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="9" />
+            <Setter Property="Padding" Value="17" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+        </Style>
+        <Style x:Key="SafeZoneRadioButtonStyle" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid Background="Transparent">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <Grid Width="17" Height="17" VerticalAlignment="Center">
+                                <Ellipse x:Name="IndicatorRing" Fill="{DynamicResource InputBrush}" Stroke="{DynamicResource BorderStrongBrush}" StrokeThickness="1" />
+                                <Ellipse x:Name="SelectedDot" Width="7" Height="7" Fill="{DynamicResource AccentBrush}" Visibility="Collapsed" />
+                            </Grid>
+                            <ContentPresenter Grid.Column="1" Margin="8,0,0,0" RecognizesAccessKey="True"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="IndicatorRing" Property="Stroke" Value="{DynamicResource AccentBrush}" />
+                                <Setter TargetName="SelectedDot" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="IndicatorRing" Property="Stroke" Value="{DynamicResource AccentBrush}" /></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="IndicatorRing" Property="Stroke" Value="{DynamicResource BlueBrush}" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5" /><Setter Property="Cursor" Value="Arrow" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="SafeZoneGroupToggleStyle" TargetType="ToggleButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="HeaderSurface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="1" CornerRadius="3">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="17" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <Path x:Name="Arrow" Width="10" Height="6" Data="M 0 0 L 5 5 L 10 0 Z"
+                                      Fill="{DynamicResource MutedBrush}" RenderTransformOrigin="0.5,0.5"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Path.RenderTransform><RotateTransform Angle="-90" /></Path.RenderTransform>
+                                </Path>
+                                <ContentPresenter Grid.Column="1" Margin="7,0,0,0" VerticalAlignment="Center"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" RecognizesAccessKey="True" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Arrow" Property="RenderTransform"><Setter.Value><RotateTransform Angle="0" /></Setter.Value></Setter>
+                                <Setter TargetName="Arrow" Property="Fill" Value="{DynamicResource AccentForegroundBrush}" />
+                                <Setter TargetName="HeaderSurface" Property="Background" Value="{DynamicResource ActionExpanderOpenBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="HeaderSurface" Property="Background" Value="{DynamicResource ActionExpanderHoverBrush}" />
+                                <Setter TargetName="Arrow" Property="Fill" Value="{DynamicResource AccentForegroundBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="HeaderSurface" Property="BorderBrush" Value="{DynamicResource BlueBrush}" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5" /><Setter Property="Cursor" Value="Arrow" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="SafeZoneGroupExpanderStyle" TargetType="Expander">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <StackPanel>
+                            <ToggleButton x:Name="HeaderSite" Style="{StaticResource SafeZoneGroupToggleStyle}"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          Content="{TemplateBinding Header}" ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                          Foreground="{TemplateBinding Foreground}" />
+                            <ContentPresenter x:Name="ExpandSite" ContentSource="Content" Visibility="Collapsed"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                        </StackPanel>
+                        <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="ExpandSite" Property="Visibility" Value="Visible" /></Trigger></ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,0,0,5" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{DynamicResource BackgroundBrush}" Margin="20,16,20,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Margin="0,0,0,15">
+            <StackPanel>
+                <TextBlock Text="НАСТРОЙКИ" Style="{StaticResource EyebrowTextStyle}" />
+                <TextBlock Text="Подключения и поведение программы" FontSize="21" FontWeight="SemiBold" Margin="0,2,0,0" />
+            </StackPanel>
+        </Grid>
+
+        <TabControl x:Name="SettingsTabs" Grid.Row="1" BorderThickness="0" Padding="0">
+            <TabItem Header="Игра и редактор">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Папка игры" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Укажите корневую папку S.T.A.L.K.E.R. Anomaly. Поддерживаются vanilla 1.5.3 и профили xray-monolith standard/MT-TEST."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,13" />
+                                <TextBlock Text="ПУТЬ К ИГРЕ" Style="{StaticResource FieldLabelStyle}" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding GamePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Выбрать папку…" Click="BrowseGame_Click" Margin="8,0,0,0" />
+                                </Grid>
+                                <Border Background="{DynamicResource InfoPanelBrush}" CornerRadius="6" Padding="10,7" Margin="0,10,0,0">
+                                    <TextBlock Text="EXE программы можно переносить: связь с игрой не зависит от расположения приложения."
+                                               Foreground="{DynamicResource BlueBrush}" TextWrapping="Wrap" FontSize="11" />
+                                </Border>
+                                <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                        BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,10,0,0">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Margin="0,0,12,0">
+                                            <TextBlock Text="ИГРОВОЙ АДДОН" Style="{StaticResource EyebrowTextStyle}" />
+                                            <TextBlock Text="{Binding AddonStatus, Mode=OneWay}" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Content="Установить / обновить аддон и эффекты"
+                                                Click="InstallAddon_Click" VerticalAlignment="Center"
+                                                IsEnabled="{Binding CanInstallBridge, Mode=OneWay}" />
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Файлы шаблонов" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Здесь лежат файлы шаблонов. Положите сюда нужные файлы и установите их кнопкой выше."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,7" />
+                                <TextBlock Text="{Binding EffectsDirectory, Mode=OneWay}"
+                                           Foreground="{DynamicResource SubtleBrush}" FontSize="10" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding EffectsStatus, Mode=OneWay}"
+                                           Foreground="{DynamicResource BlueBrush}" TextWrapping="Wrap" Margin="0,7,0,10" />
+                                <TextBlock Text="ПАПКА МОДА MO2 (НЕОБЯЗАТЕЛЬНО)" Style="{StaticResource FieldLabelStyle}" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding EffectMo2ModPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Выбрать папку…" Click="BrowseEffectMod_Click" Margin="8,0,0,0" />
+                                </Grid>
+                                <TextBlock Text="Если поле пустое, эффекты устанавливаются в указанную выше папку игры. Для MO2 укажите корень отдельного мода Anomaly Donation Bridge."
+                                           Foreground="{DynamicResource SubtleBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,5,0,10" />
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button Content="Открыть папку шаблонов" Click="OpenEffectsDirectory_Click" />
+                                    <Button Content="Проверить" Click="RefreshEffects_Click" Margin="8,0,0,0" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Редактор Lua-кода" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Кнопка «Открыть код» в карточке эффекта будет использовать выбранную программу."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,13" />
+                                <TextBlock Text="ПУТЬ К РЕДАКТОРУ" Style="{StaticResource FieldLabelStyle}" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding EditorPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Выбрать EXE…" Click="BrowseEditor_Click" Margin="8,0,0,0" />
+                                </Grid>
+                                <TextBlock Text="После любого изменения Lua полностью перезапустите игру."
+                                           Foreground="{DynamicResource AccentForegroundBrush}" FontWeight="SemiBold" Margin="0,10,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Интеграция" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                <TabControl BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                    <TabItem Header="DonationAlerts" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Background="{DynamicResource WarningPanelBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1"
+                                CornerRadius="9" Padding="14" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <Border Width="30" Height="30" CornerRadius="15" Background="{DynamicResource WarningBadgeBrush}" Margin="0,0,11,0">
+                                    <TextBlock Text="1" Foreground="{DynamicResource AccentForegroundBrush}" FontWeight="Bold"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Создайте собственное OAuth-приложение" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock Text="Авторизация привязывает программу к вашему аккаунту официальным способом. Браузер открывается только по кнопке ниже."
+                                               Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" Margin="0,3,0,9" />
+                                    <WrapPanel>
+                                        <Button Content="Открыть OAuth-приложения" HorizontalAlignment="Left"
+                                                Style="{StaticResource PrimaryButtonStyle}" Click="OpenApplications_Click"
+                                                Margin="0,0,8,0" />
+                                        <Button Content="Официальная документация API" HorizontalAlignment="Left"
+                                                Click="OpenApiDocumentation_Click" />
+                                    </WrapPanel>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Адрес возврата и разрешения" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Скопируйте callback URL в настройки приложения без изменений."
+                                           Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,13" />
+                                <TextBlock Text="CALLBACK URL" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding RedirectUri, Mode=OneWay}" IsReadOnly="True" Margin="0,0,0,11" />
+                                <TextBlock Text="РАЗРЕШЕНИЯ" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding Scopes, Mode=OneWay}" IsReadOnly="True" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,13">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="30" Height="30" CornerRadius="15" Background="{DynamicResource GoodDarkBrush}" Margin="0,0,11,0">
+                                        <TextBlock Text="2" Foreground="{DynamicResource GoodBrush}" FontWeight="Bold"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Реквизиты и аккаунт" FontSize="16" FontWeight="SemiBold" />
+                                        <TextBlock Text="Секрет хранится только локально и шифруется средствами Windows."
+                                                   Foreground="{DynamicResource MutedBrush}" Margin="0,2,0,0" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <Border Background="Transparent" BorderThickness="0"
+                                        Padding="0" Margin="0,0,0,13">
+                                    <StackPanel>
+                                        <TextBlock Text="ЧТО ВПИСАТЬ" Foreground="{DynamicResource BlueBrush}"
+                                                   FontWeight="SemiBold" FontSize="11" Margin="0,0,0,5" />
+                                        <TextBlock Foreground="{DynamicResource InfoTextBrush}" TextWrapping="Wrap" FontSize="12">
+                                            <Run Text="1. Откройте созданное OAuth-приложение и скопируйте его Client ID и Client Secret." />
+                                            <LineBreak />
+                                            <Run Text="2. При желании укажите код из своей ссылки после /r/ для проверки аккаунта." />
+                                            <LineBreak />
+                                            <Run Text="3. Нажмите «Подключить аккаунт» и разрешите доступ на официальном сайте DonationAlerts." />
+                                        </TextBlock>
+                                        <WrapPanel Margin="0,8,0,0">
+                                            <Button Content="Открыть OAuth-приложения" Click="OpenApplications_Click"
+                                                    Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,8,0" />
+                                            <Button Content="Документация DonationAlerts API"
+                                                    Click="OpenApiDocumentation_Click" />
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="CLIENT ID ПРИЛОЖЕНИЯ" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Text="{Binding ClientId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 ToolTip="Client ID созданного OAuth-приложения DonationAlerts" />
+                                        <TextBlock Text="ID приложения со страницы OAuth-приложений; обычно это число."
+                                                   Foreground="{DynamicResource SubtleBrush}" FontSize="11"
+                                                   TextWrapping="Wrap" Margin="0,5,0,0" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Text="КОД АККАУНТА (НЕОБЯЗАТЕЛЬНО)" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Text="{Binding ExpectedAccountCode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 ToolTip="Например, для ссылки /r/my_channel укажите my_channel" />
+                                        <TextBlock Text="Код берётся из ссылки /r/ваш_код. Пусто — принять аккаунт после OAuth без дополнительной проверки."
+                                                   Foreground="{DynamicResource AccentForegroundBrush}" FontSize="11"
+                                                   FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,0,0" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <TextBlock Text="CLIENT SECRET ПРИЛОЖЕНИЯ" Style="{StaticResource FieldLabelStyle}" Margin="0,13,0,5" />
+                                <PasswordBox x:Name="ClientSecretBox"
+                                             ToolTip="Client Secret созданного OAuth-приложения DonationAlerts" />
+                                <TextBlock Text="Скопируйте секрет из того же OAuth-приложения. Никому его не показывайте."
+                                           Foreground="{DynamicResource SubtleBrush}" FontSize="11"
+                                           TextWrapping="Wrap" Margin="0,5,0,0" />
+                                <TextBlock Text="{Binding SecretHint, Mode=OneWay}" Foreground="{DynamicResource SubtleBrush}"
+                                           FontSize="11" Margin="0,5,0,13" />
+
+                                <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                        BorderThickness="1" CornerRadius="6" Padding="11,8" Margin="0,0,0,11">
+                                    <TextBlock Text="{Binding AccountLabel, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                </Border>
+
+                                <WrapPanel>
+                                    <Button Content="Подключить аккаунт" Style="{StaticResource SuccessButtonStyle}"
+                                            Click="Connect_Click"
+                                            IsEnabled="{Binding Busy, Mode=OneWay, Converter={StaticResource InverseBooleanConverter}}"
+                                            Margin="0,0,7,0" />
+                                    <Button Content="Отключить аккаунт" Click="Disconnect_Click" Margin="0,0,7,0" />
+                                    <Button Content="Забыть приложение и секрет" Style="{StaticResource DangerButtonStyle}" Click="Forget_Click" />
+                                </WrapPanel>
+                                <TextBlock Text="Предварительно нажимать «Сохранить» не нужно. Ни видео, ни звук программа не запускает: системный браузер откроется только после нажатия «Подключить аккаунт»."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,10,0,0" FontSize="11" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,18,0">
+                                    <TextBlock Text="Защита DonationAlerts API" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Не чаще одного HTTP-запроса в секунду и не более 60 запросов за скользящую минуту. Рекомендуется оставить включённым."
+                                               Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                    <TextBlock Text="Это НЕ ограничение донатов или игровых эффектов: события донатов приходят по WebSocket без этой задержки."
+                                               Foreground="{DynamicResource BlueBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,0" />
+                                </StackPanel>
+                                <CheckBox Grid.Column="1"
+                                          Style="{StaticResource SwitchCheckBoxStyle}"
+                                          IsChecked="{Binding LimitDonationAlertsApiRequests, Mode=TwoWay}"
+                                          VerticalAlignment="Center"
+                                          ToolTip="Ограничивать только исходящие HTTP-запросы к DonationAlerts API" />
+                            </Grid>
+                        </Border>
+
+                    </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem Header="DonateX" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="1,2,8,2">
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="Подключение DonateX" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Для одного стримера DonateX предоставляет бессрочный внешний токен. OAuth-приложение, Client ID и Client Secret создавать не нужно."
+                                                   Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,12" />
+                                        <Border Background="{DynamicResource InfoPanelBrush}" CornerRadius="6" Padding="11,9" Margin="0,0,0,12">
+                                            <TextBlock Foreground="{DynamicResource InfoTextBrush}" TextWrapping="Wrap">
+                                                <Run Text="1. Откройте личный кабинет DonateX и перейдите в Настройки → API." />
+                                                <LineBreak />
+                                                <Run Text="2. Создайте или скопируйте External token, вставьте его ниже и нажмите «Подключить»." />
+                                            </TextBlock>
+                                        </Border>
+                                        <WrapPanel>
+                                            <Button Content="Открыть кабинет DonateX" Click="OpenDonateXCabinet_Click"
+                                                    Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,8,0" />
+                                            <Button Content="Официальная документация API" Click="OpenDonateXApiDocumentation_Click" />
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="Внешний токен" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Токен даёт доступ только к вашему аккаунту. Он хранится локально в зашифрованном Windows DPAPI-файле и не попадает в экспорт настроек."
+                                                   Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,12" />
+                                        <TextBlock Text="EXTERNAL TOKEN" Style="{StaticResource FieldLabelStyle}" />
+                                        <PasswordBox x:Name="DonateXTokenBox" ToolTip="External token из кабинета DonateX: Настройки → API" />
+                                        <TextBlock Text="{Binding DonateXTokenHint, Mode=OneWay}" Foreground="{DynamicResource SubtleBrush}"
+                                                   FontSize="11" TextWrapping="Wrap" Margin="0,5,0,12" />
+                                        <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1" CornerRadius="6" Padding="11,8" Margin="0,0,0,11">
+                                            <TextBlock Text="{Binding DonateXAccountLabel, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        </Border>
+                                        <WrapPanel>
+                                            <Button Content="Подключить" Style="{StaticResource SuccessButtonStyle}"
+                                                    Click="ConnectDonateX_Click"
+                                                    IsEnabled="{Binding Busy, Mode=OneWay, Converter={StaticResource InverseBooleanConverter}}"
+                                                    Margin="0,0,7,0" />
+                                            <Button Content="Отключить и удалить токен" Style="{StaticResource DangerButtonStyle}"
+                                                    Click="DisconnectDonateX_Click" />
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Margin="0,0,18,0">
+                                            <TextBlock Text="Защита DonateX API" Style="{StaticResource SectionTitleStyle}" />
+                                            <TextBlock Text="Соблюдает официальные лимиты: до 10 запросов в секунду, 600 в минуту и 10 000 в час. Рекомендуется оставить включённым."
+                                                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                            <TextBlock Text="Ограничиваются только проверка профиля и восстановление пропущенной истории. Донаты в реальном времени приходят через SignalR без задержки."
+                                                       Foreground="{DynamicResource BlueBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,0" />
+                                        </StackPanel>
+                                        <CheckBox Grid.Column="1" Style="{StaticResource SwitchCheckBoxStyle}"
+                                                  IsChecked="{Binding LimitDonateXApiRequests, Mode=TwoWay}"
+                                                  VerticalAlignment="Center"
+                                                  ToolTip="Соблюдать официальные лимиты исходящих REST-запросов DonateX" />
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                    <TabItem x:Name="YouTubeChatTab" Header="Чат YouTube" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="1,2,8,2">
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="Ключ API YouTube" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Сохраните ключ один раз — он используется для всех трансляций."
+                                                   Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,14" />
+                                        <Grid IsEnabled="{Binding YouTubeBusy, Converter={StaticResource InverseBooleanConverter}}">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                            <PasswordBox x:Name="YouTubeKeyBox" MinHeight="46" VerticalContentAlignment="Center"
+                                                         AutomationProperties.Name="Ключ API YouTube" Margin="0,0,8,0" />
+                                            <Button x:Name="YouTubeSaveKeyButton" Grid.Column="1" Content="{Binding YouTubeKeySaveLabel}"
+                                                    Click="SaveYouTubeKey_Click" MinHeight="46" Margin="0,0,8,0" />
+                                            <Button x:Name="YouTubeForgetKeyButton" Grid.Column="2" Content="Удалить ключ" Click="ForgetYouTube_Click"
+                                                    Style="{StaticResource DangerButtonStyle}" IsEnabled="{Binding YouTubeHasApiKey}" MinHeight="46" />
+                                        </Grid>
+                                        <TextBlock Text="{Binding YouTubeKeyHint}" TextWrapping="Wrap" Margin="0,7,0,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{DynamicResource SubtleBrush}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding YouTubeHasApiKey}" Value="True">
+                                                            <Setter Property="Foreground" Value="{DynamicResource SuccessTextBrush}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <ToggleButton x:Name="YouTubeHelpToggle" Content="Где взять ключ API"
+                                                      Style="{StaticResource SafeZoneGroupToggleStyle}" HorizontalAlignment="Left" Margin="0,10,0,6" />
+                                        <Border Background="{DynamicResource InfoPanelBrush}" Padding="12" CornerRadius="6" Margin="0,0,0,12"
+                                                Visibility="{Binding IsChecked, ElementName=YouTubeHelpToggle, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel>
+                                                <TextBlock Foreground="{DynamicResource InfoTextBrush}" TextWrapping="Wrap">
+                                                    <Run Text="1. Создайте проект в Google Cloud и включите YouTube Data API v3." /><LineBreak />
+                                                    <Run Text="2. В «Учётные данные» создайте ключ API. В ограничениях API выберите YouTube Data API v3." /><LineBreak />
+                                                    <Run Text="3. Вставьте ключ в поле выше и нажмите «Сохранить ключ». Трансляция для этого не нужна." /><LineBreak />
+                                                    <Run Text="Ключ хранится зашифрованным на этом компьютере и не попадает в экспорт настроек." />
+                                                </TextBlock>
+                                                <WrapPanel Margin="0,10,0,0">
+                                                    <Button Content="Включить YouTube API" Click="OpenYouTubeApi_Click" Margin="0,0,8,0" />
+                                                    <Button Content="Создать ключ API" Click="OpenYouTubeCredentials_Click" />
+                                                </WrapPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="Текущая трансляция" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Для нового эфира поменяйте только ссылку и нажмите «Подключить»."
+                                                   Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,14" />
+                                        <Grid IsEnabled="{Binding YouTubeBusy, Converter={StaticResource InverseBooleanConverter}}" Margin="0,0,0,5">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                            <TextBox x:Name="YouTubeVideoBox" Text="{Binding YouTubeVideoUrl, UpdateSourceTrigger=PropertyChanged}"
+                                                     AutomationProperties.Name="Ссылка на трансляцию YouTube" Margin="0,0,8,0" />
+                                            <Button x:Name="YouTubeConnectButton" Grid.Column="1" Content="Подключить" Click="ConnectYouTube_Click"
+                                                    Style="{StaticResource SuccessButtonStyle}" IsEnabled="{Binding YouTubeHasApiKey}" MinHeight="46" Margin="0,0,8,0" />
+                                            <Button Grid.Column="2" Content="Отключить" Click="DisconnectYouTube_Click" MinHeight="46" />
+                                        </Grid>
+                                        <TextBlock Text="youtube.com/watch?v=… или youtube.com/live/…"
+                                                   FontSize="11" Foreground="{DynamicResource SubtleBrush}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                                        <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1" CornerRadius="6" Padding="11,8">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding YouTubeStatus}" TextWrapping="Wrap" FontWeight="SemiBold">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding YouTubeState}" Value="{x:Static youtube:YouTubeChatState.Connected}">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource SuccessTextBrush}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding YouTubeState}" Value="{x:Static youtube:YouTubeChatState.Error}">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource DangerTextBrush}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding YouTubeState}" Value="{x:Static youtube:YouTubeChatState.Retrying}">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding YouTubeBroadcastLabel}" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                        <TextBlock Text="Подключение сохраняется сразу и восстанавливается при запуске программы. «Отключить» останавливает приём."
+                                                   Foreground="{DynamicResource SubtleBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource SettingsCardStyle}">
+                                    <StackPanel>
+                                        <DockPanel>
+                                            <TextBlock Text="Последние сообщения" Style="{StaticResource SectionTitleStyle}" />
+                                            <TextBlock Text="{Binding YouTubeMessageCount}" Foreground="{DynamicResource SubtleBrush}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        </DockPanel>
+                                        <TextBlock Text="Проверка приёма чата. Сообщения пока не запускают игровые эффекты."
+                                                   Foreground="{DynamicResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,10" />
+                                        <ScrollViewer Height="150" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                            <ItemsControl ItemsSource="{Binding YouTubeMessages}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="0,6">
+                                                            <Grid>
+                                                                <Grid.ColumnDefinitions><ColumnDefinition Width="74" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                                                <TextBlock Text="{Binding Time}" Foreground="{DynamicResource SubtleBrush}" FontSize="11" />
+                                                                <StackPanel Grid.Column="1">
+                                                                    <WrapPanel>
+                                                                        <TextBlock Text="{Binding Author}" FontWeight="SemiBold" Margin="0,0,8,0" TextWrapping="Wrap" />
+                                                                        <TextBlock Text="{Binding Note}" Foreground="{DynamicResource SubtleBrush}" FontSize="11" />
+                                                                    </WrapPanel>
+                                                                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                                </StackPanel>
+                                                            </Grid>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                </TabControl>
+            </TabItem>
+
+            <TabItem Header="Исключения" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                <Grid Margin="1,2,8,2">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Border Style="{StaticResource SettingsCardStyle}" Margin="0,0,0,10">
+                        <StackPanel>
+                            <TextBlock Text="Исключения из игрового каталога" Style="{StaticResource SectionTitleStyle}" />
+                            <TextBlock Text="Отметьте секции, которые вызывают вылет или работают неправильно. Программа уберёт их из списков, запретит ручной запуск и не позволит Lua выбирать их случайно."
+                                       Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,7" />
+                            <TextBlock Text="Исключения общие для всех профилей. Из истории их можно добавлять кнопкой «Добавить в исключения»."
+                                       Foreground="{DynamicResource AccentForegroundBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                    <Grid x:Name="CatalogExclusionToolbar" Grid.Row="1" Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Text="{Binding CatalogExclusionSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 Height="48"
+                                 Tag="Поиск по названию или ID..."
+                                 ToolTip="Поиск по названию, ID, типу или категории" />
+                        <ComboBox Grid.Column="1" Width="135" Height="48" Margin="8,0,0,0"
+                                  ItemsSource="{Binding CatalogExclusionKindFilters}"
+                                  SelectedItem="{Binding SelectedCatalogExclusionKindFilter, Mode=TwoWay}"
+                                  DisplayMemberPath="Label" ToolTip="Фильтр по типу секции" />
+                        <StackPanel Grid.Column="2" Height="48" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                            <CheckBox IsChecked="{Binding ShowOnlyExcludedCatalogEntries, Mode=TwoWay}"
+                                      Style="{StaticResource SwitchCheckBoxStyle}"
+                                      ToolTip="Включено: только исключённые секции. Выключено: весь каталог." />
+                            <TextBlock Text="{Binding CatalogExclusionScopeLabel}" Margin="7,0,0,0"
+                                       VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" />
+                        </StackPanel>
+                        <Button Grid.Column="3" Content="+ Вручную" Click="AddManualExclusion_Click"
+                                Style="{StaticResource AccentOutlineButtonStyle}" Height="48" Margin="8,0,0,0" />
+                        <Border Grid.Column="4" Background="{DynamicResource CountBadgeBrush}" CornerRadius="4"
+                                Height="48" Padding="10,5" Margin="8,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding CatalogExclusionCount, StringFormat=Исключено: {0}}"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                    </Grid>
+                    <Border Grid.Row="2" Background="{DynamicResource ListWellBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="7">
+                        <DataGrid ItemsSource="{Binding FilteredCatalogEntries}" IsReadOnly="True"
+                                  AutoGenerateColumns="False" BorderThickness="0" GridLinesVisibility="None"
+                                  Background="Transparent" AlternationCount="2">
+                            <DataGrid.Columns>
+                                <DataGridTemplateColumn Header="ИСКЛЮЧИТЬ" Width="90">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding IsExcluded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="ТИП" Binding="{Binding KindLabel}" Width="115" />
+                                <DataGridTextColumn Header="НАЗВАНИЕ" Binding="{Binding DisplayName}" Width="*" />
+                                <DataGridTextColumn Header="ID СЕКЦИИ" Binding="{Binding SectionId}" Width="220" />
+                                <DataGridTextColumn Header="КАТЕГОРИЯ" Binding="{Binding Category}" Width="130" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Очередь">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Гарантированная очередь" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Все принятые события сохраняются до выполнения и восстанавливаются после перезапуска программы. Если игра временно не может выполнить эффект, он переносится в конец очереди и не мешает следующим."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                <TextBlock Text="Событие удаляется без выполнения только вручную — кнопкой удаления или очисткой очереди."
+                                           Foreground="{DynamicResource BlueBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Темп выполнения" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Защищает игру и сохранения от слишком частого запуска эффектов."
+                                           Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,13" />
+                                <TextBlock Text="ПАУЗА МЕЖДУ ЛЮБЫМИ ЭФФЕКТАМИ, СЕК." Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding GlobalCooldownSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         Width="180" HorizontalAlignment="Left"
+                                         ToolTip="После любого эффекта следующий не запускается до окончания этой паузы." />
+                                <TextBlock Text="Следующий эффект ждёт окончания этой паузы. Значение 0 отключает её. Пауза одного конкретного шаблона не блокирует другие шаблоны в очереди."
+                                           Foreground="{DynamicResource MutedBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,5,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Background="{DynamicResource WarningPanelBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1"
+                                CornerRadius="9" Padding="14">
+                            <TextBlock Text="Если игра получила команду, но подтверждение потерялось, событие получает статус uncertain и не повторяется автоматически — это защищает от двойного эффекта."
+                                       Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" />
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Общие настройки">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,18,0">
+                                    <TextBlock Text="Скрывать недоступные секции" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Скрывает карантинные и небезопасные секции из списков предметов, NPC, мутантов и сквадов. Отключите только для диагностики: недоступные позиции будут показаны бледно-красным и останутся заблокированными."
+                                               Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                </StackPanel>
+                                <CheckBox Grid.Column="1"
+                                          Style="{StaticResource SwitchCheckBoxStyle}"
+                                          IsChecked="{Binding HideUnavailableCatalogSections, Mode=TwoWay}"
+                                          VerticalAlignment="Center"
+                                          ToolTip="Скрывать недоступные секции" />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,18,0">
+                                    <TextBlock Text="Работа в системном трее" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="При нажатии на крестик главное окно скрывается, но связь с игрой и DonationAlerts продолжает работать. Открыть окно или полностью завершить программу можно через значок рядом с часами."
+                                               Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                </StackPanel>
+                                <CheckBox Grid.Column="1"
+                                          Style="{StaticResource SwitchCheckBoxStyle}"
+                                          IsChecked="{Binding MinimizeToTrayOnClose, Mode=TwoWay}"
+                                          VerticalAlignment="Center"
+                                          ToolTip="Сворачивать в трей при закрытии главного окна" />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <CheckBox Content="Принудительный перезапуск при вылете"
+                                          IsChecked="{Binding RestartAfterCrash, Mode=TwoWay}" Margin="0,0,0,8" />
+                                <TextBlock Text="Наблюдатель заново запустит программу после аварийного завершения. Обычный выход через трей или крестик не вызывает перезапуск. До трёх попыток подряд с задержкой 3 секунды; зависания не прерываются."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Имя анонимного донатчика" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Впишите, чем заменять имя, если донатчик его не указал. Это имя используется в истории, игровых сообщениях и шаблонах с именем донатчика."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,11" />
+                                <TextBlock Text="ИМЯ, ЕСЛИ ОНО НЕ УКАЗАНО" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding AnonymousDonorName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         MaxLength="64" Width="360" HorizontalAlignment="Left"
+                                         ToolTip="Пустое значение будет заменено на «Анонимный донатчик»" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Колесо фортуны" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Если за указанное время не приходит ни одного доната, программа сама запускает случайный активный шаблон. Работает и при выключенной обработке донатов; нужна только готовая игра. После запуска отсчёт начинается заново."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,11" />
+                                <TextBlock Text="ВРЕМЯ БЕЗ ДОНАТОВ, МИН. (0 — ВЫКЛЮЧЕНО)" Style="{StaticResource FieldLabelStyle}" />
+                                <TextBox Text="{Binding FortuneWheelIdleMinutes, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         Width="180" HorizontalAlignment="Left"
+                                         ToolTip="От 0 до 10 080 минут" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Автоматические сохранения эффектов" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Для одного доната сохранение создаётся один раз до или после всей цепочки назначенных ему шаблонов, а не перед каждым шаблоном отдельно. Настройки действуют также для тестов, горячих клавиш и колеса фортуны."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,11" />
+                                <CheckBox Content="Создавать сохранение перед выполнением эффектов"
+                                          IsChecked="{Binding SaveBeforeDonationEffects, Mode=TwoWay}"
+                                          Margin="0,0,0,9" />
+                                <CheckBox Content="Создавать сохранение после выполнения эффектов"
+                                          IsChecked="{Binding SaveAfterDonationEffects, Mode=TwoWay}" />
+                                <TextBlock Text="ХРАНИТЬ ПОСЛЕДНИХ СОХРАНЕНИЙ ADB" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,6" />
+                                <TextBox Text="{Binding EffectSaveRetentionCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         Width="180" HorizontalAlignment="Left" ToolTip="От 0 до 10 000. По умолчанию 50. 0 — не удалять." />
+                                <TextBlock Text="Общий лимит для сохранений до и после эффектов. Лишние старые записи ADB удаляются после успешного нового сохранения вместе с их файлами. Обычные, быстрые и автосохранения игры не затрагиваются. 0 — без ограничения."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Сообщения об эффектах в игре" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Оба варианта используют формат «Имя донатчика: Название шаблона». Надписи по центру выводятся по очереди. Стандартное сообщение КПК выделяет имя донатчика золотистым цветом. Внутреннюю историю программы эти опции не отключают."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,11" />
+                                <CheckBox Content="Выводить надписью по центру"
+                                          IsChecked="{Binding ShowGameEffectLog, Mode=TwoWay}"
+                                          Margin="0,0,0,9" />
+                                <CheckBox Content="Выводить сообщение в КПК"
+                                          IsChecked="{Binding ShowPdaEffectMessage, Mode=TwoWay}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Text="Правила и действия" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Сохраните или перенесите настроенные эффекты. Client Secret и OAuth-токены никогда не попадают в экспорт."
+                                               Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                </StackPanel>
+                                <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <Button Content="Экспорт без личных данных…" Click="Export_Click" Margin="0,0,7,0"
+                                            ToolTip="Сохраняет только действия, суммы, валюты, очередь и паузы" />
+                                    <Button Content="Импорт…" Click="Import_Click" />
+                                </WrapPanel>
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Text="Данные программы" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="{Binding DataDirectory, Mode=OneWay}"
+                                               Foreground="{DynamicResource MutedBrush}" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding DataDirectory, Mode=OneWay}"
+                                               Margin="0,4,0,0" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="Открыть папку данных" Click="OpenDataDirectory_Click"
+                                        VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Горячие клавиши">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Глобальные сочетания Windows" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Нажмите поле, затем нужное сочетание. Поддерживаются Ctrl, Alt, Shift и Win вместе с любой основной клавишей. Сочетания регистрируются в Windows и работают, когда игра находится на переднем плане. Занятые системой или другой программой сочетания зарегистрировать нельзя."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Включить / отключить обработку донатов" Style="{StaticResource SectionTitleStyle}" />
+                                <Grid Grid.Row="1" Margin="0,9,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="ToggleDonationProcessingHotkeyBox"
+                                             Text="{Binding ToggleDonationProcessingHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             IsReadOnly="True" PreviewKeyDown="Hotkey_PreviewKeyDown"
+                                             MinHeight="34" VerticalContentAlignment="Center"
+                                             ToolTip="Щёлкните поле и нажмите нужное сочетание" />
+                                    <Button Grid.Column="1" Content="Очистить" Margin="8,0,0,0"
+                                            Tag="toggle" Click="ClearHotkey_Click" />
+                                </Grid>
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Повторить последний донат" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Grid.Row="1"
+                                           Text="Повторяет последнее настоящее поступление с той же суммой и валютой. Если к сумме привязано несколько активных шаблонов, они снова добавятся в очередь по порядку."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                <Grid Grid.Row="2" Margin="0,9,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="RepeatLastDonationHotkeyBox"
+                                             Text="{Binding RepeatLastDonationHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             IsReadOnly="True" PreviewKeyDown="Hotkey_PreviewKeyDown"
+                                             MinHeight="34" VerticalContentAlignment="Center"
+                                             ToolTip="Щёлкните поле и нажмите нужное сочетание" />
+                                    <Button Grid.Column="1" Content="Очистить" Margin="8,0,0,0"
+                                            Tag="repeat" Click="ClearHotkey_Click" />
+                                </Grid>
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Активировать шаблон № N" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Номер соответствует строке во вкладке «Активные». Сочетание запускает только этот активный шаблон с его текущими параметрами и суммой."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,10" />
+                                <ItemsControl ItemsSource="{Binding ActivePresetHotkeys}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                    BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,8">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="72" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="210" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="Шаблон №" VerticalAlignment="Center" Margin="0,0,7,0" />
+                                                    <TextBox Grid.Column="1" Text="{Binding PresetNumberText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                             VerticalContentAlignment="Center" MinHeight="34" />
+                                                    <TextBlock Grid.Column="2" Text="{Binding PresetLabel}" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource MutedBrush}" TextTrimming="CharacterEllipsis"
+                                                               Margin="9,0,12,0" ToolTip="{Binding PresetLabel}" />
+                                                    <TextBox Grid.Column="3" Text="{Binding Hotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                             IsReadOnly="True" PreviewKeyDown="Hotkey_PreviewKeyDown"
+                                                             MinHeight="34" VerticalContentAlignment="Center"
+                                                             ToolTip="Щёлкните поле и нажмите нужное сочетание" />
+                                                    <Button Grid.Column="4" Content="Очистить" Margin="8,0,0,0"
+                                                            Click="ClearPresetHotkey_Click" />
+                                                    <Button Grid.Column="5" Content="Удалить" Margin="8,0,0,0"
+                                                            Style="{StaticResource DangerButtonStyle}"
+                                                            Click="RemovePresetHotkey_Click" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <Button Content="+ Добавить" HorizontalAlignment="Left"
+                                        Style="{StaticResource AccentOutlineButtonStyle}"
+                                        Click="AddPresetHotkey_Click" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Безопасная зона" VerticalContentAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <ScrollViewer x:Name="SafeZoneScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                              VerticalContentAlignment="Top" HorizontalContentAlignment="Stretch">
+                    <StackPanel x:Name="SafeZonePane" DataContext="{Binding SafeZone}" Margin="1,14,8,8" VerticalAlignment="Top">
+                        <StackPanel.Resources>
+                            <DataTemplate x:Key="SafeZoneRuleEditorTemplate">
+                                <Border Tag="SafeZoneExpandedEditor" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,14,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Что блокировать на этой локации" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,10" />
+                                        <WrapPanel Margin="0,0,0,10">
+                                            <RadioButton Content="Все эффекты" Style="{StaticResource SafeZoneRadioButtonStyle}" GroupName="{Binding LevelName}"
+                                                         IsChecked="{Binding BlockAll, Mode=TwoWay}" Margin="0,0,22,6" />
+                                            <RadioButton Content="Выбранные эффекты" Style="{StaticResource SafeZoneRadioButtonStyle}" GroupName="{Binding LevelName}"
+                                                         IsChecked="{Binding BlockSelected, Mode=TwoWay}" Margin="0,0,0,6" />
+                                        </WrapPanel>
+                                        <TextBlock Text="Новые шаблоны тоже попадут под это правило." Foreground="{DynamicResource MutedBrush}"
+                                                   TextWrapping="Wrap" Margin="0,0,0,2" Visibility="{Binding BlockAll, Converter={StaticResource BoolToVisibility}}" />
+                                        <StackPanel Visibility="{Binding BlockSelected, Converter={StaticResource BoolToVisibility}}">
+                                            <DockPanel Margin="0,0,0,9">
+                                                <TextBlock DockPanel.Dock="Right" Text="{Binding SelectionLabel}" Foreground="{DynamicResource AccentForegroundBrush}" />
+                                                <TextBlock Text="Заблокированные шаблоны" />
+                                            </DockPanel>
+                                            <ItemsControl ItemsSource="{Binding Groups}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Expander Style="{StaticResource SafeZoneGroupExpanderStyle}" IsExpanded="{Binding IsExpanded, Mode=TwoWay}" Margin="0,0,0,6">
+                                                            <Expander.Header>
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <TextBlock Text="{Binding Name}" />
+                                                                    <TextBlock Text="{Binding SelectionLabel}" Foreground="{DynamicResource MutedBrush}" Margin="12,0,0,0" />
+                                                                </StackPanel>
+                                                            </Expander.Header>
+                                                            <ItemsControl ItemsSource="{Binding Effects}" Margin="17,7,4,7">
+                                                                <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="2" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                                                <ItemsControl.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}" Margin="0,5,16,5" VerticalAlignment="Top" ToolTip="{Binding HandlerId}">
+                                                                            <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" />
+                                                                        </CheckBox>
+                                                                    </DataTemplate>
+                                                                </ItemsControl.ItemTemplate>
+                                                            </ItemsControl>
+                                                        </Expander>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </StackPanel.Resources>
+                        <Grid x:Name="SafeZoneHeading" Margin="0,0,0,18">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Безопасная зона" FontSize="21" FontWeight="SemiBold" />
+                                <TextBlock Text="Запрет запуска эффектов на выбранных локациях." Foreground="{DynamicResource MutedBrush}"
+                                           Margin="0,5,12,0" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <CheckBox Grid.Column="1" Content="Включена" IsChecked="{Binding Enabled, Mode=TwoWay}" VerticalAlignment="Top" Margin="0,5,0,0" />
+                        </Grid>
+                        <StackPanel IsEnabled="{Binding Enabled}">
+                            <ItemsControl x:Name="SafeZoneRules" ItemsSource="{Binding Rules}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Tag="SafeZoneRuleCard" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1" CornerRadius="6" Padding="14" Margin="0,0,0,10">
+                                            <StackPanel>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding DisplayName}" ToolTip="{Binding LevelName}" FontWeight="SemiBold" FontSize="14"
+                                                               TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,16,0" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Summary}" Foreground="{DynamicResource MutedBrush}"
+                                                               FontSize="12" VerticalAlignment="Center" Margin="0,0,18,0" />
+                                                    <Button Grid.Column="2" Tag="SafeZoneToggleRule" Content="{Binding ConfigureLabel}" MinWidth="100"
+                                                            Command="{Binding DataContext.SafeZone.ToggleRuleCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                                                    <Button Grid.Column="3" Tag="SafeZoneRemoveRule" Content="×" Width="36" FontSize="16" Padding="0" Margin="8,0,0,0"
+                                                            Style="{StaticResource DangerGhostButtonStyle}" ToolTip="Убрать правило для этой локации"
+                                                            AutomationProperties.Name="Убрать правило для локации"
+                                                            Command="{Binding DataContext.SafeZone.RemoveRuleCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" />
+                                                </Grid>
+                                                <ContentControl>
+                                                    <ContentControl.Style>
+                                                        <Style TargetType="ContentControl">
+                                                            <Setter Property="Content" Value="{x:Null}" />
+                                                            <Setter Property="ContentTemplate" Value="{x:Null}" />
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                                                    <Setter Property="Content" Value="{Binding}" />
+                                                                    <Setter Property="ContentTemplate" Value="{StaticResource SafeZoneRuleEditorTemplate}" />
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </ContentControl.Style>
+                                                </ContentControl>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <Border x:Name="SafeZoneEmptyCard" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,12">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                        <Style.Triggers><DataTrigger Binding="{Binding HasRules}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="Локации пока не добавлены. Добавьте локацию и настройте блокируемые эффекты."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" />
+                            </Border>
+                            <Button Content="+ Добавить локацию" Command="{Binding BeginAddLocationCommand}" HorizontalAlignment="Left">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                        <Style.Triggers><DataTrigger Binding="{Binding IsAddingLocation}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Border x:Name="SafeZoneAddForm" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6"
+                                    Padding="14" MaxWidth="720" HorizontalAlignment="Left" Visibility="{Binding IsAddingLocation, Converter={StaticResource BoolToVisibility}}">
+                                <StackPanel>
+                                    <TextBlock Text="Локация из каталога игры" Foreground="{DynamicResource MutedBrush}" Margin="0,0,0,8" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" MinWidth="220" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <ComboBox ItemsSource="{Binding AvailableLocations}" SelectedItem="{Binding SelectedLocation, Mode=TwoWay}" DisplayMemberPath="DisplayName" />
+                                        <Button Grid.Column="1" Content="Добавить" Command="{Binding AddLocationCommand}" Margin="8,0,0,0" />
+                                        <Button Grid.Column="2" Content="Отмена" Command="{Binding CancelAddLocationCommand}" Margin="8,0,0,0" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="{Binding CatalogHint}" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap">
+                                <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding HasLocations}" Value="False"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                            </TextBlock>
+                            <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="0,20,0,16" />
+                            <WrapPanel>
+                                <TextBlock Text="При блокировке" VerticalAlignment="Center" Margin="0,0,12,0" />
+                                <ComboBox ItemsSource="{Binding Policies}" SelectedItem="{Binding SelectedPolicy, Mode=TwoWay}" DisplayMemberPath="Label" MinWidth="290" />
+                            </WrapPanel>
+                            <TextBlock Text="Проверка перед каждым запуском. Уже работающие эффекты не останавливаются."
+                                       Foreground="{DynamicResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,4" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+            <TabItem Header="О программе">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="1,2,8,2">
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,18,0">
+                                    <TextBlock Text="Anomaly Donation Bridge" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Связывает DonationAlerts с игровыми эффектами S.T.A.L.K.E.R. Anomaly."
+                                               Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                    <TextBlock Text="{Binding ApplicationVersion, StringFormat=Версия программы: {0}}"
+                                               Foreground="{DynamicResource SubtleBrush}" Margin="0,6,0,0" />
+                                </StackPanel>
+                                <Button x:Name="CheckForUpdatesButton" Grid.Column="1"
+                                        Content="Проверить обновление"
+                                        Click="CheckForUpdates_Click"
+                                        VerticalAlignment="Center"
+                                        ToolTip="Только проверить опубликованные версии на GitHub; ничего не скачивать" />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="Репозиторий" Style="{StaticResource SectionTitleStyle}" />
+                                <TextBlock Text="Исходный код, документация и актуальные версии программы."
+                                           Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,4,0,7" />
+                                <TextBlock>
+                                    <Hyperlink NavigateUri="https://github.com/hardcoon/anomaly-donation-bridge"
+                                               RequestNavigate="RepositoryLink_RequestNavigate"
+                                               Foreground="{DynamicResource AccentForegroundBrush}">github.com/hardcoon/anomaly-donation-bridge</Hyperlink>
+                                </TextBlock>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SettingsCardStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="52" />
+                                    <ColumnDefinition Width="14" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <Viewbox Width="48" Height="48" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                         ToolTip="Т-Банк">
+                                    <Grid Width="48" Height="48">
+                                        <Path Fill="#FFFFDD2D"
+                                              Data="M4,3 L44,3 L44,25 C44,34 35,40 24,46 C13,40 4,34 4,25 Z" />
+                                        <Path Fill="#FF242424"
+                                              Data="M12,12 L36,12 L36,19 L28,19 L28,35 L20,35 L20,19 L12,19 Z" />
+                                    </Grid>
+                                </Viewbox>
+
+                                <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                                    <TextBlock Text="Поддержать автора" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="Карта Т-Банка" Foreground="{DynamicResource MutedBrush}"
+                                               Margin="0,4,0,3" />
+                                    <TextBlock Text="2200 3961 2613 9183"
+                                               FontFamily="Consolas" FontSize="18" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource AccentForegroundBrush}" />
+                                </StackPanel>
+
+                                <Button Grid.Column="3" Content="Копировать"
+                                        Click="CopySupportCard_Click"
+                                        VerticalAlignment="Center" Margin="18,0,0,0"
+                                        ToolTip="Скопировать номер карты без пробелов" />
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <Border Grid.Row="2" Background="{DynamicResource WarningPanelBrush}" BorderBrush="{DynamicResource WarningBorderBrush}" BorderThickness="1"
+                CornerRadius="7" Padding="10,7" Margin="0,11,0,0">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding Status, Mode=OneWay}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding Status, Mode=OneWay}" Value="{x:Null}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <TextBlock Text="{Binding Status, Mode=OneWay}" Foreground="{DynamicResource AccentForegroundBrush}" TextWrapping="Wrap" />
+        </Border>
+
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock Text="Обычные настройки применяются после сохранения; подключение аккаунта сохраняется сразу."
+                       Foreground="{DynamicResource SubtleBrush}"
+                       FontSize="11" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0" />
+            <Button Grid.Column="1" Content="Закрыть" IsCancel="True" Margin="0,0,8,0" MinWidth="90" />
+            <Button Grid.Column="2" Content="Сохранить" Style="{StaticResource PrimaryButtonStyle}"
+                    Click="Save_Click" IsDefault="True" MinWidth="110" />
+        </Grid>
+    </Grid>
+</Window>

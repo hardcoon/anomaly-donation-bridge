@@ -1,0 +1,168 @@
+-- Hardcoon. Standalone runtime catalogue; reads the merged system INI.
+VERSION = "0.2.5"
+local entries, by_section = {}, {}
+local playable_categories={weapon=true,armor=true,helmet=true,artefact=true}
+-- Some non-artefacts share SCRPTART: skins, plates and devices still belong
+-- outside the four wager categories even after removing their old UI labels.
+local other_inventory_kinds={i_attach=true,i_backpack=true,i_device=true,i_drink=true,i_food=true,
+    i_kit=true,i_letter=true,i_medical=true,i_misc=true,i_mutant_belt=true,i_mutant_cooked=true,
+    i_mutant_part=true,i_mutant_raw=true,i_part=true,i_quest=true,i_repair=true,i_tool=true,i_upgrade=true}
+local world_classes = {AI_STL_S=true, AI_TRD_S=true, O_ACTOR=true, O_PHYS_S=true,
+    O_PHYSIC=true, O_INVBOX=true, S_EXPLO=true, SCRPTZONE=true, SPACE_RESTRICTOR=true,
+    SMRTTRRN=true, LVL_CHNG=true, AI_GRAPH=true, AI_SPGRP=true}
+
+function finite(value)
+    return type(value)=="number" and value==value and value~=math.huge and value~=-math.huge
+end
+function read(ini,section,key)
+    if not ini:line_exist(section,key) then return nil end
+    local value=ini:r_string(section,key)
+    if value==nil then return nil end
+    value=tostring(value):match("^%s*(.-)%s*$")
+    if value:sub(1,1)=='"' and value:sub(-1)=='"' then value=value:sub(2,-2) end
+    return value
+end
+function number(ini,section,key,default)
+    local value=tonumber(read(ini,section,key))
+    return finite(value) and value or default
+end
+local function is_false(value) return value=="false" or value=="off" or value=="0" end
+local function category(entry)
+    local c,k=entry.class,entry.kind or ""
+    -- Bolts inherit default weapon parameters and use w_misc. Neither that
+    -- kind nor a shared weapon prefix makes an object a firearm.
+    if c=="II_BOLT" or k=="w_misc" then return "misc" end
+    if c=="E_HLMET" or k=="o_helmet" then return "helmet" end
+    if c=="E_STLK" or k:find("^o_") then return "armor" end
+    if c=="WP_SCOPE" then return "scope" end
+    if c=="WP_SILEN" then return "silencer" end
+    if c=="WP_GLAUN" then return "launcher" end
+    if c=="WP_BINOC" then return "device" end
+    if k=="w_melee" or c=="WP_KNIFE" then return "melee" end
+    if k=="w_explosive" or c:find("^G_") then return "grenade" end
+    if k=="w_ammo" or c:find("^AMMO") or entry.box_size then return "ammo" end
+    if c:find("^WP_") then return "weapon" end
+    if k=="w_pistol" or k=="w_shotgun" or k=="w_smg" or k=="w_rifle" or
+        k=="w_sniper" or k=="w_lmg" then return "weapon" end
+    if k=="i_arty" or k=="i_arty_junk" then return "artefact" end
+    if k=="i_arty_cont" then return "container" end
+    if other_inventory_kinds[k]then return nil end
+    if c:find("^ARTEFACT") or c:find("^SCRPTART") then return "artefact" end
+    return nil
+end
+function item_category(entry) return category(entry) end
+function rebuild(ini,translate)
+    ini=ini or system_ini()
+    local result,index,stats={},{},{sections=0,items=0,unpriced=0,technical=0,protected=0}
+    ini:section_for_each(function(section)
+        stats.sections=stats.sections+1
+        local name=read(ini,section,"inv_name")
+        local class=read(ini,section,"class") or ""
+        local w=number(ini,section,"inv_grid_width",0)
+        local h=number(ini,section,"inv_grid_height",0)
+        local visual=read(ini,section,"visual")
+        -- Do not depend on a modpack's item lists, trader lists or debug spawner.
+        if not name or name=="" or name=="default" or w<=0 or h<=0 or not visual or
+            class=="" or world_classes[class] or class:find("^ZS_") or
+            class:find("^AI_") or is_false(read(ini,section,"can_take")) then return end
+        local spawn=read(ini,section,"$spawn")
+        if is_false(spawn) or section:find("^mp_") or section:find("^tch_") then
+            stats.technical=stats.technical+1; return
+        end
+        local raw_cost=number(ini,section,"cost",0)
+        local story=read(ini,section,"story_id")
+        local unique=story and story~="" and story~="-1" and story~="none" and story~="4294967295"
+        local quest=read(ini,section,"quest_item")
+        local entry={section=section,name=translate and translate(name) or name,name_token=name,
+            class=class,kind=read(ini,section,"kind"),price=math.max(1,raw_cost),configured_price=raw_cost,
+            estimated=raw_cost<=0,story=unique==true,
+            quest=unique==true or quest=="true" or quest=="on" or quest=="1" or read(ini,section,"kind")=="i_quest",
+            icon=read(ini,section,"icons_texture") or "ui\\ui_icon_equipment",
+            icon_x=number(ini,section,"inv_grid_x",0),icon_y=number(ini,section,"inv_grid_y",0),
+            icon_w=w,icon_h=h,grid=number(ini,section,"inv_grid_size",50),
+            box_size=number(ini,section,"box_size",nil),
+            component=read(ini,section,"1icon_layer"),
+            description=read(ini,section,"description")}
+        entry.category=category(entry)
+        -- All genuine inventory types are listed. Story IDs cannot safely be
+        -- duplicated by ALife: display them, but disable spawning a duplicate.
+        entry.reward_allowed=not entry.quest
+        if entry.story then stats.protected=stats.protected+1 end
+        if entry.estimated then stats.unpriced=stats.unpriced+1 end
+        result[#result+1]=entry;index[section]=entry
+    end)
+    -- Containers commonly have cost=0 but explicitly name their contained
+    -- object in 1icon_layer. Resolve the value through live catalogue entries,
+    -- including the container suffix, without hard-coded artefact/mod lists.
+    for pass=1,4 do
+        local changed=false
+        for _,entry in ipairs(result) do
+            local component=entry.component and index[entry.component]
+            if entry.configured_price<=0 and component and component~=entry then
+                local value=component.price
+                local prefix=component.section.."_"
+                if entry.section:sub(1,#prefix)==prefix then
+                    local container=index[entry.section:sub(#prefix+1)]
+                    if container and container~=entry then value=value+container.price end
+                end
+                if value>entry.price then entry.price=value;entry.price_source="components";changed=true end
+            end
+        end
+        if not changed then break end
+    end
+    -- Wrapped artefacts belong to the artefact family, not to empty boxes.
+    for pass=1,4 do
+        for _,entry in ipairs(result) do
+            local component=entry.component and index[entry.component]
+            if component and component.category=="artefact" then entry.category="artefact" end
+        end
+    end
+    local filtered,playable_index={},{}
+    stats.inventory_items=#result;stats.unpriced=0;stats.protected=0
+    for _,entry in ipairs(result) do
+        if playable_categories[entry.category] then
+            filtered[#filtered+1]=entry;playable_index[entry.section]=entry
+            if entry.estimated then stats.unpriced=stats.unpriced+1 end
+            if entry.quest then stats.protected=stats.protected+1 end
+        end
+    end
+    result,index=filtered,playable_index
+    table.sort(result,function(a,b)
+        if a.price~=b.price then return a.price<b.price end
+        return a.section<b.section
+    end)
+    local families={}
+    for _,entry in ipairs(result) do
+        families[entry.category]=families[entry.category] or {}
+        local family=families[entry.category];family[#family+1]=entry
+    end
+    for _,family in pairs(families) do
+        local distinct=0
+        for i,entry in ipairs(family) do
+            if i==1 or entry.price~=family[i-1].price then distinct=distinct+1 end
+        end
+        local price_rank=0
+        for i,entry in ipairs(family) do
+            if i>1 and entry.price~=family[i-1].price then price_rank=price_rank+1 end
+            local rank=price_rank/math.max(1,distinct-1)
+            entry.percentile=rank
+            entry.tier=math.min(5,1+math.floor(rank*5))
+        end
+    end
+    entries,by_section=result,index
+    stats.items=#result
+    return result,stats
+end
+function all() return entries end
+function get(section) return by_section[section] end
+function pool(section)
+    local input=by_section[section]
+    local result={}
+    if not input then return result end
+    for _,entry in ipairs(entries) do
+        if entry.category==input.category and entry.section~=section and entry.reward_allowed then
+            result[#result+1]=entry
+        end
+    end
+    return result
+end

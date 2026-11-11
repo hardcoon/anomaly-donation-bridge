@@ -1,0 +1,583 @@
+-- Private mobile traders. The engine owns their inventory and native movement.
+local SECTION="adb_wandering_trader"
+local LOGIC="scripts\\anomaly_donation_bridge_wandering_trader.ltx"
+local TRADE="misc\\trade\\anomaly_donation_bridge_wandering_trader.ltx"
+local MAP_SPOT="ui_pda2_trader_location"
+local SAVE="adb_wandering_traders_v1"
+local store=rawget(_G,"__adb_wandering_traders_v1")
+if not store then store={records={},runtime={},pending={},last=0};rawset(_G,"__adb_wandering_traders_v1",store) end
+local function now() return time_global() end
+local function cat() return anomaly_donation_bridge_trader_catalog end
+local function common() return anomaly_donation_bridge_common end
+local function server(id) return id and alife():object(id,true) end
+local function online(id) return id and level.object_by_id(id) end
+local function same(obj,record,client)
+    return obj and (client and obj:section() or obj:section_name())==(record.section or SECTION) and obj:name()==record.identity
+end
+local function record_for(npc)
+    if not npc then return end
+    for _,r in pairs(store.records) do
+        if r.id==npc:id() and not r.removed and r.phase~="dead" and same(npc,r,true) then return r end
+    end
+end
+local function record_for_id(id)
+    for _,r in pairs(store.records) do
+        if r.id==id and not r.removed and r.phase~="dead" and same(server(id),r,false) then return r end
+    end
+end
+local function runtime(r)
+    local rt=store.runtime[r.command]
+    if not rt then rt={};store.runtime[r.command]=rt end
+    return rt
+end
+local function copy(t)
+    if type(t)~="table" then return t end
+    local out={};for k,v in pairs(t) do out[k]=copy(v) end;return out
+end
+local function ready()
+    if not db or not db.actor or not db.actor:alive() or store.loading then return false end
+    if app_ready and not app_ready() then return false end
+    local d=device()
+    return not d:is_paused() and (tonumber(d.precache_frame) or 0)==0
+end
+local function text(s) return common().game_text_cp1251_lossy(s,"?") end
+local function command_id(context)
+    return context and context.command and context.command.command_id
+end
+local function error_result(r,reason)
+    r.failure=reason;r.phase="removing"
+    return "rejected",reason
+end
+
+local marker_schema_ok,marker_schema_error
+local function marker_schema()
+    if marker_schema_ok~=nil then return marker_schema_ok,marker_schema_error end
+    marker_schema_ok=false
+    for _,method in ipairs({"map_has_object_spot","map_add_object_spot","map_change_spot_hint","map_remove_object_spot"}) do
+        if not level or type(level[method])~="function" then
+            marker_schema_error="trader_map_api_missing_"..method
+            return false,marker_schema_error
+        end
+    end
+    if CScriptXmlInit==nil then
+        marker_schema_error="trader_map_xml_api_unavailable"
+        return false,marker_schema_error
+    end
+    if not getFS():exist("$game_config$","ui\\map_spots.xml") then
+        marker_schema_error="trader_map_spots_xml_missing"
+        return false,marker_schema_error
+    end
+    -- MapLocation::LoadSpot asserts in C++ for unknown types; pcall around
+    -- map_add_object_spot cannot catch it. Read the active VFS XML first.
+    local ok,exists=pcall(function()
+        local xml=CScriptXmlInit();xml:ParseFile("map_spots.xml")
+        return xml:NodeExist(MAP_SPOT,0) and xml:NodeExist(MAP_SPOT..":level_map",0)
+    end)
+    if not ok then marker_schema_error="trader_map_xml_check_failed"
+    elseif exists~=true then marker_schema_error="trader_map_spot_missing_"..MAP_SPOT
+    else marker_schema_ok=true end
+    return marker_schema_ok,marker_schema_error
+end
+
+local function remove_marker(r)
+    if type(level.map_remove_object_spot)=="function" then level.map_remove_object_spot(r.id,MAP_SPOT) end
+    local rt=store.runtime[r.command]
+    if rt then rt.marked=nil;rt.marker_seconds=nil end
+end
+
+function supported(context)
+    local a=context and context.actor or db and db.actor
+    if not a or not device or not getFS or not alife or not alife_create or not alife_release then
+        return false,"trader_alife_api_unavailable"
+    end
+    if not create_ini_file or not xr_logic or not xr_logic.configure_schemes or not xr_logic.parse_condlist or
+        not axr_beh or not modules or not modules.stype_stalker then return false,"trader_npc_planner_unavailable" end
+    if type(hide_hud_inventory)~="function" then return false,"trader_dialog_transition_unavailable" end
+    if not trade_manager or not trade_manager.get_sell_discount or not trade_manager.get_buy_discount or
+        not trade_manager.update or not trade_manager.trade_init or not trade_manager.setup_buy_sell_conditions or
+        not trade_manager.get_trade_profile or not trade_manager.get_trade_cfg then
+        return false,"trader_native_trade_api_unavailable"
+    end
+    for _,method in ipairs({"sell_condition","buy_condition","set_visual_name","get_visual_name",
+        "invulnerable","set_character_community","set_start_dialog","enable_talk","enable_trade",
+        "kill","buy_item_condition_factor","sell_item_exponent",
+        "force_set_goodwill","inactualize_patrol_path","accessible","is_talking","start_trade"}) do
+        if type(a[method])~="function" then return false,"trader_api_missing_"..method end
+    end
+    for _,method in ipairs({"set_condition","condition","cost","set_ammo_elapsed","set_remaining_uses","get_remaining_uses","ammo_get_count"}) do
+        if type(a[method])~="function" then return false,"trader_inventory_api_missing_"..method end
+    end
+    local ini=system_ini()
+    if not ini:section_exist(SECTION) then return false,"trader_addon_config_missing" end
+    for _,path in ipairs({LOGIC,TRADE,"gameplay\\dialogs_anomaly_donation_bridge.xml"}) do
+        if not getFS():exist("$game_config$",path) then return false,"trader_addon_resources_missing" end
+    end
+    return true
+end
+
+local function rules(r,npc,refresh)
+    local rt=runtime(r)
+    if refresh or not rt.rules then
+        local factors={}
+        local signature={}
+        rt.goods_by_id={}
+        for _,entry in ipairs(r.goods) do
+            rt.goods_by_id[entry.id]=entry
+            local owned=server(entry.id)
+            local item=online(entry.id)
+            if owned and item and owned.parent_id==r.id and owned:name()==entry.identity and owned:section_name()==entry.section then
+                factors[entry.section]=cat().nominal_sale_factor(system_ini(),entry.section,item,r.options.discount)
+                signature[#signature+1]=tostring(entry.id)..":"..tostring(factors[entry.section])
+            end
+        end
+        local key=table.concat(signature,",")
+        if not rt.rules or rt.rules_signature~=key then
+            rt.rules=create_ini_file(cat().trade_rules(system_ini(),r.plan,factors))
+            rt.rules_signature=key
+        end
+    end
+    -- ui_inventory reads trade_manager profiles, whereas the native trade UI
+    -- reads buy/sell_condition. Both must see this merchant's own rules.
+    rt.profile=rt.profile or {cfg_ltx=TRADE..":"..r.command,current_buy_condition="buy",
+        current_sell_condition="sell",current_buy_item_condition_factor=1,
+        current_buy_item_exponent=1,current_sell_item_exponent=1}
+    store.trade_configs=store.trade_configs or {}
+    store.trade_configs[rt.profile.cfg_ltx]=r.command
+    if rt.applied_signature==rt.rules_signature then return end
+    npc:buy_condition(rt.rules,"buy")
+    npc:sell_condition(rt.rules,"sell")
+    npc:buy_item_condition_factor(1)
+    npc:sell_item_exponent(1)
+    rt.applied_signature=rt.rules_signature
+end
+
+local function shop_ready(r)
+    -- Keep the meet/trade condlist true until the user closes the window.
+    -- Switching it off at zero would make xr_meet disable trade underneath UI.
+    return r and (r.phase=="active" or r.phase=="removing" and r.remaining==0 and not r.failure)
+end
+
+local function hooks()
+    if store.hooked then return end
+    if not trade_manager or not xr_conditions then return false end
+    for _,name in ipairs({"get_sell_discount","get_buy_discount","update","setup_buy_sell_conditions","get_trade_profile","get_trade_cfg"}) do
+        if type(trade_manager[name])~="function" then return false end
+    end
+    -- Chain existing mod hooks; change values only for a verified private NPC.
+    local old_sell,old_buy,old_update=trade_manager.get_sell_discount,trade_manager.get_buy_discount,trade_manager.update
+    local old_setup=trade_manager.setup_buy_sell_conditions
+    local old_profile,old_cfg=trade_manager.get_trade_profile,trade_manager.get_trade_cfg
+    trade_manager.get_trade_profile=function(id,key,...)
+        local r=record_for_id(id)
+        local rt=r and store.runtime[r.command]
+        if rt and rt.profile then
+            if key then return rt.profile[key] end
+            return rt.profile
+        end
+        return old_profile(id,key,...)
+    end
+    trade_manager.get_trade_cfg=function(path,...)
+        local command=store.trade_configs and store.trade_configs[path]
+        local r=command and store.records[command]
+        local rt=r and not r.removed and r.phase~="dead" and same(server(r.id),r,false) and store.runtime[command]
+        if rt and rt.rules then return rt.rules end
+        return old_cfg(path,...)
+    end
+    trade_manager.get_sell_discount=function(id,...)
+        local r=record_for_id(id)
+        if r then return 1 end -- Discount is already in this NPC's section factors.
+        return old_sell(id,...)
+    end
+    trade_manager.get_buy_discount=function(id,...)
+        if record_for_id(id) then return 0 end
+        return old_buy(id,...)
+    end
+    trade_manager.update=function(npc,...)
+        local r=record_for(npc)
+        if r then rules(r,npc,true);return end
+        return old_update(npc,...)
+    end
+    trade_manager.setup_buy_sell_conditions=function(npc,...)
+        local r=record_for(npc)
+        if r then rules(r,npc,true);return end
+        return old_setup(npc,...)
+    end
+    xr_conditions.adb_trader_ready=function(_,npc)
+        local r=record_for(npc)
+        return not not shop_ready(r)
+    end
+    store.hooked=true
+end
+
+local function bind_npc(r,npc,s)
+    local rt=runtime(r)
+    if rt.bound then return true end
+    if rt.next_bind and now()<rt.next_bind then return false end
+    rt.next_bind=now()+1000
+    npc:invulnerable(true)
+    -- The meet condlist permits interaction only after stock preparation.
+    -- Never toggle native dialogue/trade state while a UI may reference it.
+    -- Leave normal corpse interaction to the engine; no special search ban.
+    local storage=db.storage and db.storage[r.id]
+    if not storage then return false end
+    -- New traders use the already validated generic NPC catalogue, just like
+    -- the companion/boss. Keep old saves' explicitly selected visual intact.
+    if r.visual and npc:get_visual_name():lower():gsub("%.ogf$","")~=r.visual:lower():gsub("%.ogf$","") then
+        npc:set_visual_name(r.visual,false)
+    end
+    s:set_character_name(r.donor)
+    npc:set_character_community("trader",0,0)
+    npc:force_set_goodwill(5000,db.actor)
+    s:force_set_goodwill(5000,0)
+    local smart_id=tonumber(s.m_smart_terrain_id)
+    if smart_id and smart_id~=65535 then
+        local smart=server(smart_id)
+        if smart then smart:unregister_npc(s) end
+    end
+    local ini=ini_file(LOGIC)
+    if storage.ini_filename~=LOGIC or storage.active_section~="beh@adb_trader" then
+        npc:inactualize_patrol_path()
+        xr_logic.configure_schemes(npc,ini,LOGIC,modules.stype_stalker,"logic","")
+        xr_logic.activate_by_section(npc,ini,"beh@adb_trader","",false)
+    end
+    trade_manager.trade_init(npc,TRADE)
+    rules(r,npc,r.phase=="active")
+    npc:set_start_dialog("anomaly_donation_bridge_wandering_trader_dialog")
+    rt.bound=true
+    return true
+end
+
+local function marker(r)
+    if not r.options.marker or r.phase~="active" then return end
+    -- Also guard records restored from an older save or another game build.
+    if not marker_schema() then return end
+    local rt=runtime(r)
+    local seconds=math.ceil(r.remaining/1000)
+    if rt.marker_seconds==seconds and rt.marked then return end
+    local hint=r.donor.."\\n"..text(r.options.duration==0 and "Без ограничения времени" or "Осталось: "..seconds.." сек.")
+    local present=level.map_has_object_spot(r.id,MAP_SPOT)
+    if not present or present==0 then level.map_add_object_spot(r.id,MAP_SPOT,hint)
+    else level.map_change_spot_hint(r.id,MAP_SPOT,hint) end
+    rt.marker_seconds=seconds;rt.marked=true
+end
+local function busy(npc)
+    if npc and npc:is_talking() then return true end
+    if db.actor and type(db.actor.is_talking)=="function" and db.actor:is_talking() then return true end
+    local mode=actor_menu and type(actor_menu.get_last_mode)=="function" and actor_menu.get_last_mode()
+    if mode==2 or mode==4 or mode==10 or actor_menu and actor_menu.dead_body_searching then return true end
+    return db.actor and db.actor:has_info("trade_wnd_open") or false
+end
+
+local function expire(r)
+    local s=server(r.id)
+    if not same(s,r,false) then r.removed=true;return end
+    local npc=online(r.id)
+    if npc and not same(npc,r,true) then return end
+    if busy(npc) then return end
+    local rt=runtime(r)
+    if now()<(rt.kill_retry or 0) then return end
+    rt.kill_retry=now()+1000
+    if npc then
+        if not npc:alive() then r.phase="dead";return end
+        -- Let the native death lifecycle close AI, trade and corpse state.
+        -- Do not release the NPC or disable its dialogue from Lua.
+        npc:invulnerable(false)
+        npc:kill(npc)
+    elseif type(s.alive)=="function" and not s:alive() then
+        r.phase="dead"
+    elseif r.level~=level.name() and type(s.kill)=="function" and type(s.alive)=="function" then
+        s:kill()
+        if not s:alive() then r.phase="dead" end
+    end
+end
+
+local function retire_corpse(r)
+    local s=server(r.id)
+    if not same(s,r,false) then r.removed=true;return end
+    local npc=online(r.id)
+    if npc and (not same(npc,r,true) or npc:alive()) or busy(npc) then return end
+    remove_marker(r)
+    -- No alife_release, delayed item deletion or second loot cleanup. Stock
+    -- death_manager clears loot via dont_keep_items; body/search remain native.
+    r.removed=true;r.goods={};store.runtime[r.command]=nil
+end
+
+function on_death(npc)
+    local r=record_for(npc)
+    if not r then return end
+    if r.phase=="preparing" then r.failure="trader_died_during_preparation" end
+    r.phase="dead"
+    remove_marker(r)
+    -- Only record the event. No native UI/AI changes inside death callbacks.
+end
+
+local function search_point(actor,radius)
+    if radius==0 then
+        local points=common().safe_points(actor,1,3,9,128,6)
+        return points and points[1]
+    end
+    -- The donor-boss algorithm, sampled in short batches. Keep the best point
+    -- between frames rather than repeatedly resetting the entire search.
+    return common().random_safe_point(actor,math.max(3,radius*.8),radius*1.2,128,30)
+end
+local function advance_search(p)
+    if p.level~=level.name() then p.invalid=true;return end
+    local a=db.actor
+    if (a:position().x-p.origin.x)^2+(a:position().z-p.origin.z)^2>900 then p.invalid=true;return end
+    p.batches=(p.batches or 0)+1
+    local point=search_point(a,p.options.radius)
+    if point then
+        local score=math.abs(point.distance-p.options.radius)
+        if not p.score or score<p.score then p.point=point;p.score=score end
+    end
+    if p.point and (p.options.radius==0 or p.score<=math.max(5,p.options.radius*.2) or p.batches>=20) then
+        p.found=true
+    end
+    if p.batches>=40 and not p.found then p.invalid=true end
+end
+
+function can_execute(context,params)
+    local id=command_id(context)
+    if type(id)~="string" or #id>128 then return false,"rejected","trader_command_id_invalid" end
+    local prior=store.records[id]
+    if prior then
+        if prior.failure then return false,"rejected",prior.failure end
+        if prior.phase=="preparing" then return false,"deferred","trader_preparing" end
+        return true
+    end
+    local supported_ok,why=supported(context)
+    if not supported_ok then return false,"rejected",why end
+    hooks()
+    local o,reason=cat().options(params)
+    if not o then return false,"rejected",reason end
+    if o.marker then
+        local marker_ok,marker_error=marker_schema()
+        if not marker_ok then return false,"rejected",marker_error end
+    end
+    local visuals,err=anomaly_donation_bridge_catalog.validate_sections(params,"visuals","npc")
+    if not visuals or #visuals==0 then return false,"rejected",err or "trader_visual_selection_empty" end
+    local pools=cat().prepare(system_ini())
+    if not pools then return false,"deferred","trader_catalog_preparing" end
+    local p=store.pending[id]
+    if not p or p.invalid then
+        local name=common().truncate_utf8(common().trim(params.donor_name),128)
+        if name=="" or name:find("[%z\1-\31]") then return false,"rejected","trader_donor_name_invalid" end
+        local plan,plan_error=cat().stock_plan(system_ini(),o,context.actor,nil,pools)
+        if not plan then return false,"rejected",plan_error end
+        local v=visuals[math.random(1,#visuals)]
+        p={options=o,section=v.section_id,plan=plan,
+            donor=text(name),level=level.name(),origin={x=context.actor:position().x,z=context.actor:position().z},last_seen=now()}
+        store.pending[id]=p
+    end
+    if not p.section then return false,"rejected","trader_selected_npc_unavailable" end
+    p.last_seen=now()
+    if not p.found then return false,"deferred","trader_waiting_spawn_point" end
+    return true
+end
+
+function execute(context)
+    local id=command_id(context)
+    local r=store.records[id]
+    if r then
+        if r.failure then return "rejected",r.failure end
+        if r.phase=="preparing" then return "deferred","trader_preparing" end
+        return "executed","wandering_trader_created"
+    end
+    local p=store.pending[id]
+    if not p or not p.found or p.level~=level.name() then return "deferred","trader_waiting_spawn_point" end
+    local point=p.point
+    local s=alife_create(p.section,point.position,point.vertex_id,context.actor:game_vertex_id())
+    if not s then return "rejected","trader_spawn_failed" end
+    if type(s.set_character_name)~="function" then
+        alife_release(s);return "rejected","trader_server_name_api_unavailable"
+    end
+    s:set_character_name(p.donor)
+    r={command=id,id=s.id,identity=s:name(),section=p.section,donor=p.donor,options=p.options,
+        plan=p.plan,goods={},next_item=1,check_item=1,prep_ms=0,phase="preparing",
+        remaining=p.options.duration*1000,level=p.level}
+    store.records[id]=r;store.pending[id]=nil
+    -- Force online only during preparation. Afterwards ordinary ALife switching
+    -- is restored so changing level does not leave a forced-online foreign NPC.
+    alife():set_switch_online(r.id,true);alife():set_switch_offline(r.id,false)
+    return "deferred","trader_preparing"
+end
+
+local function create_goods(r,npc,s)
+    local ini=system_ini()
+    -- Inspect each new item only after it becomes an online inventory object.
+    -- This cursor is saved too: F9 during preparation cannot duplicate goods.
+    for _=1,8 do
+        local entry=r.goods[r.check_item or 1]
+        if not entry then break end
+        local item=online(entry.id)
+        if not item then return end
+        if item:name()~=entry.identity or item:section()~=entry.section then
+            error_result(r,"trader_inventory_identity_mismatch");return
+        end
+        local kind=cat().item_category(ini,entry.section)
+        item:set_condition(1)
+        if kind=="weapons" then item:set_ammo_elapsed(0) end
+        local uses=tonumber(ini:line_exist(entry.section,"max_uses") and ini:r_string(entry.section,"max_uses"))
+        if uses and uses>0 and (kind=="medicine" or kind=="food") then item:set_remaining_uses(uses) end
+        if math.abs(item:condition()-1)>.001 then error_result(r,"trader_item_condition_unconfirmed");return end
+        if uses and uses>0 and (kind=="medicine" or kind=="food") and item:get_remaining_uses()~=uses then
+            error_result(r,"trader_item_uses_unconfirmed");return
+        end
+        if kind=="ammo" and item:ammo_get_count()~=tonumber(ini:r_string(entry.section,"box_size")) then
+            error_result(r,"trader_ammo_box_unconfirmed");return
+        end
+        r.check_item=(r.check_item or 1)+1
+    end
+    for _=1,4 do
+        local section=r.plan[r.next_item]
+        if not section then
+            if (r.check_item or 1)<=#r.goods then return end
+            -- Commit before acknowledging the command. An autosave between
+            -- preparation and its retry must contain an already usable shop.
+            r.phase="active"
+            rules(r,npc,true)
+            alife():set_switch_online(r.id,true);alife():set_switch_offline(r.id,true)
+            npc:enable_talk();npc:enable_trade()
+            return
+        end
+        if not cat().safe_item(ini,section) then error_result(r,"trader_item_no_longer_available");return end
+        local item
+        local box=tonumber(ini:line_exist(section,"box_size") and ini:r_string(section,"box_size"))
+        if cat().item_category(ini,section)=="ammo" then
+            item=alife():create_ammo(section,npc:position(),npc:level_vertex_id(),npc:game_vertex_id(),r.id,box)
+        else
+            item=alife_create(section,npc:position(),npc:level_vertex_id(),npc:game_vertex_id(),r.id)
+        end
+        if not item then error_result(r,"trader_item_creation_failed");return end
+        r.goods[#r.goods+1]={id=item.id,identity=item:name(),section=section}
+        r.next_item=r.next_item+1
+    end
+end
+
+local function wander(r,npc,current)
+    local rt=runtime(r)
+    if busy(npc) then return end
+    if rt.next_wander and current<rt.next_wander then return end
+    local st=db.storage[r.id] and db.storage[r.id].beh
+    if not st then rt.bound=false;rt.next_wander=current+1000;return end
+    local destination=rt.destination
+    if destination then
+        local p=level.vertex_position(destination)
+        if npc:position():distance_to_sqr(p)>9 and current<(rt.walk_deadline or 0) then
+            rt.next_wander=current+1000;return
+        end
+    end
+    -- Native NPC planner handles obstacles; no teleport and no vehicle AI.
+    local point=common().random_safe_point(npc,20,80,128,20)
+    if not point or not npc:accessible(point.vertex_id) then rt.next_wander=current+1000;return end
+    st.goto_target=xr_logic.parse_condlist(npc,"beh@adb_trader","target","lvid:"..point.vertex_id)
+    st.behavior_state=xr_logic.parse_condlist(npc,"beh@adb_trader","behavior_state","beh_move")
+    st.desired_target=nil;st.assist_point=nil;st.rally_lvid=point.vertex_id
+    rt.destination=point.vertex_id;rt.next_wander=current+1000;rt.walk_deadline=current+90000
+end
+
+function update(current)
+    current=current or now()
+    local elapsed=store.last>0 and math.max(0,current-store.last) or 0
+    store.last=current
+    if not ready() then return end
+    hooks()
+    cat().advance()
+    -- A loading gap must not consume lifetime even on engines whose clock jumps.
+    if elapsed>2000 then elapsed=0 end
+    for _,r in pairs(store.records) do
+        if not r.removed and r.phase=="preparing" then
+            r.prep_ms=(r.prep_ms or 0)+elapsed
+            if r.prep_ms>120000 then error_result(r,"trader_inventory_preparation_timeout") end
+        end
+        if not r.removed and r.phase=="active" and r.options.duration>0 then
+            r.remaining=math.max(0,r.remaining-elapsed)
+            if r.remaining==0 then r.phase="removing" end
+        end
+    end
+    if current<(store.next_update or 0) then return end
+    store.next_update=current+50
+    for id,p in pairs(store.pending) do
+        if current-p.last_seen>30000 then store.pending[id]=nil
+        elseif not p.found and not p.invalid then advance_search(p);break end
+    end
+    local stock_budget_used=false
+    for _,r in pairs(store.records) do
+        if not r.removed then
+            local s=server(r.id)
+            if not same(s,r,false) then
+                r.removed=true;r.failure="trader_identity_missing";store.runtime[r.command]=nil
+            elseif r.phase=="removing" then expire(r)
+            elseif r.phase=="dead" then retire_corpse(r)
+            else
+                local npc=online(r.id)
+                if npc and same(npc,r,true) then
+                    if not npc:alive() then
+                        -- Some scripts kill without dispatching npc_on_death.
+                        on_death(npc)
+                    elseif bind_npc(r,npc,s) then
+                        if r.phase=="preparing" and not stock_budget_used then
+                            create_goods(r,npc,s);stock_budget_used=true
+                        elseif r.phase=="active" then wander(r,npc,current) end
+                    end
+                else store.runtime[r.command]=nil end
+                marker(r)
+            end
+        end
+    end
+end
+
+function save_state(data) data[SAVE]=copy(store.records) end
+function load_state(data)
+    store.records=copy(data and data[SAVE] or {})
+    store.runtime={};store.trade_configs={};store.pending={};store.last=0;store.next_update=0;store.loading=true
+end
+function on_game_load() store.loading=false;store.last=0;store.runtime={};store.trade_configs={};store.pending={} end
+function on_level_changing() store.loading=true;store.last=0;store.runtime={};store.trade_configs={};store.pending={} end
+function enemy_eval(npc,enemy,flags)
+    if record_for(npc) then flags.override=true;flags.result=false end
+end
+function dialog_text() return text("Псс, парень, у меня кое что есть, интересует?") end
+function answer_text() return text("Покажи, что у тебя есть.") end
+function open_trade(a,b)
+    local npc=record_for(a) and a or record_for(b) and b
+    local r=npc and record_for(npc)
+    if not shop_ready(r) or not npc:alive() then return end
+    rules(r,npc,true)
+    -- Same transition as dialogs.npc_is_trader in stock Anomaly.
+    if hide_hud_inventory() then npc:start_trade(db.actor) end
+end
+function on_get_item_cost(_,item,profile,_,ret)
+    if not profile or profile.mode~=2 then return end
+    local command=store.trade_configs and store.trade_configs[profile.cfg]
+    local r=command and store.records[command]
+    if not r or r.removed or r.phase=="dead" or not same(server(r.id),r,false) then return end
+    -- Scripted UI totals fractional item prices before rounding. Use exact
+    -- nominal prices here so a stack cannot accumulate the native .25 margin.
+    local rt=store.runtime[command]
+    local entry=rt and rt.goods_by_id and rt.goods_by_id[item:id()]
+    if entry and entry.identity==item:name() and entry.section==item:section() then
+        local s=server(entry.id)
+        if s and s.parent_id==r.id then
+            ret.new_cost=math.max(1,math.floor(tonumber(system_ini():r_string(entry.section,"cost"))*
+                cat().price_factor(r.options.discount)+.000001))
+        end
+    end
+end
+function init_dialog(dialog)
+    local first=dialog:AddPhrase("anomaly_donation_bridge_wandering_trader.dialog_text","0","",-10000)
+    first:GetPhraseScript():SetScriptText("anomaly_donation_bridge_wandering_trader.dialog_text")
+    local answer=dialog:AddPhrase("anomaly_donation_bridge_wandering_trader.answer_text","1","0",-10000)
+    answer:GetPhraseScript():SetScriptText("anomaly_donation_bridge_wandering_trader.answer_text")
+    answer:GetPhraseScript():AddAction("anomaly_donation_bridge_wandering_trader.open_trade")
+end
+function start()
+    if store.callbacks then return end
+    hooks()
+    RegisterScriptCallback("save_state",save_state)
+    RegisterScriptCallback("load_state",load_state)
+    RegisterScriptCallback("on_enemy_eval",enemy_eval)
+    RegisterScriptCallback("npc_on_death_callback",on_death)
+    RegisterScriptCallback("on_get_item_cost",on_get_item_cost)
+    store.callbacks=true
+end

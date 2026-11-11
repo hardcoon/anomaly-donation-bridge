@@ -1,0 +1,129 @@
+-- Move existing human companions; never recreate NPCs or their inventory.
+local function server(id) return alife():object(id) end
+local function valid(id) return type(id)=="number" and id>=0 and id<65535 end
+local function same(se,row) return se and row and se.id==row.id and se:name()==row.internal end
+local function saved(se,key)
+    return type(se_load_var)=="function" and se_load_var(se.id,se:name(),key) or nil
+end
+local function story(id)
+    local value=get_object_story_id(id)
+    return value~=nil and value~=false and value~=""
+end
+function owned(se)
+    return se and axr_companions and ((axr_companions.non_task_companions or {})[se.id] or
+        (axr_companions.companion_squads or {})[se.group_id] or saved(se,"companion")==true) and true or false
+end
+function protected(se,excluded)
+    if not se or not IsStalker(nil,se:clsid()) or not se:alive() then return true end
+    return excluded[se.id] or excluded[se.group_id] or story(se.id) or
+        valid(se.group_id) and story(se.group_id) or
+        saved(se,"companion_cannot_dismiss")==true or saved(se,"companion_cannot_teleport")==true
+end
+function capture(excluded)
+    local ids,rows={},{}
+    for id in pairs(axr_companions and axr_companions.non_task_companions or {}) do
+        id=tonumber(id);if valid(id) then ids[id]=true end
+    end
+    for id in pairs(axr_companions and axr_companions.companion_squads or {}) do
+        local group=server(tonumber(id))
+        if group and type(group.squad_members)=="function" then
+            for member in group:squad_members() do ids[member.id]=true end
+        end
+    end
+    for id in pairs(ids) do
+        local se=server(id)
+        if owned(se) and not protected(se,excluded) then
+            rows[#rows+1]={id=id,internal=se:name(),group=se.group_id,faction=se:community()}
+        end
+    end
+    table.sort(rows,function(a,b) return a.id<b.id end)
+    return rows
+end
+function available()
+    return axr_companions and type(axr_companions.remove_from_actor_squad)=="function" and
+        type(axr_companions.add_to_actor_squad)=="function" and
+        type(se_save_var)=="function" and type(se_load_var)=="function" and SIMBOARD and
+        type(SIMBOARD.assign_squad_to_smart)=="function" and type(SIMBOARD.setup_squad_and_group)=="function" and
+        type(SIMBOARD.remove_squad)=="function"
+end
+local function remaining_companions(group)
+    if not group then return end
+    local still_owned=false
+    for member in group:squad_members() do
+        local se=server(member.id)
+        if se and ((axr_companions.non_task_companions or {})[se.id] or saved(se,"companion")==true) then still_owned=true;break end
+    end
+    axr_companions.companion_squads[group.id]=still_owned and group or nil
+    group.scripted_target=still_owned and "actor" or nil
+end
+function detach(se)
+    local group=valid(se.group_id) and server(se.group_id)
+    local n=level.object_by_id(se.id)
+    if n then axr_companions.remove_from_actor_squad(n) end
+    axr_companions.non_task_companions[se.id]=nil
+    for _,key in ipairs({"companion","companion_cannot_dismiss","companion_cannot_teleport"}) do
+        se_save_var(se.id,se:name(),key,nil)
+    end
+    if group then group:unregister_member(se.id);remaining_companions(group) end
+end
+function restore(se,row)
+    local group=valid(row.group) and server(row.group)
+    assert(group,"rollback_companion_squad_missing")
+    if group and se.group_id~=row.group then group:register_member(se.id) end
+    axr_companions.non_task_companions[se.id]=true
+    se_save_var(se.id,se:name(),"companion",true)
+    if group then axr_companions.companion_squads[group.id]=group;group.scripted_target="actor" end
+    local n=level.object_by_id(se.id)
+    if n then axr_companions.add_to_actor_squad(n) end
+end
+function clean_empty(group_id)
+    local group=valid(group_id) and server(group_id)
+    if group and group:npc_count()==0 then
+        axr_companions.companion_squads[group.id]=nil
+        SIMBOARD:remove_squad(group) -- empty ONLY; never remove a live member
+    end
+end
+function maintain(body)
+    if type(body.companions)~="table" or #body.companions==0 then return end
+    local leader=server(body.id)
+    if not same(leader,{id=body.id,internal=body.internal}) or not leader:alive() then return end
+    local group=body.group and server(body.group.id)
+    if body.group and not same(group,body.group) then return end -- never adopt a reused ID
+    if not group then
+        group=assert(alife():create("online_offline_group",leader.position,leader.m_level_vertex_id,leader.m_game_vertex_id),
+            "previous_body_squad_create_failed")
+        body.group={id=group.id,internal=group:name()}
+    end
+    if leader:alive() and leader.group_id~=group.id then
+        assert(not valid(leader.group_id),"previous_body_already_in_another_squad")
+        group:register_member(leader.id)
+        SIMBOARD:setup_squad_and_group(leader)
+    end
+    local faction=body.hostile and "arena_enemy" or body.faction
+    group.player_id=faction
+    for _,row in ipairs(body.companions) do
+        local se=server(row.id)
+        if same(se,row) and se:alive() then
+            if se.group_id~=group.id then
+                assert(not valid(se.group_id) or se.group_id==row.group,"former_companion_moved_to_another_squad")
+                detach(se)
+                group:register_member(se.id)
+                SIMBOARD:setup_squad_and_group(se)
+            end
+            if anomaly_donation_bridge_named_companion and anomaly_donation_bridge_named_companion.release_following then
+                anomaly_donation_bridge_named_companion.release_following(se,false)
+            end
+            local n=level.object_by_id(se.id)
+            if n then
+                if n:character_community()~=faction then n:set_character_community(faction,0,0) end
+                if body.hostile then n:force_set_goodwill(-5000,db.actor) end
+            end
+        end
+    end
+    if not body.group_ready then
+        SIMBOARD:assign_squad_to_smart(group,nil)
+        group:set_squad_relation(body.hostile and "enemy" or "neutral")
+        group:refresh();body.group_ready=true
+    end
+    for _,row in ipairs(body.companions) do if row.group~=group.id then clean_empty(row.group) end end
+end

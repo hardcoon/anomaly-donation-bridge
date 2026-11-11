@@ -1,0 +1,447 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "god_mode",
+  "displayName": "Год-мод",
+  "description": "Временно блокирует входящий урон. Раз в секунду снимает радиацию и кровотечение, восстанавливает пси-здоровье до 100%.\n\nЭффект сохраняется при быстрой загрузке и переходах между локациями, но не возобновляется после выхода из игры. Можно отключить таймер на экране или выбрать альтернативный способ через g_god.",
+  "category": "player_state",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"duration_seconds","displayName":"Длительность неуязвимости, сек.","kind":"Integer","minimum":5,"maximum":600,"defaultValue":"30"},
+    {"key":"show_timer","displayName":"Показывать таймер внизу экрана","kind":"Choice","options":["true","false"],"defaultValue":"true"},
+    {"key":"use_g_god","displayName":"Альтернативный старый способ — g_god","kind":"Choice","options":["true","false"],"defaultValue":"false"}
+  ],
+  "parameters": {"duration_seconds":"30","show_timer":"true","use_g_god":"false"},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+-- Saves contain ONLY a remaining-time snapshot. The permission to resume it
+-- stays in process RAM; a new game process cannot revive a saved god mode.
+local STATE_KEY = "__anomaly_donation_bridge_god_mode_v2"
+local SESSION_ENV = "ADB_GOD_MODE_SESSION_V2"
+local OWNER_ENV = "ADB_GOD_MODE_OWNER_V1"
+local PAUSE_ENV = "ADB_GOD_MODE_PAUSE_V1"
+local SAVE_KEY = "adb_god_mode_timer_v1"
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+    state = { active=false, expires_at=0, mode="hit", previous=false, show_timer=true }
+    rawset(_G, STATE_KEY, state)
+end
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel
+if ffi_ok then
+    pcall(ffi.cdef, [[
+        unsigned long __stdcall GetCurrentProcessId(void);
+        unsigned long __stdcall GetEnvironmentVariableA(const char* name, char* buffer, unsigned long size);
+        int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+    ]])
+    local ok, library = pcall(ffi.load, "kernel32")
+    if ok then kernel=library end
+end
+local function pid()
+    if not kernel then return nil end
+    local ok, value = pcall(kernel.GetCurrentProcessId)
+    return ok and tonumber(value) or nil
+end
+local function stamp(value)
+    return tonumber(value) or (type(time_global)=="function" and time_global() or 0)
+end
+local function session_read(name)
+    name=name or SESSION_ENV
+    if not kernel then return nil end
+    local ok, size = pcall(kernel.GetEnvironmentVariableA, name, nil, 0)
+    size = ok and tonumber(size) or 0
+    if size<=1 or size>256 then return nil end
+    local buffer=ffi.new("char[?]",size)
+    local read_ok, length=pcall(kernel.GetEnvironmentVariableA,name,buffer,size)
+    length=read_ok and tonumber(length) or 0
+    if length<=0 or length>=size then return nil end
+    return ffi.string(buffer,length)
+end
+local function session_write(value,name)
+    name=name or SESSION_ENV
+    if not kernel then return false end
+    local ok, result=pcall(kernel.SetEnvironmentVariableA,name,value)
+    return ok and tonumber(result)~=0 and session_read(name)==value
+end
+local function owner_token(create)
+    local id=pid()
+    if not id then return nil end
+    local record=session_read(OWNER_ENV)
+    local owner_pid,token
+    if record then owner_pid,token=record:match("^(%d+)|([%w%-]+)$") end
+    if tonumber(owner_pid)==id and token and #token<=96 then return token end
+    if not create then return nil end
+    -- A process-local generation, not merely a reusable Windows PID. It is
+    -- never written to a global environment/config and cannot start an effect.
+    token=tostring(id).."-"..tostring(os.time()).."-"..tostring(math.floor(stamp())).."-"..tostring(math.random(1,2147483646))
+    return session_write(tostring(id).."|"..token,OWNER_ENV) and token or nil
+end
+local function remaining(now)
+    if not state.active then return 0 end
+    return math.max(0,math.min(600000,state.loading and (state.paused_remaining or 0) or state.expires_at-now))
+end
+local function persist()
+    local id=pid()
+    if not id then return false end
+    if not state.active then return session_write(nil) end
+    return session_write("2|"..tostring(id).."|"..tostring(math.floor(state.expires_at)).."|"..
+        state.mode.."|"..(state.previous and "1" or "0").."|"..(state.show_timer and "1" or "0"))
+end
+local function hydrate()
+    local text=session_read()
+    if not text then state.active=false;return end
+    local id,expires,mode,previous,show=text:match("^2|(%d+)|(%d+)|(%a+)|([01])|([01])$")
+    expires=tonumber(expires)
+    local pause=session_read(PAUSE_ENV)
+    local pause_pid,left
+    if pause then pause_pid,left=pause:match("^(%d+)|(%d+)$") end
+    left=tonumber(left)
+    local frozen=tonumber(pause_pid)==pid() and left and left<=600000
+    if tonumber(id)~=pid() or not expires or (not frozen and expires>stamp()+600000) or
+        (mode~="hit" and mode~="console") then
+        -- If the engine clock reset without an early suspend callback, keep
+        -- ONLY cleanup ownership of our legacy flag, never future immunity.
+        if tonumber(id)==pid() and expires and mode=="console" then
+            state.active=true;state.expires_at=0;state.mode="console"
+            state.previous=previous=="1";state.show_timer=false;state.loading=false
+            return
+        end
+        session_write(nil);state.active=false;return
+    end
+    state.active=true;state.expires_at=expires;state.mode=mode
+    state.previous=previous=="1";state.show_timer=show=="1"
+    if frozen then
+        state.loading=true;state.paused_remaining=left
+    end
+end
+local function console_read()
+    if type(get_console)~="function" then return nil end
+    local ok,value=pcall(function() return get_console():get_bool("g_god") end)
+    if ok and type(value)=="boolean" then return value end
+    return nil
+end
+local function console_write(value)
+    local ok=pcall(function() get_console():execute(value and "g_god on" or "g_god off") end)
+    return ok and console_read()==value
+end
+local function tip(text)
+    local actor=db and db.actor
+    if not actor or not news_manager or type(news_manager.send_tip)~="function" then return false end
+    local encoded=anomaly_donation_bridge_common.game_text_cp1251(text)
+    if not encoded then return false end
+    local ok,result=pcall(news_manager.send_tip,actor,encoded,nil,nil,6000)
+    return ok and result~=false
+end
+
+-- An independent instance of the STOCK message XML, not a modal, foreign
+-- gameplay_notification static, or custom-drawn text. A mod's font/texture
+-- underneath this native message is retained. Only its position/text changes.
+-- The parent owns it. DetachChild deletes it; NEVER use that pointer again.
+local function hide_timer()
+    local hud=state.hud;state.hud=nil
+    if hud then pcall(function() hud.parent:DetachChild(hud.window) end) end
+end
+local function timer_visible(shown)
+    local hud=state.hud
+    if hud and hud.visible~=shown then
+        hud.window:Show(shown)
+        if shown then hud.window:Enable(false) end
+        hud.visible=shown
+    end
+end
+local function ui_ready()
+    if state.loading or not db or not db.actor then return false end
+    local ok,ready=pcall(function()
+        if not db.actor:alive() then return false end
+        if type(app_ready)=="function" and not app_ready() then return false end
+        if type(device)=="function" then
+            local d=device()
+            if d:is_paused() or (tonumber(d.precache_frame) or 0)>0 then return false end
+            local frame=tonumber(d.frame) or 0
+            if state.resume_frame and frame<state.resume_frame then return false end
+        end
+        if type(Check_UI)=="function" and Check_UI() then return false end
+        if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return false end
+        return true
+    end)
+    return ok and ready
+end
+local function show_timer(now)
+    if not state.active or now>=state.expires_at then hide_timer();return end
+    -- Engine constructors are callable luabind class objects (userdata/table),
+    -- not necessarily Lua functions. Construct inside the protected call below.
+    if type(get_hud)~="function" or CScriptXmlInit==nil or vector2==nil then return end
+    local ok,reason=pcall(function()
+        -- Temporary menus/pause hide the same element; they do not delete it.
+        if not state.show_timer or not ui_ready() then timer_visible(false);return end
+        if not state.hud then
+            local root=get_hud():GetWindow()
+            if not root then return end
+            local xml=CScriptXmlInit();xml:ParseFile("ui_custom_msgs.xml")
+            if not xml:NodeExist("gameplay_notification",0) then return end
+            local window=xml:InitStatic("gameplay_notification",root)
+            state.hud={parent=root,window=window}
+            window:Enable(false)
+            local width,height=window:GetWidth(),window:GetHeight()
+            window:SetWndPos(vector2():set((1024-width)/2,768-height-20))
+        end
+        -- CUIWindow has no __eq in luabind. Do not compare fresh native
+        -- wrappers each tick: that threw, deleted the label and caused blinking.
+        -- Lifecycle callbacks release the one owned element before teardown.
+        local seconds=math.max(1,math.ceil((state.expires_at-now)/1000))
+        if state.hud.seconds~=seconds then
+            local text="Год-мод: "..tostring(seconds).."с"
+            state.hud.window:TextControl():SetText(anomaly_donation_bridge_common.game_text_cp1251(text))
+            state.hud.seconds=seconds
+        end
+        timer_visible(true)
+    end)
+    if not ok then
+        hide_timer()
+        if type(printf)=="function" and reason~=state.hud_error then
+            state.hud_error=reason;printf("[ADB] god mode timer: %s",tostring(reason))
+        end
+    end
+end
+local function finish(notify)
+    if not state.active then return true end
+    if state.mode=="console" and not console_write(state.previous) then return false end
+    -- Preserve an expired lease if clearing RAM fails, so a VM reload can
+    -- still finish restoring an owned console flag rather than leak it.
+    if not session_write(nil) then return false end
+    session_write(nil,PAUSE_ENV)
+    state.active=false;state.expires_at=0;state.last_restore_second=nil;hide_timer()
+    state.paused_remaining=nil;state.resume_pending=nil
+    if notify then state.finish_tip_pending=true end
+    return true
+end
+local function bool_param(value,default)
+    if value==nil then return default end
+    if value=="true" then return true end
+    if value=="false" then return false end
+end
+local function restore_conditions(now)
+    -- The same process-only deadline owns BOTH hit protection and restoration.
+    -- No extra timer, infoportion, booster, immunity coefficient or save journal.
+    if not state.active or state.loading or now>=state.expires_at then return end
+    local actor=db and db.actor
+    if not actor then return end
+    local seconds=math.max(1,math.ceil((state.expires_at-now)/1000))
+    if state.last_restore_second==seconds then return end
+    local ok,reason=pcall(function()
+        if not actor:alive() then return end
+        if type(app_ready)=="function" and not app_ready() then return end
+        if type(device)=="function" then
+            local d=device()
+            if d:is_paused() or (tonumber(d.precache_frame) or 0)>0 then return end
+            if state.resume_frame and (tonumber(d.frame) or 0)<state.resume_frame then return end
+        end
+        if level and type(level.present)=="function" and not level.present() then return end
+        -- Mark BEFORE writes: a failing optional API must not retry every frame.
+        state.last_restore_second=seconds
+        actor.radiation=0
+        -- This native property is ChangeBleeding(percent), NOT an absolute
+        -- bleeding level: 1 heals 100% of the wounds; assigning 0 heals none.
+        actor.bleeding=1
+        actor.psy_health=1
+        -- Stock Anomaly also tracks a separate script psy-health pool. Use
+        -- only its published API if already loaded/initialized, like Azazel.
+        local psy=rawget(_G,"arszi_psy")
+        if type(psy)=="table" and type(psy.get_psy_health)=="function" and type(psy.set_psy_health)=="function" then
+            local value=psy.get_psy_health()
+            if type(value)=="number" and value==value and math.abs(value)<math.huge then psy.set_psy_health(1) end
+        end
+    end)
+    if not ok and reason~=state.restore_error then
+        state.restore_error=reason
+        if type(printf)=="function" then printf("[ADB] god mode condition restore: %s",tostring(reason)) end
+    end
+end
+local function supported()
+    local available=pid()~=nil and state.hit_registered==true and state.destroy_registered==true
+    return available,available and nil or "god_mode_session_or_hit_callback_unavailable"
+end
+local function can_execute(context,params)
+    local valid,reason=anomaly_donation_bridge_common.params_only(params,
+        {duration_seconds=true,show_timer=true,use_g_god=true})
+    if not valid then return false,"rejected",reason end
+    local duration,err=anomaly_donation_bridge_common.parse_integer(params.duration_seconds,30,5,600,"god_mode_duration_invalid")
+    if not duration then return false,"rejected",err end
+    local show,legacy=bool_param(params.show_timer,true),bool_param(params.use_g_god,false)
+    if show==nil or legacy==nil then return false,"rejected","god_mode_boolean_invalid" end
+    if not context.actor then return false,"deferred","actor_unavailable" end
+    local available,why=supported()
+    if not available then return false,"rejected",why end
+    if state.loading then return false,"deferred","god_mode_loading" end
+    if legacy and console_read()==nil then return false,"rejected","god_mode_console_unavailable" end
+    context.options={duration=duration,show=show,mode=legacy and "console" or "hit"}
+    return true
+end
+local function execute(context)
+    local now=stamp(context.now)
+    local options=context.options
+    if not owner_token(true) then return "rejected","god_mode_session_store_failed" end
+    local deadline=now+options.duration*1000
+    if state.active then deadline=math.max(deadline,state.expires_at) end
+    local previous=state.active and state.mode=="console" and state.previous or false
+    if state.active and (now>=state.expires_at or state.mode~=options.mode) then
+        if not finish(false) then return "uncertain","god_mode_previous_restore_failed" end
+    end
+    if options.mode=="console" and not state.active then
+        previous=console_read()
+        if previous==nil then return "rejected","god_mode_console_unavailable" end
+    end
+    local old={active=state.active,expires_at=state.expires_at,mode=state.mode,
+        previous=state.previous,show_timer=state.show_timer}
+    state.active=true;state.expires_at=deadline;state.mode=options.mode
+    state.previous=previous;state.show_timer=options.show
+    -- RAM lease is confirmed BEFORE any console mutation or hit protection.
+    if not persist() then
+        for k,v in pairs(old) do state[k]=v end
+        persist();return "rejected","god_mode_session_store_failed"
+    end
+    if state.mode=="console" and not console_write(true) then
+        state.expires_at=0;persist();finish(false)
+        return "uncertain","god_mode_console_apply_failed"
+    end
+    restore_conditions(now)
+    show_timer(now)
+    tip("Год-мод включён на "..tostring(options.duration).." сек.")
+    return "executed","god_mode_seconds_"..tostring(options.duration).."_"..state.mode
+end
+local function update(now)
+    now=stamp(now)
+    if state.loading then
+        if not state.resume_pending or state.destroyed then return end
+        local ok,safe=pcall(function()
+            if not db or not db.actor or not db.actor:alive() then return false end
+            if type(app_ready)=="function" and not app_ready() then return false end
+            local d=device()
+            return not d:is_paused() and (tonumber(d.precache_frame) or 0)==0 and
+                (tonumber(d.frame) or 0)>=(state.resume_frame or 0)
+        end)
+        if not ok or not safe then return end
+        state.expires_at=now+(state.paused_remaining or 0)
+        state.loading=false;state.resume_pending=nil;state.paused_remaining=nil
+        -- If rebasing the lease cannot be confirmed, do not grant an untracked
+        -- effect or keep restoring conditions. Retry cleanup, never protection.
+        if not persist() or not session_write(nil,PAUSE_ENV) then
+            state.expires_at=0;persist();finish(false);return
+        end
+    end
+    if state.active and now>=state.expires_at then finish(true) end
+    if state.finish_tip_pending and tip("Год-мод закончен") then state.finish_tip_pending=false end
+    if state.active and now<state.expires_at and state.mode=="console" and not state.loading then console_write(true) end
+    restore_conditions(now)
+    show_timer(now)
+end
+local function suspend()
+    hide_timer()
+    if not state.loading then
+        state.paused_remaining=remaining(stamp())
+        state.loading=true;state.resume_pending=true
+        local ok,frame=pcall(function() return device().frame end)
+        state.resume_frame=(ok and tonumber(frame) or 0)+8
+        if state.active then session_write(tostring(pid()).."|"..tostring(math.floor(state.paused_remaining)),PAUSE_ENV) end
+    end
+end
+local function destroy()
+    suspend();state.destroyed=true
+end
+local function before_load(_,_,flags)
+    if type(flags)=="table" and flags.ret_value==false then return end
+    suspend()
+end
+local function console_loading(command)
+    if command=="load" or command=="start" or command=="disconnect" then suspend() end
+end
+local function save_snapshot(data)
+    -- Never overwrite the newly loaded timeline before on_game_load adopts it.
+    if type(data)~="table" or state.snapshot_received then return end
+    local left=math.floor(remaining(stamp()))
+    data[SAVE_KEY]={version=1,active=state.active and left>0,remaining_ms=left,
+        owner=owner_token(false),mode=state.mode,show_timer=state.show_timer}
+end
+local function read_snapshot(data)
+    -- load_state is early: no actor/native UI may be touched here.
+    state.loaded_snapshot=type(data)=="table" and data[SAVE_KEY] or nil
+    state.snapshot_received=true
+end
+local function load()
+    -- Remove an old timer only if its native parent is still the CURRENT root.
+    -- Otherwise native teardown already owns it; do not dereference stale UI.
+    local ok,root=pcall(function() return get_hud():GetWindow() end)
+    -- rawequal never invokes a missing native __eq operator. A different
+    -- wrapper is not proof the old native root is alive; never touch it here.
+    if state.hud and ok and rawequal(state.hud.parent,root) then hide_timer() else state.hud=nil end
+    state.last_restore_second=nil
+    state.destroyed=nil
+    local ok,frame=pcall(function() return device().frame end)
+    state.resume_frame=(ok and tonumber(frame) or 0)+8
+    hydrate()
+    local snapshot=state.loaded_snapshot
+    if not state.snapshot_received and alife_storage_manager and type(alife_storage_manager.get_state)=="function" then
+        local good,data=pcall(alife_storage_manager.get_state)
+        if good and type(data)=="table" then snapshot=data[SAVE_KEY] end
+    end
+    state.loaded_snapshot=nil;state.snapshot_received=nil;state.finish_tip_pending=nil
+    -- No snapshot means an old/pre-effect save. Never carry protection from
+    -- the abandoned timeline into it. New transition autosaves include this key.
+    local left=0
+    local mode,show=state.mode,state.show_timer
+    if snapshot~=nil then
+        local valid=type(snapshot)=="table" and snapshot.version==1
+        local saved_left=valid and tonumber(snapshot.remaining_ms) or nil
+        local owner=owner_token(false)
+        if valid and snapshot.active==true and owner and snapshot.owner==owner and
+            saved_left and saved_left==saved_left and saved_left>0 and saved_left<=600000 and
+            (snapshot.mode=="hit" or snapshot.mode=="console") and type(snapshot.show_timer)=="boolean" then
+            left=saved_left;mode=snapshot.mode;show=snapshot.show_timer
+        else left=0 end
+    end
+    -- Release any old owned console flag before adopting the loaded timeline.
+    -- No stale native flag/previous baseline is ever copied from a game save.
+    if not finish(false) then state.expires_at=0;state.loading=false;return end
+    if left>0 then
+        local previous=mode=="console" and console_read() or false
+        if mode=="console" and previous==nil then state.loading=false;return end
+        state.active=true;state.expires_at=stamp()+left;state.mode=mode
+        state.previous=previous;state.show_timer=show;state.paused_remaining=left
+        state.loading=true;state.resume_pending=true
+        if not persist() or not session_write(tostring(pid()).."|"..tostring(math.floor(left)),PAUSE_ENV) then
+            state.expires_at=0;state.loading=false;persist();finish(false);return
+        end
+    else state.loading=false end
+    update(stamp())
+end
+local function before_hit(_,_,flags)
+    if state.active and stamp()<state.expires_at and not state.loading and state.mode=="hit" and type(flags)=="table" then
+        -- Do not restore true: other mods/New Life may already have vetoed it.
+        flags.ret_value=false
+    end
+end
+function on_game_start()
+    if state.callbacks and type(UnregisterScriptCallback)=="function" then
+        for event,fn in pairs(state.callbacks) do pcall(UnregisterScriptCallback,event,fn) end
+    end
+    state.callbacks={actor_on_before_hit=before_hit,actor_on_net_destroy=destroy,
+        on_before_load_input=before_load,on_console_execute=console_loading,
+        save_state=save_snapshot,load_state=read_snapshot}
+    state.hit_registered=false;state.destroy_registered=false
+    if type(RegisterScriptCallback)=="function" then
+        for event,fn in pairs(state.callbacks) do
+            local ok=pcall(RegisterScriptCallback,event,fn)
+            if event=="actor_on_before_hit" then state.hit_registered=ok end
+            if event=="actor_on_net_destroy" then state.destroy_registered=ok end
+        end
+    end
+    hydrate()
+    local ok,reason=anomaly_donation_bridge_registry.register_builtin("god_mode",{
+        can_execute=can_execute,execute=execute,update=update,on_game_load=load,
+        on_level_changing=suspend,is_supported=supported,support_probe_is_hint=true
+    })
+    if not ok and type(printf)=="function" then printf("[ADB] god_mode registration failed: %s",tostring(reason)) end
+end

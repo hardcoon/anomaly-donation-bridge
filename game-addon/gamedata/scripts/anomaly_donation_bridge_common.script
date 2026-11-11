@@ -1,0 +1,977 @@
+local C = { INVALID_VERTEX = 4294967295, MAX_SECTION_LENGTH = 160 }
+local CP1251_SPECIAL = {
+	[0x80] = 0x0402, [0x81] = 0x0403, [0x82] = 0x201A, [0x83] = 0x0453,
+	[0x84] = 0x201E, [0x85] = 0x2026, [0x86] = 0x2020, [0x87] = 0x2021,
+	[0x88] = 0x20AC, [0x89] = 0x2030, [0x8A] = 0x0409, [0x8B] = 0x2039,
+	[0x8C] = 0x040A, [0x8D] = 0x040C, [0x8E] = 0x040B, [0x8F] = 0x040F,
+	[0x90] = 0x0452, [0x91] = 0x2018, [0x92] = 0x2019, [0x93] = 0x201C,
+	[0x94] = 0x201D, [0x95] = 0x2022, [0x96] = 0x2013, [0x97] = 0x2014,
+	[0x99] = 0x2122, [0x9A] = 0x0459, [0x9B] = 0x203A, [0x9C] = 0x045A,
+	[0x9D] = 0x045C, [0x9E] = 0x045B, [0x9F] = 0x045F, [0xA0] = 0x00A0,
+	[0xA1] = 0x040E, [0xA2] = 0x045E, [0xA3] = 0x0408, [0xA4] = 0x00A4,
+	[0xA5] = 0x0490, [0xA6] = 0x00A6, [0xA7] = 0x00A7, [0xA8] = 0x0401,
+	[0xA9] = 0x00A9, [0xAA] = 0x0404, [0xAB] = 0x00AB, [0xAC] = 0x00AC,
+	[0xAD] = 0x00AD, [0xAE] = 0x00AE, [0xAF] = 0x0407, [0xB0] = 0x00B0,
+	[0xB1] = 0x00B1, [0xB2] = 0x0406, [0xB3] = 0x0456, [0xB4] = 0x0491,
+	[0xB5] = 0x00B5, [0xB6] = 0x00B6, [0xB7] = 0x00B7, [0xB8] = 0x0451,
+	[0xB9] = 0x2116, [0xBA] = 0x0454, [0xBB] = 0x00BB, [0xBC] = 0x0458,
+	[0xBD] = 0x0405, [0xBE] = 0x0455, [0xBF] = 0x0457
+}
+local CP1251_REVERSE = {}
+for byte, codepoint in pairs(CP1251_SPECIAL) do
+	CP1251_REVERSE[codepoint] = byte
+end
+for byte = 0xC0, 0xFF do
+	CP1251_REVERSE[0x0410 + byte - 0xC0] = byte
+end
+
+local function continuation(byte)
+	return byte ~= nil and byte >= 0x80 and byte <= 0xBF
+end
+
+function is_valid_utf8(value)
+	value = tostring(value or "")
+	local index = 1
+	while index <= #value do
+		local first = value:byte(index)
+		if first <= 0x7F then
+			index = index + 1
+		elseif first >= 0xC2 and first <= 0xDF then
+			if not continuation(value:byte(index + 1)) then return false end
+			index = index + 2
+		elseif first == 0xE0 then
+			local second, third = value:byte(index + 1), value:byte(index + 2)
+			if second == nil or second < 0xA0 or second > 0xBF or
+				not continuation(third) then return false end
+			index = index + 3
+		elseif (first >= 0xE1 and first <= 0xEC) or
+			(first >= 0xEE and first <= 0xEF) then
+			if not continuation(value:byte(index + 1)) or
+				not continuation(value:byte(index + 2)) then return false end
+			index = index + 3
+		elseif first == 0xED then
+			local second, third = value:byte(index + 1), value:byte(index + 2)
+			if second == nil or second < 0x80 or second > 0x9F or
+				not continuation(third) then return false end
+			index = index + 3
+		elseif first == 0xF0 then
+			local second = value:byte(index + 1)
+			if second == nil or second < 0x90 or second > 0xBF or
+				not continuation(value:byte(index + 2)) or
+				not continuation(value:byte(index + 3)) then return false end
+			index = index + 4
+		elseif first >= 0xF1 and first <= 0xF3 then
+			if not continuation(value:byte(index + 1)) or
+				not continuation(value:byte(index + 2)) or
+				not continuation(value:byte(index + 3)) then return false end
+			index = index + 4
+		elseif first == 0xF4 then
+			local second = value:byte(index + 1)
+			if second == nil or second < 0x80 or second > 0x8F or
+				not continuation(value:byte(index + 2)) or
+				not continuation(value:byte(index + 3)) then return false end
+			index = index + 4
+		else
+			return false
+		end
+	end
+	return true
+end
+
+local function encode_utf8(codepoint)
+	if codepoint <= 0x7F then return string.char(codepoint) end
+	if codepoint <= 0x7FF then
+		return string.char(0xC0 + math.floor(codepoint / 0x40),
+			0x80 + codepoint % 0x40)
+	end
+	if codepoint <= 0xFFFF then
+		return string.char(0xE0 + math.floor(codepoint / 0x1000),
+			0x80 + math.floor(codepoint / 0x40) % 0x40,
+			0x80 + codepoint % 0x40)
+	end
+	return string.char(0xF0 + math.floor(codepoint / 0x40000),
+		0x80 + math.floor(codepoint / 0x1000) % 0x40,
+		0x80 + math.floor(codepoint / 0x40) % 0x40,
+		0x80 + codepoint % 0x40)
+end
+
+-- X-Ray string tables can expose ANSI/Windows-1251 bytes to Lua.  The bridge
+-- wire is strict UTF-8, so normalize known game text or fail closed.
+function game_text_utf8(value)
+	value = tostring(value or "")
+	if is_valid_utf8(value) then return value end
+	local result = {}
+	for index = 1, #value do
+		local byte = value:byte(index)
+		if byte < 0x80 then
+			result[#result + 1] = string.char(byte)
+		else
+			local codepoint = byte >= 0xC0 and (0x0410 + byte - 0xC0) or
+				CP1251_SPECIAL[byte]
+			if codepoint == nil then return nil end
+			result[#result + 1] = encode_utf8(codepoint)
+		end
+	end
+	local converted = table.concat(result)
+	return is_valid_utf8(converted) and converted or nil
+end
+
+local function decode_utf8_at(value, index)
+	local first = value:byte(index)
+	if first == nil then return nil, index end
+	if first <= 0x7F then return first, index + 1 end
+	local second, third, fourth = value:byte(index + 1), value:byte(index + 2),
+		value:byte(index + 3)
+	if first <= 0xDF then
+		return (first - 0xC0) * 0x40 + (second - 0x80), index + 2
+	end
+	if first <= 0xEF then
+		return (first - 0xE0) * 0x1000 + (second - 0x80) * 0x40 +
+			(third - 0x80), index + 3
+	end
+	return (first - 0xF0) * 0x40000 + (second - 0x80) * 0x1000 +
+		(third - 0x80) * 0x40 + (fourth - 0x80), index + 4
+end
+
+-- news_manager and the stock PDA UI still consume Windows-1251.  Catalog
+-- labels are normalized to UTF-8 for the pipe, so convert them back before
+-- showing them in game.  If a mod already supplied CP1251, preserve it.
+function game_text_cp1251(value)
+	value = tostring(value or "")
+	if not is_valid_utf8(value) then
+		for index = 1, #value do
+			local byte = value:byte(index)
+			if byte >= 0x80 and byte < 0xC0 and CP1251_SPECIAL[byte] == nil then
+				return nil
+			end
+		end
+		return value
+	end
+	local result, index = {}, 1
+	while index <= #value do
+		local codepoint, next_index = decode_utf8_at(value, index)
+		if codepoint == nil then return nil end
+		if codepoint <= 0x7F then
+			result[#result + 1] = string.char(codepoint)
+		else
+			local byte = CP1251_REVERSE[codepoint]
+			if byte == nil then return nil end
+			result[#result + 1] = string.char(byte)
+		end
+		index = next_index
+	end
+	return table.concat(result)
+end
+
+-- Donation messages can contain emoji or characters that Windows-1251 cannot
+-- represent. Keep the rest readable instead of rejecting the entire phrase.
+function game_text_cp1251_lossy(value, replacement)
+	value = tostring(value or "")
+	if not is_valid_utf8(value) then return game_text_cp1251(value) end
+	replacement = tostring(replacement or "?"):sub(1, 1)
+	if replacement == "" or replacement:byte() > 0x7F then replacement = "?" end
+	local result, index = {}, 1
+	while index <= #value do
+		local codepoint, next_index = decode_utf8_at(value, index)
+		if codepoint == nil then return nil end
+		if codepoint <= 0x7F then
+			result[#result + 1] = string.char(codepoint)
+		else
+			local byte = CP1251_REVERSE[codepoint]
+			result[#result + 1] = byte ~= nil and string.char(byte) or replacement
+		end
+		index = next_index
+	end
+	return table.concat(result)
+end
+
+function truncate_utf8(value, maximum_bytes)
+	value = tostring(value or "")
+	maximum_bytes = math.max(0, math.floor(tonumber(maximum_bytes) or 0))
+	if #value <= maximum_bytes then return value end
+	value = value:sub(1, maximum_bytes)
+	while value ~= "" and not is_valid_utf8(value) do value = value:sub(1, -2) end
+	return value
+end
+
+function trim(value)
+	return tostring(value or ""):gsub("^%s*(.-)%s*$", "%1")
+end
+
+function parse_number(value, default_value, minimum, maximum, error_code)
+	local text = tostring(value == nil and default_value or value)
+	if #text > 24 or (not text:match("^[+-]?%d+$") and
+		not text:match("^[+-]?%d+%.%d+$")) then return nil, error_code end
+	local number = tonumber(text)
+	if number == nil or number ~= number or number < minimum or number > maximum then
+		return nil, error_code
+	end
+	return number
+end
+
+function parse_integer(value, default_value, minimum, maximum, error_code)
+	local text = tostring(value == nil and default_value or value)
+	if not text:match("^[+-]?%d+$") then return nil, error_code end
+	local number = tonumber(text)
+	if number == nil or number ~= math.floor(number) or number < minimum or number > maximum then
+		return nil, error_code
+	end
+	return number
+end
+
+function params_only(params, allowed)
+	for key in pairs(params or {}) do
+		if allowed[key] ~= true then return false, "parameter_not_supported" end
+	end
+	return true
+end
+
+function valid_section_id(section)
+	section = tostring(section or "")
+	return section ~= "" and #section <= C.MAX_SECTION_LENGTH and
+		section:match("^[A-Za-z0-9_%.%-]+$") ~= nil
+end
+
+function ini_string(ini, section, key)
+	if ini == nil then return nil end
+	local ok, value = pcall(function()
+		if not ini:section_exist(section) or not ini:line_exist(section, key) then return nil end
+		return ini:r_string(section, key)
+	end)
+	if not ok then return nil end
+	value = trim(value)
+	return value ~= "" and value or nil
+end
+
+function ini_bool(ini, section, key)
+	if ini == nil then return nil end
+	local ok, value = pcall(function()
+		if not ini:section_exist(section) or not ini:line_exist(section, key) then return nil end
+		return ini:r_bool(section, key)
+	end)
+	if not ok then return nil end
+	return value
+end
+
+function section_exists(section)
+	local ok, exists = pcall(function()
+		local ini = system_ini()
+		return ini ~= nil and ini:section_exist(section)
+	end)
+	return ok and exists == true
+end
+
+function meaningful_story_id(value)
+	if value == nil or value == false then return false end
+	if type(value) == "number" then return value > 0 end
+	local text = trim(value):lower()
+	if text == "" or text == "0" or text == "-1" or text == "false" or
+		text == "nil" or text == "none" then return false end
+	return true
+end
+
+function protected_section(section)
+	local ini = system_ini and system_ini() or nil
+	if ini == nil or not valid_section_id(section) or not ini:section_exist(section) then return true end
+	if ini_bool(ini, section, "quest_item") == true then return true end
+	if ini_bool(ini, section, "can_trade") == false then return true end
+	if ini_bool(ini, section, "can_take") == false then return true end
+	if meaningful_story_id(ini_string(ini, section, "story_id")) then return true end
+	return false
+end
+
+function protected_object(item)
+	if item == nil then return true end
+	local ok, section = pcall(function() return item:section() end)
+	if not ok or protected_section(section) then return true end
+	if type(get_object_story_id) ~= "function" then return true end
+	local id_ok, story_id = pcall(function() return get_object_story_id(item:id()) end)
+	if not id_ok or meaningful_story_id(story_id) then return true end
+	return false
+end
+
+function valid_vertex(vertex_id)
+	-- Anomaly 1.5.3 does not export level.valid_vertex_id.  That method belongs
+	-- to CGameGraph and validates game vertices, not level/navigation vertices.
+	-- level.vertex_position is the stock API which resolves a level vertex and
+	-- safely rejects an invalid id when protected by pcall.
+	if type(vertex_id) ~= "number" or vertex_id ~= math.floor(vertex_id) or
+		vertex_id < 0 or vertex_id == C.INVALID_VERTEX or level == nil or
+		type(level.vertex_position) ~= "function" then return false end
+	local ok, position = pcall(level.vertex_position, vertex_id)
+	if not ok or position == nil then return false end
+	local coordinate_ok, x, y, z = pcall(function()
+		return position.x, position.y, position.z
+	end)
+	return coordinate_ok and type(x) == "number" and x == x and
+		type(y) == "number" and y == y and type(z) == "number" and z == z
+end
+
+function safe_points(actor, count, minimum, maximum, attempts, maximum_height_delta,
+	randomize_radius)
+	local start_vertex = actor and actor:level_vertex_id() or nil
+	if not valid_vertex(start_vertex) then return nil, "actor_vertex_invalid" end
+	local origin = actor:position()
+	local points, used = {}, {}
+	local base_angle = math.random() * math.pi * 2
+	local radius_offset = randomize_radius and math.random() or 0
+	attempts = attempts or 240
+	maximum_height_delta = maximum_height_delta or 4
+	for attempt = 0, attempts - 1 do
+		local ratio = randomize_radius and
+			((radius_offset + attempt * 0.61803398875) % 1) or
+			((attempt % 11) / 10)
+		local radius = minimum + (maximum - minimum) * ratio
+		local angle = base_angle + math.rad((attempt * 137.507764) % 360)
+		local direction = vector():set(math.cos(angle), 0, math.sin(angle))
+		local lookup_ok, vertex_id = pcall(function()
+			return level.vertex_in_direction(start_vertex, direction, radius)
+		end)
+		if lookup_ok and valid_vertex(vertex_id) and not used[vertex_id] then
+			local position_ok, snapped = pcall(level.vertex_position, vertex_id)
+			if position_ok and snapped ~= nil then
+				local dx, dz = snapped.x - origin.x, snapped.z - origin.z
+				local distance = math.sqrt(dx * dx + dz * dz)
+				if distance >= minimum and distance <= maximum and
+					math.abs(snapped.y - origin.y) <= maximum_height_delta then
+					used[vertex_id] = true
+					points[#points + 1] = {
+						vertex_id = vertex_id,
+						position = vector():set(snapped.x, snapped.y + 0.10, snapped.z),
+						distance = distance
+					}
+					if #points == count then return points end
+				end
+			end
+		end
+	end
+	return nil, "safe_spawn_vertices_unavailable"
+end
+
+local LEVEL_VERTEX_COUNTS = {}
+
+-- Level vertex ids are a dense zero-based range, but the stock Lua API does not
+-- expose the range length. vertex_in_direction validates an id in native code
+-- before doing any graph work and returns INVALID_VERTEX for an out-of-range
+-- id. Use that safe operation to find the upper bound once per level. This lets
+-- teleport sample the actual AI grid instead of tracing a ray which stops at
+-- the first obstacle.
+local function level_vertex_exists(vertex_id)
+	if type(vertex_id) ~= "number" or vertex_id < 0 or
+		level == nil or type(level.vertex_in_direction) ~= "function" then
+		return false
+	end
+	local ok, resolved = pcall(function()
+		return level.vertex_in_direction(vertex_id, vector():set(1, 0, 0), 0)
+	end)
+	return ok and resolved == vertex_id
+end
+
+local function level_vertex_count(start_vertex)
+	local name_ok, level_name = pcall(function() return level.name() end)
+	if not name_ok or type(level_name) ~= "string" or level_name == "" then
+		return nil
+	end
+	local cached = LEVEL_VERTEX_COUNTS[level_name]
+	if type(cached) == "number" and cached > 0 and
+		level_vertex_exists(cached - 1) and not level_vertex_exists(cached) then
+		return cached
+	end
+
+	local low = math.max(0, math.floor(tonumber(start_vertex) or 0))
+	if not level_vertex_exists(low) then return nil end
+	local high = math.max(1, low + 1)
+	local maximum_probe = 2147483647
+	while high < maximum_probe and level_vertex_exists(high) do
+		low = high
+		high = math.min(maximum_probe, high * 2 + 1)
+	end
+	if level_vertex_exists(high) then return nil end
+
+	-- Find the first invalid id. All ids below it are real level.ai vertices.
+	local left, right = low + 1, high
+	while left < right do
+		local middle = math.floor((left + right) / 2)
+		if level_vertex_exists(middle) then
+			left = middle + 1
+		else
+			right = middle
+		end
+	end
+	LEVEL_VERTEX_COUNTS[level_name] = left
+	return left
+end
+
+local function greatest_common_divisor(left, right)
+	left, right = math.abs(math.floor(left)), math.abs(math.floor(right))
+	while right ~= 0 do left, right = right, left % right end
+	return left
+end
+
+-- Select directly from all real vertices of the current level. A coprime
+-- golden-ratio stride spreads probes across the complete id range without
+-- visiting the same vertex twice. On a small map every real vertex can thus
+-- be checked and the farthest suitable one wins instead of a nearby fallback.
+function random_safe_point(actor, minimum, maximum, attempts, maximum_height_delta,
+	start_vertex_override)
+	local start_vertex = start_vertex_override or
+		(actor and actor:level_vertex_id() or nil)
+	if not valid_vertex(start_vertex) then return nil, "actor_vertex_invalid" end
+	local origin = actor:position()
+	attempts = math.max(120, math.floor(tonumber(attempts) or 720))
+	maximum_height_delta = maximum_height_delta or 4
+	local vertex_count = level_vertex_count(start_vertex)
+	if vertex_count == nil or vertex_count < 1 then
+		return nil, "level_vertex_range_unavailable"
+	end
+
+	local start = math.min(vertex_count - 1,
+		math.floor(math.random() * vertex_count))
+	local step = math.max(1, math.floor(vertex_count * 0.61803398875))
+	while step < vertex_count and greatest_common_divisor(step, vertex_count) ~= 1 do
+		step = step + 1
+	end
+	if step >= vertex_count then step = 1 end
+	local best, best_score = nil, math.huge
+	local probe_count = math.min(vertex_count, attempts)
+	for attempt = 0, probe_count - 1 do
+		local vertex_id = (start + attempt * step) % vertex_count
+		local position_ok, snapped = pcall(level.vertex_position, vertex_id)
+		if position_ok and snapped ~= nil then
+			local dx, dz = snapped.x - origin.x, snapped.z - origin.z
+			local distance = math.sqrt(dx * dx + dz * dz)
+			local height_ok = math.abs(snapped.y - origin.y) <= maximum_height_delta
+			if height_ok then
+				local point = {
+					vertex_id = vertex_id,
+					position = vector():set(snapped.x, snapped.y + 0.10, snapped.z),
+					distance = distance
+				}
+				if distance >= minimum and distance <= maximum then return point end
+				local score = distance < minimum and minimum - distance or distance - maximum
+				if score < best_score and distance >= 10 then
+					best, best_score = point, score
+				end
+			end
+		end
+	end
+
+	if best ~= nil then return best end
+	return nil, "safe_teleport_vertex_unavailable"
+end
+
+local function copy_spawn_point(point)
+	return {
+		vertex_id = point.vertex_id,
+		position = vector():set(point.position.x, point.position.y, point.position.z),
+		distance = point.distance
+	}
+end
+
+local function repeat_spawn_point(point, count)
+	local points = {}
+	for index = 1, count do points[index] = copy_spawn_point(point) end
+	return points
+end
+
+-- Spawning is intentionally more permissive than teleporting the actor.  A
+-- crowded or uneven level often exposes only one usable navigation vertex in
+-- the requested ring.  Reusing that vertex is safe for ALife objects and is
+-- preferable to rejecting a stream effect.  The actor's current navigation
+-- vertex is the final guaranteed fallback while the game is in a playable
+-- state.
+function spawn_points(actor, count, minimum, maximum, attempts)
+	count = math.max(1, math.floor(tonumber(count) or 1))
+	minimum = math.max(1, tonumber(minimum) or 1)
+	maximum = math.max(minimum, tonumber(maximum) or minimum)
+	attempts = math.max(240, math.floor(tonumber(attempts) or 240))
+
+	local points = safe_points(actor, count, minimum, maximum, attempts, math.huge)
+	if points ~= nil then return points, "requested_ring" end
+
+	-- If there are not enough unique vertices, one nearby valid vertex is
+	-- enough: several objects/squads may share it and ALife will separate them.
+	local one = safe_points(actor, 1, 1, math.max(100, maximum),
+		math.max(1200, attempts * 2), math.huge)
+	if one ~= nil then return repeat_spawn_point(one[1], count), "reused_nearby_vertex" end
+
+	local vertex_ok, vertex_id = pcall(function() return actor:level_vertex_id() end)
+	if not vertex_ok or not valid_vertex(vertex_id) then
+		return nil, "actor_vertex_invalid"
+	end
+	local position_ok, position = pcall(level.vertex_position, vertex_id)
+	if not position_ok or position == nil then return nil, "actor_vertex_invalid" end
+	local fallback = {
+		vertex_id = vertex_id,
+		position = vector():set(position.x, position.y + 0.10, position.z),
+		distance = 0
+	}
+	return repeat_spawn_point(fallback, count), "actor_vertex_fallback"
+end
+
+function rollback_server_objects(created)
+	local life = alife and alife() or nil
+	if life == nil then return false end
+	local complete = true
+	for index = #created, 1, -1 do
+		local object = created[index]
+		local ok = pcall(function()
+			if type(object) == "number" then object = life:object(object, true) end
+			if object ~= nil then life:release(object, true) end
+		end)
+		if not ok then complete = false end
+	end
+	return complete
+end
+
+function split_csv(value)
+	value = tostring(value or "")
+	if value == "" then return nil, "selection_empty" end
+	local result, seen = {}, {}
+	for token in (value .. ","):gmatch("(.-),") do
+		token = trim(token)
+		if not valid_section_id(token) or seen[token] then return nil, "selection_invalid" end
+		seen[token] = true
+		result[#result + 1] = token
+		if #result > 256 then return nil, "selection_too_large" end
+	end
+	return result
+end
+
+-- Runtime-only movement leases shared by playable forms. A compatible
+-- speed.add_speed/remove_speed API owns run/runback/sprint; no modpack names,
+-- global monkeypatches, persistent settings or per-frame speed forcing.
+local movement_pending = {}
+local managed_movement_fields = {run_coef=true,runback_coef=true,sprint_koef=true}
+local function movement_number(n)
+	return type(n)=="number" and n==n and math.abs(n)<1e8
+end
+local function movement_equal(a,b)
+	return movement_number(a) and movement_number(b) and math.abs(a-b)<=math.max(0.00001,math.abs(b)*0.00001)
+end
+local function movement_manager_release(manager)
+	local current=rawget(_G,"speed")
+	-- Do not call an obsolete implementation against a newly loaded/replaced
+	-- manager. Keys belong to that exact Lua provider, never a replacement.
+	if current~=manager.source or current.remove_speed~=manager.remove then return true end
+	local complete=true
+	for _,request in ipairs(manager.keys) do
+		if request.owned then
+			local ok=pcall(manager.remove,request.key)
+			if ok then request.owned=false else complete=false end
+		end
+	end
+	return complete
+end
+local function movement_queue(manager)
+	if not manager or manager.queued then return end
+	manager.queued=true;movement_pending[#movement_pending+1]=manager
+end
+function form_movement_recover(a)
+	if not a then return #movement_pending==0 end
+	for i=#movement_pending,1,-1 do
+		if movement_manager_release(movement_pending[i]) then table.remove(movement_pending,i) end
+	end
+	return #movement_pending==0
+end
+function form_movement_apply(a,lease,owner)
+	if not a or type(lease)~="table" then error("form_movement_lease_invalid") end
+	if lease.started then error("form_movement_lease_reused") end
+	if not form_movement_recover(a) then error("form_movement_cleanup_pending") end
+	lease.started=true
+	local provider=rawget(_G,"speed")
+	local managed=type(provider)=="table" and type(provider.add_speed)=="function" and type(provider.remove_speed)=="function"
+	local ratios={}
+	for _,entry in ipairs(lease) do
+		if entry.key=="run_coef" or entry.key=="sprint_koef" then
+			if not movement_number(entry.before) or entry.before<=0 then error("form_movement_baseline_invalid") end
+			ratios[entry.key]=entry.applied/entry.before
+		end
+	end
+	if managed and next(ratios) then
+		local manager={source=provider,remove=provider.remove_speed,keys={}}
+		lease.manager=manager
+		for _,entry in ipairs(lease) do entry.managed=managed_movement_fields[entry.key]==true end
+		for _,field in ipairs({"run_coef","sprint_koef"}) do
+			local ratio=ratios[field]
+			if ratio then
+				if not movement_number(ratio) or ratio<=0 then error("form_movement_modifier_invalid") end
+				local request={key="adb:"..tostring(owner)..":"..tostring(lease)..":"..field,owned=true}
+				manager.keys[#manager.keys+1]=request -- also roll back a provider throwing AFTER its write
+				local ok,result=pcall(provider.add_speed,request.key,ratio,field=="sprint_koef",false)
+				if ok and result==false then request.owned=false end -- never remove a rejected existing key
+				if not ok or result~=true then error("form_movement_manager_setup_failed") end
+			end
+		end
+	end
+	for _,entry in ipairs(lease) do
+		if not entry.managed then
+			entry.attempted=true
+			a["set_actor_"..entry.key](a,entry.applied)
+			if not movement_equal(a["get_actor_"..entry.key](a),entry.applied) then error("form_movement_setup_failed") end
+		end
+	end
+end
+function form_movement_release(a,lease)
+	if type(lease)~="table" or lease.released then return end
+	lease.released=true
+	if a then
+		for _,entry in ipairs(lease) do
+			if entry.attempted and not entry.managed then pcall(function()
+				if movement_equal(a["get_actor_"..entry.key](a),entry.applied) then a["set_actor_"..entry.key](a,entry.before) end
+			end) end
+		end
+	end
+	if lease.manager and (not a or not movement_manager_release(lease.manager)) then movement_queue(lease.manager) end
+end
+function form_movement_defer(lease)
+	-- on_game_load runs after native world/HUD destruction. Keep only owned
+	-- Lua provider/key data, never old actor/window userdata; clean next update.
+	if type(lease)=="table" then movement_queue(lease.manager) end
+end
+function form_movement_update(a,lease)
+	if not a or type(lease)~="table" then return false end
+	form_movement_recover(a)
+	if lease.released then return true end
+	local changed=lease.manager and rawget(_G,"speed")~=lease.manager.source
+	for _,entry in ipairs(lease) do
+		if entry.attempted and not entry.managed and not movement_equal(a["get_actor_"..entry.key](a),entry.applied) then changed=true end
+	end
+	if changed then
+		-- An unknown native writer wins. Yield the WHOLE profile, so a foreign
+		-- run coefficient cannot compound our accelerated walk. Keep the form,
+		-- restore only still-owned fields, and never fight the writer each frame.
+		form_movement_release(a,lease)
+		for _,entry in ipairs(lease) do entry.attempted=false end
+	end
+	return true
+end
+
+-- Only permission to resume lives in process RAM. The plain snapshot may be
+-- serialized by Anomaly; a new process (or an explicit quit) cannot revive it.
+-- A process-local environment variable survives Lua VM reloads during F9.
+local FORM_OWNER_ENV="ADB_FORM_SAVE_OWNER_V1"
+local form_session_ffi,form_session_kernel,form_session_checked
+local function form_session_api()
+	if form_session_checked then return form_session_kernel end
+	form_session_checked=true
+	local ok,ffi=pcall(require,"ffi")
+	if not ok then return nil end
+	pcall(ffi.cdef,[[
+		unsigned long __stdcall GetCurrentProcessId(void);
+		unsigned long __stdcall GetEnvironmentVariableA(const char* name, char* buffer, unsigned long size);
+		int __stdcall SetEnvironmentVariableA(const char* name, const char* value);
+	]])
+	local loaded,kernel=pcall(ffi.load,"kernel32")
+	if loaded then form_session_ffi=ffi;form_session_kernel=kernel end
+	return form_session_kernel
+end
+local function form_owner_read()
+	local kernel=form_session_api();if not kernel then return nil end
+	local ok,size=pcall(kernel.GetEnvironmentVariableA,FORM_OWNER_ENV,nil,0)
+	size=ok and tonumber(size) or 0
+	if size<=1 or size>256 then return nil end
+	local buffer=form_session_ffi.new("char[?]",size)
+	local read,length=pcall(kernel.GetEnvironmentVariableA,FORM_OWNER_ENV,buffer,size)
+	length=read and tonumber(length) or 0
+	if length<=0 or length>=size then return nil end
+	return form_session_ffi.string(buffer,length)
+end
+local function form_owner_token(create)
+	local kernel=form_session_api();if not kernel then return nil end
+	local ok,id=pcall(kernel.GetCurrentProcessId);id=ok and tonumber(id) or nil
+	if not id or id<=0 then return nil end
+	local text=form_owner_read()
+	local owner,token
+	if text then owner,token=text:match("^(%d+)|([%w%-]+)$") end
+	if tonumber(owner)==id and token and #token<=96 then return token end
+	if not create then return nil end
+	local now=type(time_global)=="function" and time_global() or 0
+	token=tostring(id).."-"..tostring(os.time()).."-"..tostring(math.floor(now)).."-"..tostring(math.random(1,2147483646))
+	local record=tostring(id).."|"..token
+	local written,result=pcall(kernel.SetEnvironmentVariableA,FORM_OWNER_ENV,record)
+	return written and tonumber(result)~=0 and form_owner_read()==record and token or nil
+end
+function form_save_session_end()
+	local kernel=form_session_api()
+	if kernel then pcall(kernel.SetEnvironmentVariableA,FORM_OWNER_ENV,nil) end
+end
+local function form_saved_number(value,minimum,maximum)
+	return type(value)=="number" and value==value and value>=minimum and value<=maximum
+end
+local function copy_saved_form(record,handler)
+	if type(record)~="table" or record.version~=1 or record.handler~=handler or
+		type(record.owner)~="string" or #record.owner>96 or
+		not form_saved_number(record.remaining,0.001,60000000) or
+		not form_saved_number(record.actor_health,0.000001,99999999) or
+		not form_saved_number(record.form_max_health,0.000001,1000) or
+		not form_saved_number(record.form_health,0.000001,record.form_max_health) or
+		type(record.actor_visual)~="string" or #record.actor_visual<1 or #record.actor_visual>512 or
+		not form_saved_number(record.yaw,-99999999,99999999) or
+		not form_saved_number(record.pitch,-2,2) or
+		(record.camera_mode~="center" and record.camera_mode~="side") or
+		type(record.params)~="table" or type(record.cooldowns)~="table" or
+		type(record.level_name)~="string" or #record.level_name>128 then return nil end
+	local result={version=1,owner=record.owner,handler=handler,remaining=record.remaining,
+		actor_health=record.actor_health,actor_visual=record.actor_visual,level_name=record.level_name,
+		form_health=record.form_health,form_max_health=record.form_max_health,
+		yaw=record.yaw,pitch=record.pitch,camera_mode=record.camera_mode,params={},cooldowns={},
+		ability_mode=record.ability_mode==2 and 2 or 1,
+		anomaly_type=form_saved_number(record.anomaly_type,1,4) and math.floor(record.anomaly_type) or 1,
+		bite_index=form_saved_number(record.bite_index,1,3) and math.floor(record.bite_index) or 1}
+	local count=0
+	for key,value in pairs(record.params) do
+		count=count+1
+		if count>32 or type(key)~="string" or #key>64 or type(value)~="string" or #value>4096 then return nil end
+		result.params[key]=value
+	end
+	count=0
+	for key,value in pairs(record.cooldowns) do
+		count=count+1
+		if count>16 or type(key)~="string" or #key>32 or not form_saved_number(value,0,60000000) then return nil end
+		result.cooldowns[key]=value
+	end
+	return result
+end
+function form_save_snapshot(s,handler,now,paused)
+	if type(s)~="table" or type(s.params)~="table" then return nil end
+	local owner=form_owner_token(true);if not owner then return nil end
+	local live=type(s.last)=="number"
+	local record={version=1,owner=owner,handler=handler,
+		remaining=s.remaining,actor_health=s.actor_health,actor_visual=s.actor_visual,
+		level_name=level and type(level.name)=="function" and level.name() or "",
+		form_health=s.form_health,form_max_health=s.form_max_health,
+		yaw=s.yaw,pitch=s.pitch,camera_mode=s.camera_mode,params={},cooldowns={},
+		ability_mode=s.ability_mode,anomaly_type=s.anomaly_type,bite_index=s.bite_index}
+	if live and not paused then record.remaining=record.remaining-math.max(0,now-s.last) end
+	for key,value in pairs(s.params) do record.params[key]=value end
+	if type(s.section)=="string" then record.params.mutant_sections=s.section end
+	for key,value in pairs(s.cooldowns or {}) do record.cooldowns[key]=live and math.max(0,value-now) or value end
+	return copy_saved_form(record,handler)
+end
+function form_load_snapshot(record,handler,a)
+	local owner=form_owner_token(false)
+	if not owner or type(record)~="table" or record.owner~=owner then return nil end
+	local result=copy_saved_form(record,handler)
+	if not result or not a or not a:alive() or a:get_visual_name()~=result.actor_visual then return nil end
+	if result.level_name~="" and level and type(level.name)=="function" and level.name()~=result.level_name then return nil end
+	local health=tonumber(a.health)
+	if not form_saved_number(health,0.000001,99999999) or math.abs(health-result.actor_health)>0.00001 then return nil end
+	-- All native objects, active attacks, held physics, zones, controlled NPCs
+	-- and temporary invisibility/shields are recreated or released separately.
+	-- Never carry their old world identities into a loaded scene.
+	result.actor_id=a:id();result.requests={};result.from_save=true
+	result.shield=0;result.zones={};result.servants={};result.cloaked=false
+	return result
+end
+
+-- Form guards own no persistent actor modifiers or timers. The caller supplies
+-- only its currently live form; suspended/finished forms never call these.
+local function form_guard_ready(s,a)
+	if not s or not a or not a:alive() or a:id()~=s.actor_id or a:get_visual_name()~=s.actor_visual then return false end
+	local now=time_global()
+	if not s.remaining or s.remaining-math.max(0,now-(s.last or now))<=0 then return false end
+	if type(app_ready)=="function" and not app_ready() then return false end
+	local d=device()
+	if d:is_paused() or (tonumber(d.precache_frame) or 0)>0 then return false end
+	if level and type(level.present)=="function" and not level.present() then return false end
+	return true
+end
+local function form_guard_error(s,kind,reason)
+	if not s then return end
+	s.guard_errors=s.guard_errors or {}
+	if s.guard_errors[kind] then return end
+	s.guard_errors[kind]=true
+	if type(printf)=="function" then pcall(printf,"[ADB] form %s: %s",kind,tostring(reason)) end
+end
+function form_equipment_before_hit(s,a,h,bone,flags)
+	if not s then return end
+	s.equipment_hit=nil
+	if not h or type(flags)~="table" or flags.ret_value==false then return end
+	local ok,reason=pcall(function()
+		if not form_guard_ready(s,a) then return end
+		local saved={frame=device().frame,stamp=time_global(),kind=h.type,bone=bone,items={}}
+		-- Native Anomaly outfit/helmet slots. Keep only scalar identities, never
+		-- inventory userdata across callbacks or snapshots of already damaged gear.
+		for _,slot in ipairs({7,12}) do
+			local item=a:item_in_slot(slot)
+			if item then
+				local condition=tonumber(item:condition())
+				if form_saved_number(condition,0,1) then
+					saved.items[#saved.items+1]={slot=slot,id=item:id(),name=item:name(),section=item:section(),condition=condition}
+				end
+			end
+		end
+		s.equipment_hit=saved
+	end)
+	if not ok then form_guard_error(s,"equipment snapshot",reason) end
+end
+function form_equipment_after_hit(s,a,h,bone)
+	if not s then return end
+	local saved=s.equipment_hit;s.equipment_hit=nil
+	if not saved or not h then return end
+	local ok,ready=pcall(function()
+		return form_guard_ready(s,a) and saved.frame==device().frame and saved.stamp==time_global() and
+			saved.kind==h.type and saved.bone==bone
+	end)
+	if not ok or not ready then return end
+	-- HitOutfitEffect wears armor BEFORE CBeforeHitAfterCalcs. Undo just that
+	-- hit's wear, after native protection has calculated the form's real damage.
+	for _,entry in ipairs(saved.items) do
+		local restored,reason=pcall(function()
+			local item=a:item_in_slot(entry.slot)
+			if not item or item:id()~=entry.id or item:name()~=entry.name or item:section()~=entry.section then return end
+			local condition=tonumber(item:condition())
+			if form_saved_number(condition,0,1) and condition<entry.condition then item:set_condition(entry.condition) end
+		end)
+		if not restored then form_guard_error(s,"equipment restore "..entry.slot,reason) end
+	end
+end
+function form_restore_conditions(s,a)
+	local ok,ready=pcall(form_guard_ready,s,a)
+	if not ok or not ready then return end
+	local now=time_global()
+	-- SetPower is an absolute native property. Refill once per live form frame,
+	-- before the slower wound/psy cleanup, so sprinting/jumping cannot exhaust
+	-- the human actor. No movement coefficients or permanent actor flags change.
+	if s.power_frame~=device().frame then
+		s.power_frame=device().frame
+		local restored,reason=pcall(function() a.power=1 end)
+		if not restored then form_guard_error(s,"power",reason) end
+	end
+	if s.conditions_at and now<s.conditions_at then return end
+	-- Mark before optional native/script calls, so failures cannot spam a frame.
+	s.conditions_at=now+1000
+	for _,entry in ipairs({{"radiation",0},{"bleeding",1},{"psy_health",1}}) do
+		-- bleeding uses ChangeBleeding(percent): 1 removes all wounds, 0 none.
+		local restored,reason=pcall(function() a[entry[1]]=entry[2] end)
+		if not restored then form_guard_error(s,entry[1],reason) end
+	end
+	local restored,reason=pcall(function()
+		local psy=rawget(_G,"arszi_psy")
+		if type(psy)=="table" and type(psy.get_psy_health)=="function" and type(psy.set_psy_health)=="function" then
+			local value=psy.get_psy_health()
+			if type(value)=="number" and value==value and math.abs(value)<math.huge then psy.set_psy_health(1) end
+		end
+	end)
+	if not restored then form_guard_error(s,"script psy health",reason) end
+end
+
+-- Opt-in, bounded, read-only damage diagnostics. Disabled by default and never
+-- serialized. Console (-dbg, lowercases arguments): run_string adb_form_hit_trace=3
+-- Existing form callbacks supply samples; no foreign callback is replaced.
+local function form_hit_trace_budget()
+	local count=rawget(_G,"adb_form_hit_trace")
+	if type(count)~="number" or count~=count or count<1 or count==math.huge then return 0 end
+	return math.min(20,math.floor(count))
+end
+function form_hit_calculated(s,h,target)
+	if form_hit_trace_budget()==0 or not s or not h or not target or not h.draftsman then return end
+	if h.weapon_id~=65535 or h.draftsman:id()~=s.actor_id or target:id()==s.actor_id then return end
+	for _,check in ipairs(s.hit_checks or {}) do
+		if check.calculated_at_adb==nil and check.id==target:id() and check.section==target:section() and
+			check.hit_type==h.type and check.impulse==h.impulse then
+			check.calculated_at_adb=tonumber(h.power)
+			return
+		end
+	end
+end
+function form_hit_report(owner,check,after)
+	local budget=form_hit_trace_budget()
+	if budget==0 or type(check)~="table" or type(printf)~="function" then return end
+	rawset(_G,"adb_form_hit_trace",budget-1)
+	-- This is the power observed by our post-calculation callback, NOT a claim
+	-- to run after every foreign callback. The HP delta is measured separately.
+	pcall(printf,"[ADB-HIT] form=%s target=%s type=%s sent=%s calculated_at_adb=%s hp_loss_pct=%.6g weapon=65535",
+		tostring(owner),tostring(check.section),tostring(check.hit_type),tostring(check.submitted),
+		tostring(check.calculated_at_adb or "not_observed"),math.max(0,check.before-after)*100)
+end
+
+-- ADB service-save retention only. Never use the game's global quicksave
+-- limit or its broad delete-save helper: both can touch unrelated saves.
+local function adb_save_stem(name)
+	if type(name)~="string" or #name>240 or name:sub(1,1)=="." or
+		name:find('[/\\:%z\1-\31\127*?<>|"]') then return end
+	local stem=name:lower():match("^(.-)%.scop$")
+	if not stem then return end
+	local player,phase,tick,sequence=stem:match("^(.+) %- adb %- ([a-z]+)_(%d+)_(%d+)$")
+	if not player or (phase~="before" and phase~="after") or #tick>12 or #sequence>10 then return end
+	return name:sub(1,-6),tonumber(tick),tonumber(sequence)
+end
+
+function prune_effect_saves(limit,current_name)
+	limit=limit==nil and 50 or tonumber(limit)
+	if not limit or limit%1~=0 or limit<0 or limit>10000 then return false,"save_retention_invalid" end
+	if limit==0 then return true,0,0 end
+	local current=tostring(current_name or "")..".scop"
+	if not adb_save_stem(current) then return false,"new_adb_save_name_invalid" end
+	if type(getFS)~="function" or not FS then return false,"save_fs_unavailable" end
+	local fs=getFS()
+	if not fs or type(fs.exist)~="function" or type(fs.file_delete)~="function" or
+		type(fs.file_list_open_ex)~="function" or type(fs.update_path)~="function" or
+		type(fs.file_length)~="function" then return false,"save_fs_unavailable" end
+	-- A console save can be refused without throwing. Do not remove ANYTHING
+	-- unless the new primary file is actually present in the engine save alias.
+	if not fs:exist("$game_saves$",current) then return false,"new_save_not_confirmed" end
+	local root=fs:update_path("$game_saves$","")
+	if type(root)~="string" or #root<4 then return false,"save_root_invalid" end
+	root=root:gsub("/","\\"):gsub("\\+$",""):lower().."\\"
+	local function checked(name)
+		local path=fs:update_path("$game_saves$",name)
+		return type(path)=="string" and path:gsub("/","\\"):lower()==root..name:lower()
+	end
+	if not checked(current) then return false,"save_path_outside_alias" end
+	local size=fs:file_length(fs:update_path("$game_saves$",current))
+	if type(size)~="number" or size<=0 or size==4294967295 then return false,"new_save_empty_or_unreadable" end
+	local list=fs:file_list_open_ex("$game_saves$",FS.FS_ListFiles+FS.FS_RootOnly,"*.scop")
+	if not list then return false,"save_list_unavailable" end
+	list:Sort(FS.FS_sort_by_modif_down)
+	local count=list:Size()
+	if type(count)~="number" or count%1~=0 or count<0 or count>100000 then return false,"save_list_invalid" end
+	local owned,seen={},{}
+	for index=0,count-1 do
+		local file=list:GetAt(index)
+		local name=file:NameShort()
+		local stem,tick,sequence=adb_save_stem(name)
+		if stem and not seen[name:lower()] then
+			seen[name:lower()]=true
+			if not checked(name) then return false,"save_path_outside_alias" end
+			if not checked(stem..".scoc") or not checked(stem..".dds") then return false,"save_path_outside_alias" end
+			if name:lower()~=current:lower() then
+				owned[#owned+1]={name=name,stem=stem,tick=tick,sequence=sequence,index=index,
+					stamp=type(file.Modif)=="function" and file:Modif() or nil}
+			end
+		end
+	end
+	-- Native FS modification times have second precision. Multiple saves made
+	-- during that second need the generator's millisecond/sequence tie-break.
+	table.sort(owned,function(a,b)
+		if a.stamp and a.stamp==b.stamp then
+			if a.tick~=b.tick then return a.tick>b.tick end
+			if a.sequence~=b.sequence then return a.sequence>b.sequence end
+		end
+		return a.index<b.index
+	end)
+	-- Pin the just-created save even with identical timestamps/cache ordering.
+	local removed,failed=0,0
+	for index=limit,#owned do
+		local entry=owned[index]
+		local ok=pcall(function()
+			fs:file_delete("$game_saves$",entry.name)
+			if fs:exist("$game_saves$",entry.name) then error("main_delete_failed") end
+			removed=removed+1
+			-- Main first: a denied delete must NOT leave a loadable .scop with
+			-- its indispensable .scoc removed. Only these literal sidecars.
+			for _,extension in ipairs({".scoc",".dds"}) do
+				local name=entry.stem..extension
+				if not checked(name) then error("companion_path_outside_alias") end
+				if fs:exist("$game_saves$",name) then
+					fs:file_delete("$game_saves$",name)
+					if fs:exist("$game_saves$",name) then error("companion_delete_failed") end
+				end
+			end
+		end)
+		if not ok then failed=failed+1 end
+	end
+	return true,removed,failed
+end

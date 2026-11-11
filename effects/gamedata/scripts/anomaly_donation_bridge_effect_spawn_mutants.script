@@ -1,0 +1,87 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_mutants",
+  "displayName": "Заспавнить мутантов",
+  "description": "Создаёт выбранных мутантов из свежего безопасного каталога установленной игры.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "section_id",
+      "displayName": "Мутант",
+      "kind": "Choice",
+      "catalogKind": "Mutant",
+      "defaultValue": ""
+    },
+    {
+      "key": "count",
+      "displayName": "Количество",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 99,
+      "defaultValue": "3"
+    },
+    {
+      "key": "random_group",
+      "displayName": "Создавать случайную группу из добавленных",
+      "kind": "Choice",
+      "options": [
+        "true",
+        "false"
+      ],
+      "defaultValue": "false"
+    },
+    {
+      "key": "radius_meters",
+      "displayName": "Радиус появления, м",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 500,
+      "defaultValue": "25"
+    },
+    {
+      "key": "spawn_point_method",
+      "displayName": "Способ поиска места появления",
+      "kind": "Choice",
+      "options": [
+        "boss_sample",
+        "legacy",
+        "graph",
+        "scan",
+        "coordinates"
+      ],
+      "optionLabels": {
+        "boss_sample": "Случайные точки локации (рекомендуется)",
+        "legacy": "По прямой от игрока",
+        "graph": "С обходом препятствий",
+        "scan": "Полный поиск по локации",
+        "coordinates": "Случайные координаты"
+      },
+      "defaultValue": "boss_sample"
+    }
+  ],
+  "parameters": {
+    "section_id": "",
+    "count": "3",
+    "random_group": "false",
+    "radius_meters": "25",
+    "spawn_point_method": "boss_sample"
+  },
+  "spawnGroups": [
+    {
+      "variantId": "",
+      "strength": "any",
+      "count": 3
+    }
+  ]
+}
+ADB_PRESET_END]]
+
+function on_game_start()
+	local descriptor = anomaly_donation_bridge_effects_direct_spawn.descriptor("mutant")
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin("spawn_mutants", descriptor)
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_mutants registration failed: %s", tostring(reason))
+	end
+end

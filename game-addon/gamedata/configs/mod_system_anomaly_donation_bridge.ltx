@@ -1,0 +1,124 @@
+![dialogs]
+>files = dialogs_anomaly_donation_bridge
+
+; Inherit the selected modpack's MERGED standard helicopter, not a copied
+; visual/weapon/flight configuration. Only this boss gets our binder/immunity.
+[adb_helicopter_boss]:helicopter
+adb_heli_profile = 1
+script_binding = anomaly_donation_bridge_effect_hardcoon_adb_helicopter_boss.bind
+immunities_sect = adb_helicopter_boss_immunities
+use_mgun = true
+use_rocket = false
+faction = adb_helicopter_boss
+
+; Native CHelicopter::Hit handles the actual damage and weak points. Positive
+; projectile/melee coefficients ensure normal weapons can damage this boss.
+[adb_helicopter_boss_immunities]
+burn_immunity = 0.01
+strike_immunity = 0.01
+shock_immunity = 0.01
+wound_immunity = 0.01
+radiation_immunity = 0.01
+telepatic_immunity = 0.01
+chemical_burn_immunity = 0.01
+fire_wound_immunity = 0.01
+explosion_immunity = 0.1
+
+; Independent support helicopter; never installs the boss's hostile binder.
+[adb_helicopter_companion]:helicopter
+adb_heli_profile = 1
+script_binding = anomaly_donation_bridge_effect_hardcoon_adb_helicopter_companion.bind
+immunities_sect = adb_helicopter_boss_immunities
+use_mgun = true
+use_rocket = false
+faction = adb_helicopter_companion
+
+; The source model is selected in Lua before this private car goes online.
+[adb_btr_companion]:veh_btr
+script_binding = anomaly_donation_bridge_btr_ai.bind
+on_before_hit = anomaly_donation_bridge_btr_ai.before_hit
+
+; A private cutscene-style actor double. No original section or NPC binder is
+; changed. The stock profile has no supplies; only a temporary guitar is added.
+[adb_guitar_double]:actor_visual_stalker
+script_binding = anomaly_donation_bridge_effect_hardcoon_adb_play_guitar.bind
+immunities_sect = adb_guitar_double_immunities
+can_select_items = off
+going_item_detect_probability = 0
+search_item_detect_probability = 0
+
+[adb_guitar_double_immunities]
+burn_immunity = 0
+strike_immunity = 0
+shock_immunity = 0
+wound_immunity = 0
+radiation_immunity = 0
+telepatic_immunity = 0
+chemical_burn_immunity = 0
+fire_wound_immunity = 0
+explosion_immunity = 0
+
+; Private human profile: appearance only, no actor-double logic or supplies.
+[adb_wandering_trader]:stalker_silent
+character_profile = actor_visual_stalker
+custom_data = scripts\anomaly_donation_bridge_wandering_trader.ltx
+immunities_sect = adb_guitar_double_immunities
+can_select_items = off
+going_item_detect_probability = 0
+search_item_detect_probability = 0
+
+; Private native holder: never use deployable_mgun, whose stock detach
+; callback destroys it and gives the actor a portable inventory item.
+[adb_stationary_mgun]:stationary_mgun
+script_binding = anomaly_donation_bridge_effect_hardcoon_adb_stationary_mgun.bind
+visual = anomaly_donation_bridge\stationary_mgun.ogf
+net_spawn_after = anomaly_donation_bridge_effect_hardcoon_adb_stationary_mgun.net_spawn_after
+adb_stationary_profile = 4
+ammo_mag_size = 1
+ammo_elapsed = 1
+unlimited_ammo = true
+overheat_enabled = false
+lock_enter = false
+lock_exit = false
+
+; Speed is read by native net_Spawn from each private model's userdata.
+; No live skeleton swap, shared config mutation or simulated mouse input.
+[adb_stationary_mgun_r020]:adb_stationary_mgun
+visual = anomaly_donation_bridge\stationary_mgun_r020.ogf
+adb_rotation_speed_dps = 20
+[adb_stationary_mgun_r040]:adb_stationary_mgun
+visual = anomaly_donation_bridge\stationary_mgun_r040.ogf
+adb_rotation_speed_dps = 40
+[adb_stationary_mgun_r060]:adb_stationary_mgun
+visual = anomaly_donation_bridge\stationary_mgun_r060.ogf
+adb_rotation_speed_dps = 60
+[adb_stationary_mgun_r090]:adb_stationary_mgun
+visual = anomaly_donation_bridge\stationary_mgun_r090.ogf
+adb_rotation_speed_dps = 90
+[adb_stationary_mgun_r120]:adb_stationary_mgun
+visual = anomaly_donation_bridge\stationary_mgun_r120.ogf
+adb_rotation_speed_dps = 120
+
+; Zero yaw pair disables the camera clamp entirely (not +/-180 with stops).
+; Inherit pitch/rotation tuning from the actual build; no stock camera changes.
+[adb_stationary_mgun_first_cam]:mounted_weapon_cam
+lim_yaw = 0, 0
+
+[adb_stationary_mgun_chase_cam]:actor_look_cam
+lim_yaw = 0, 0
+
+; Native grenade explosion at the expired turret's position, without shards.
+; Created only after confirmed dismount, never attached to actor/inventory.
+[adb_stationary_mgun_blast]:grenade_rgd5
+can_take = false
+can_trade = false
+cost = 0
+blast = 1
+blast_r = 2
+blast_impulse = 30
+frags = 0
+frag_hit = 0
+frags_r = 0
+destroy_time = 60000
+explode_duration = 1
+grenade_remove_time = 10000

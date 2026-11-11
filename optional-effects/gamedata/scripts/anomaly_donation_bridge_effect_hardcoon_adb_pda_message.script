@@ -1,0 +1,65 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.pda_message",
+  "displayName": "Отправить сообщение в КПК",
+  "description": "Показывает в КПК ник донатера и текст доната. При победе в голосовании — название голосования и победившего шаблона. Подходит для варианта «Ничего не делать»: только сообщение, без изменений в игровом мире.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [],
+  "parameters": {},
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local ACTION_ID = "hardcoon.adb.pda_message"
+
+local function display_text(value, maximum_bytes)
+    local common = anomaly_donation_bridge_common
+    local text = tostring(value or ""):gsub("[%z\1-\31\127]", " ")
+    -- Donor input is plain text, not UI colour markup or executable Lua.
+    text = text:gsub("%%c%[[^%]]*%]", ""):gsub("%s+", " ")
+    text = common.truncate_utf8(common.trim(text), maximum_bytes)
+    return common.game_text_cp1251_lossy(text, "?") or ""
+end
+
+local function supported()
+    local manager = rawget(_G, "news_manager")
+    if type(manager) ~= "table" or type(manager.send_tip) ~= "function" then
+        return false, "pda_message_api_unavailable"
+    end
+    return true
+end
+
+local function can_execute(context, params)
+    local valid, reason = anomaly_donation_bridge_common.params_only(params,
+        { donor_name = true, donation_message = true })
+    if not valid then return false, "rejected", reason end
+    if context.actor == nil then return false, "deferred", "actor_unavailable" end
+    local available, api_reason = supported()
+    if not available then return false, "rejected", api_reason end
+    local donor = display_text(params.donor_name, 384)
+    if donor == "" then donor = display_text("Аноним", 384) end
+    context.message = "%c[255,238,153,26]" .. donor .. "%c[default]: " ..
+        display_text(params.donation_message, 2048)
+    return true
+end
+
+local function execute(context)
+    local sent = pcall(news_manager.send_tip, context.actor, context.message,
+        nil, nil, 6000)
+    if not sent then return "uncertain", "pda_message_send_failed" end
+    return "executed", "pda_message_sent"
+end
+
+function on_game_start()
+    local ok, reason = anomaly_donation_bridge_registry.register(ACTION_ID, {
+        can_execute = can_execute,
+        execute = execute,
+        is_supported = supported
+    })
+    if not ok and type(printf) == "function" then
+        printf("[ADB] " .. ACTION_ID .. " registration failed: " .. tostring(reason))
+    end
+end

@@ -1,0 +1,90 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "hardcoon.adb.special_companion",
+  "displayName": "Напарник с именем данатчика (особый визуал)",
+  "description": "Создаёт напарника с именем донатчика, рангом «Мастер» и особой внешностью из установленной сборки. Модель и портрет берутся из одного профиля персонажа. Список содержит модели уникальных NPC, прошедшие проверку ресурсов и отсутствующие среди обычных напарников. Сюжетная логика не переносится. Голосовые реплики отключены; шаги и выстрелы сохраняются. Настройки урона, группировки и 3D ника — как у обычного напарника.",
+  "category": "npc_mutants",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "section_id",
+      "displayName": "Особая внешность",
+      "kind": "Choice",
+      "catalogKind": "NpcVisual",
+      "defaultValue": ""
+    },
+    {
+      "key": "random_npc",
+      "displayName": "Случайная особая внешность (из списка)",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "false"
+    },
+    {
+      "key": "use_player_faction",
+      "displayName": "Спавнить напарника группировкой игрока",
+      "kind": "Choice",
+      "options": [
+        "false",
+        "true"
+      ],
+      "defaultValue": "true"
+    },
+    {
+      "key": "radius_meters",
+      "displayName": "Радиус появления, м",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 100,
+      "defaultValue": "25"
+    },
+    {
+      "key": "incoming_damage_percent",
+      "displayName": "Получаемый урон, %",
+      "kind": "Integer",
+      "minimum": 1,
+      "maximum": 100,
+      "defaultValue": "100"
+    },
+    {
+      "key": "nickname_visibility",
+      "displayName": "3D ник по умолчанию",
+      "kind": "Choice",
+      "options": [
+        "show",
+        "hide"
+      ],
+      "optionLabels": {
+        "show": "Показывать",
+        "hide": "Не показывать"
+      },
+      "defaultValue": "hide"
+    },
+    {
+      "key": "nickname_key",
+      "displayName": "Переключить 3D ники (по умолчанию PageUp)",
+      "kind": "KeyboardKey",
+      "defaultValue": "PRIOR"
+    }
+  ],
+  "parameters": {
+    "section_id": "",
+    "random_npc": "false",
+    "use_player_faction": "true",
+    "radius_meters": "25",
+    "incoming_damage_percent": "100",
+    "nickname_visibility": "hide",
+    "nickname_key": "PRIOR"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+function on_game_start()
+    anomaly_donation_bridge_named_companion.register("hardcoon.adb.special_companion",true)
+end

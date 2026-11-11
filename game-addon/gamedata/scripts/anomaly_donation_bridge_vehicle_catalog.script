@@ -1,0 +1,339 @@
+-- Read only the OGF chunks needed to qualify a native car. Do not ask the
+-- renderer to instantiate an unknown model just to list it in the catalog.
+local function value(ini, section, key)
+    if ini and ini:section_exist(section) and ini:line_exist(section,key) then
+        return ini:r_string(section,key)
+    end
+end
+
+local function asset_path(path)
+    return type(path)=="string" and #path<=180 and not path:find("..",1,true)
+        and path:match("^[%w_][%w_%.%-%/\\]*$")~=nil
+end
+
+local function read_string(reader, limit)
+    local bytes={}
+    while reader:r_tell()<limit and #bytes<255 do
+        local byte=reader:r_u8()
+        if byte==0 then return table.concat(bytes) end
+        bytes[#bytes+1]=string.char(byte)
+    end
+end
+
+local function read_u32(file)
+    local a,b,c,d=file:read(4):byte(1,4)
+    return a+b*256+c*65536+d*16777216
+end
+
+local function file_reader(file)
+    local size=file:seek("end")
+    if not size or size<52 or size>32*1024*1024 then return end
+    file:seek("set",0)
+    return {
+        r_elapsed=function() return size end,
+        r_tell=function() return file:seek() end,
+        r_seek=function(_,offset) file:seek("set",offset) end,
+        r_u8=function() return file:read(1):byte() end,
+        r_u16=function()
+            local a,b=file:read(2):byte(1,2)
+            return a+b*256
+        end,
+        r_u32=function() return read_u32(file) end,
+        r_float=function()
+            local bits=read_u32(file)
+            local sign=bits>=2147483648 and -1 or 1
+            local exponent=math.floor(bits/8388608)%256
+            local fraction=(bits%8388608)/8388608
+            if exponent==255 then return math.huge end
+            if exponent==0 then return sign*fraction*2^-126 end
+            return sign*(1+fraction)*2^(exponent-127)
+        end
+    }
+end
+
+local function bounds(reader, size)
+    if size~=44 or reader:r_u8()~=4 then return end
+    local kind=reader:r_u8()
+    if kind~=3 and kind~=10 then return end
+    reader:r_u16()
+    local box={min={},max={}}
+    for _,side in ipairs({"min","max"}) do
+        for _,axis in ipairs({"x","y","z"}) do
+            local n=reader:r_float()
+            if not (n>=-20 and n<=20) then return end
+            box[side][axis]=n
+        end
+    end
+    for _,axis in ipairs({"x","y","z"}) do
+        if box.max[axis]-box.min[axis]<0.5 then return end
+    end
+    return box
+end
+
+local function bones(reader, limit)
+    if limit-reader:r_tell()<4 then return end
+    local count=reader:r_u32()
+    if count<1 or count>64 then return end
+    local names={}
+    for _=1,count do
+        local name=read_string(reader,limit)
+        local parent=read_string(reader,limit)
+        if not name or name=="" or not parent or reader:r_tell()+60>limit then return end
+        name=name:lower()
+        if names[name] then return end
+        names[name]=true
+        reader:r_seek(reader:r_tell()+60)
+    end
+    if reader:r_tell()==limit then return names end
+end
+
+local function inspect(reader)
+    local size=reader:r_elapsed()
+    local box,names,user_data,has_physics,has_mesh
+    while reader:r_tell()+8<=size do
+        local kind,length=reader:r_u32(),reader:r_u32()
+        local ending=reader:r_tell()+length
+        if ending>size then return end
+        if kind==1 then box=bounds(reader,length)
+        elseif kind==9 or kind==10 then has_mesh=length>4
+        elseif kind==13 then names=bones(reader,ending)
+        elseif kind==16 then has_physics=length>0
+        elseif kind==17 then user_data=length>1 and length<=65536 end
+        reader:r_seek(ending)
+    end
+    if reader:r_tell()==size and box and names and has_physics and has_mesh and user_data then
+        return box,names
+    end
+end
+
+local function inspect_model(fs, filename, parser)
+    -- IReader*& in the Monolith Lua r_close binding can trigger Busy Hands.
+    -- The engine's file_copy closes its native handles internally.
+    if not io or type(io.open)~="function" then return end
+    local info=fs:exist("$game_meshes$",filename)
+    local size=info and info.size_real
+    if type(size)~="number" or size<52 or size>32*1024*1024 then return end
+    local path=fs:update_path("$game_meshes$",filename)
+    local file=io.open(path,"rb")
+    local temporary
+    if not file then
+        local candidate=fs:update_path("$app_data_root$",
+            "adb_btr_model_probe_"..time_global().."_"..math.random(100000,999999)..".tmp")
+        if fs:exist(candidate) then return end
+        local previous=io.open(candidate,"rb")
+        if previous then previous:close();return end
+        temporary=candidate
+        local copied=pcall(fs.file_copy,fs,path,temporary)
+        if copied then file=io.open(temporary,"rb") end
+    end
+    local ok,box,names
+    if file then
+        ok,box,names=pcall(function()
+            local reader=file_reader(file)
+            if reader then return (parser or inspect)(reader) end
+        end)
+        file:close()
+    end
+    if temporary then fs:file_delete(temporary) end
+    if ok then return box,names end
+end
+
+-- The render box also contains the barrel, aerial and invisible panels.
+-- Read the model's actual physical shapes for driving; keep the render box
+-- for conservative spawn clearance. No shared model or physics is changed.
+local function collision_bounds(reader)
+    local size=reader:r_elapsed()
+    local names,physics={}
+    while reader:r_tell()+8<=size do
+        local kind,length=reader:r_u32(),reader:r_u32()
+        local ending=reader:r_tell()+length
+        if ending>size then return end
+        if kind==13 then
+            local count=reader:r_u32()
+            if count<1 or count>64 then return end
+            for i=1,count do
+                local name,parent=read_string(reader,ending),read_string(reader,ending)
+                if not name or not parent or reader:r_tell()+60>ending then return end
+                names[i]={name=name,parent=parent}
+                reader:r_seek(reader:r_tell()+60)
+            end
+        elseif kind==16 then physics={offset=reader:r_tell(),ending=ending} end
+        reader:r_seek(ending)
+    end
+    if not physics or #names==0 then return end
+    reader:r_seek(physics.offset)
+    local function numbers(n)
+        if reader:r_tell()+4*n>physics.ending then error("truncated_vehicle_physics") end
+        local a={}
+        for i=1,n do
+            local f=reader:r_float()
+            if not (f>-1e7 and f<1e7) then error("invalid_vehicle_physics") end
+            a[i]=f
+        end
+        return a
+    end
+    local function transform(m,p,translate)
+        return {m[1]*p[1]+m[4]*p[2]+m[7]*p[3]+(translate and m[10] or 0),
+            m[2]*p[1]+m[5]*p[2]+m[8]*p[3]+(translate and m[11] or 0),
+            m[3]*p[1]+m[6]*p[2]+m[9]*p[3]+(translate and m[12] or 0)}
+    end
+    local matrices,boxes,by_name={},{},{}
+    for _,bone in ipairs(names) do
+        local version=reader:r_u32()
+        if version>1 or not read_string(reader,physics.ending) then return end
+        local kind,flags=reader:r_u16(),reader:r_u16()
+        local box,sphere,cylinder=numbers(15),numbers(4),numbers(8)
+        local joint=reader:r_u32()
+        -- Unused joint fields in stock meshes can contain exporter garbage.
+        -- They are not geometry and must not invalidate a sound collision shape.
+        local joint_bytes=version>0 and 72 or 68
+        if reader:r_tell()+joint_bytes>physics.ending then return end
+        reader:r_seek(reader:r_tell()+joint_bytes)
+        local rotation,position=numbers(3),numbers(3)
+        if reader:r_tell()+16>physics.ending then return end
+        reader:r_seek(reader:r_tell()+16) -- mass and centre of mass, unused here
+        -- X-Ray bind_transform.setXYZi, in its column-vector convention.
+        local sh,ch=math.sin(-rotation[2]),math.cos(-rotation[2])
+        local sp,cp=math.sin(-rotation[1]),math.cos(-rotation[1])
+        local sb,cb=math.sin(-rotation[3]),math.cos(-rotation[3])
+        local m={ch*cb-sp*sh*sb,-cp*sb,sp*ch*sb+sh*cb,
+            sp*sh*cb+ch*sb,cp*cb,sh*sb-sp*ch*cb,-cp*sh,sp,cp*ch,
+            position[1],position[2],position[3]}
+        bone.local_matrix=m
+        bone.kind,bone.flags,bone.box,bone.sphere,bone.cylinder,bone.joint=kind,flags,box,sphere,cylinder,joint
+        by_name[bone.name]=bone
+    end
+    if reader:r_tell()~=physics.ending then return end
+    local resolving={}
+    local function matrix_for(bone)
+        if matrices[bone.name] then return matrices[bone.name] end
+        if resolving[bone.name] then return end
+        resolving[bone.name]=true
+        local m=bone.local_matrix
+        if bone.parent~="" then
+            local parent_bone=by_name[bone.parent]
+            local parent=parent_bone and matrix_for(parent_bone)
+            if not parent then return end
+            local composed={}
+            for col=0,3 do
+                local part=transform(parent,{m[col*3+1],m[col*3+2],m[col*3+3]},col==3)
+                for axis=1,3 do composed[col*3+axis]=part[axis] end
+            end
+            m=composed
+        end
+        matrices[bone.name]=m
+        resolving[bone.name]=nil
+        return m
+    end
+    for _,bone in ipairs(names) do
+        local m=matrix_for(bone)
+        if not m then return end
+        local kind,flags,box,sphere,cylinder,joint=bone.kind,bone.flags,bone.box,bone.sphere,bone.cylinder,bone.joint
+        if kind>0 and kind<=3 and math.floor(flags/4)%2==0 then
+            local centre,extent
+            if kind==1 then
+                centre=transform(m,{box[10],box[11],box[12]},true)
+                extent={0,0,0}
+                for axis=1,3 do
+                    local dir=transform(m,{box[(axis-1)*3+1],box[(axis-1)*3+2],box[(axis-1)*3+3]},false)
+                    for n=1,3 do extent[n]=extent[n]+math.abs(dir[n]*box[12+axis]) end
+                end
+            elseif kind==2 then
+                centre=transform(m,sphere,true);extent={sphere[4],sphere[4],sphere[4]}
+            else
+                centre=transform(m,cylinder,true)
+                local dir=transform(m,{cylinder[4],cylinder[5],cylinder[6]},false)
+                extent={}
+                for n=1,3 do extent[n]=math.abs(dir[n])*cylinder[7]/2+
+                    math.sqrt(math.max(0,1-dir[n]^2))*cylinder[8] end
+            end
+            local b={name=bone.name,joint=joint,min={},max={}}
+            for n,axis in ipairs({"x","y","z"}) do
+                if not (extent[n]>0 and extent[n]<20 and math.abs(centre[n])<20) then return end
+                b.min[axis],b.max[axis]=centre[n]-extent[n],centre[n]+extent[n]
+            end
+            boxes[#boxes+1]=b
+        end
+    end
+    if reader:r_tell()==physics.ending and #boxes>0 then return boxes end
+end
+
+local physical_cache={}
+function driving_profile(visual)
+    if not asset_path(visual) then return end
+    local filename=visual:gsub("/","\\"):lower()
+    if filename:sub(-4)~=".ogf" then filename=filename..".ogf" end
+    if physical_cache[filename]~=nil then return physical_cache[filename] or nil end
+    local boxes=inspect_model(getFS(),filename,collision_bounds)
+    if not boxes then physical_cache[filename]=false;return end
+    local config=game.get_visual_userdata(filename)
+    local wheels={}
+    for _,key in ipairs({"driving_wheels","steering_wheels","breaking_wheels"}) do
+        for name in (value(config,"car_definition",key) or ""):gmatch("[^,%s]+") do wheels[name]=true end
+    end
+    local profile={x=0,z=0,bottom=math.huge,top=-math.huge,clearance=math.huge}
+    for _,b in ipairs(boxes) do
+        profile.x=math.max(profile.x,math.abs(b.min.x),math.abs(b.max.x))
+        profile.z=math.max(profile.z,math.abs(b.min.z),math.abs(b.max.z))
+        profile.bottom=math.min(profile.bottom,b.min.y)
+        profile.top=math.max(profile.top,b.max.y)
+        if not wheels[b.name] then profile.clearance=math.min(profile.clearance,b.min.y) end
+    end
+    if not (profile.clearance<profile.top and profile.top-profile.bottom>0.5) then return end
+    physical_cache[filename]=profile
+    return profile
+end
+
+local function checked_profile(ini, section, companion)
+    if value(ini,section,"class")~="SCRPTCAR" or value(ini,section,"cform")~="skeleton" then return end
+    local visual=value(ini,section,"visual")
+    if not asset_path(visual) or not game or type(game.get_visual_userdata)~="function" then return end
+    local filename=visual:gsub("/","\\"):lower()
+    if filename:sub(-4)~=".ogf" then filename=filename..".ogf" end
+    if companion and filename==[[dynamics\vehicles\veh_btr\veh_btr_u_01.ogf]] then
+        -- Our olive skin lives on a private copy of the stock mesh. Never
+        -- replace the shared game's texture/model or skin unrelated vehicles.
+        visual=[[anomaly_donation_bridge\btr_olive.ogf]]
+        filename=visual
+    end
+    local box,names=inspect_model(getFS(),filename)
+    if not box then return end
+    local config=game.get_visual_userdata(filename)
+    local chassis="car_definition"
+    for _,key in ipairs({"driving_wheels","steering_wheels","breaking_wheels"}) do
+        local raw=value(config,chassis,key)
+        if not raw then return end
+        local count=0
+        for name in (raw..","):gmatch("(.-),") do
+            if not names[name:match("^%s*(.-)%s*$"):lower()] then return end
+            count=count+1
+        end
+        if count<2 then return end
+    end
+    for _,key in ipairs({"engine_power","max_engine_rpm","idling_engine_rpm","max_power_rpm",
+        "max_torque_rpm","steering_speed","main_gear_ratio","fuel_tank","reference_radius"}) do
+        local number=tonumber(value(config,chassis,key))
+        if not number or not (number>0 and number<1e7) then return end
+    end
+    for _,key in ipairs({"fuel_consumption","axle_friction","auto_transmission"}) do
+        if not value(config,chassis,key) then return end
+    end
+    if not value(config,"transmission_gear_ratio","N1") then return end
+    local weapon="mounted_weapon_definition"
+    for _,key in ipairs({"fire_bone","rotate_x_bone","rotate_y_bone"}) do
+        local name=value(config,weapon,key)
+        if not name or not names[name:lower()] then return end
+    end
+    local gun_section=value(config,weapon,"wpn_section")
+    local ammunition=gun_section and value(ini,gun_section,"ammo_class")
+    if not ammunition or not ini:section_exist(ammunition:match("^[^,%s]+") or "")
+        or not tonumber(value(config,weapon,"min_gun_speed"))
+        or not tonumber(value(config,weapon,"max_gun_speed")) then return end
+    return {visual=visual,box=box,fire_bone=value(config,weapon,"fire_bone")}
+end
+
+function profile(ini, section, companion)
+    local ok,result=pcall(checked_profile,ini,section,companion)
+    if ok then return result end
+    return nil,result
+end

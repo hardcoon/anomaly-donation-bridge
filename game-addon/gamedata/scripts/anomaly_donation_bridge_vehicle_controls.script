@@ -1,0 +1,326 @@
+-- Navigation supplies a signed
+-- target speed and steering independently of the gun's target selection.
+local OWNER="adb_btr_companion"
+local ACTION_MS=20000
+
+function available(legacy)
+    local common=CCar and type(CCar.CurrentVel)=="function" and type(CCar.HasWeapon)=="function"
+        and type(CCar.Action)=="function" and type(CCar.SetParam)=="function"
+        and CCar.eWpnDesiredPos~=nil and CCar.eWpnFire~=nil
+        and CCar.eWpnActivate~=nil and type(action_first)=="function"
+    if not common then return false end
+    if legacy then
+        -- 2026.5.15 exposes movement actions, not the newer CCar governor.
+        -- LuaBind constructors may be callable tables/userdata, not functions.
+        return move and cond and cond.time_end~=nil and move.on~=nil and move.fwd~=nil
+            and move.back~=nil and move.left~=nil and move.right~=nil and move.handbrake~=nil
+            and type(CCar.StartEngine)=="function" and type(CCar.HandBreak)=="function"
+            and type(CCar.ReleaseHandBreak)=="function"
+    end
+    return type(CCar.SetTargetSpeed)=="function" and type(CCar.SetSteer)=="function"
+        and type(CCar.SetThrottle)=="function" and type(CCar.ClearTargetSpeed)=="function"
+end
+
+function speed(car,object)
+    if type(car.GetSpeed)=="function" then return car:GetSpeed() end
+    -- GetSpeed is absent from CCar's 2026.5.15 Lua binding too. Match the
+    -- newer native implementation, including reverse and vertical grades.
+    local velocity,heading=car:CurrentVel(),object:direction()
+    return velocity.x*heading.x+velocity.y*heading.y+velocity.z*heading.z
+end
+
+function release_driver(state)
+    local car=state.car
+    if state.legacy_api then
+        state.object:reset_action_queue()
+    else
+        car:ClearTargetSpeed()
+        car:SetThrottle(1)
+        car:SetSteer(0)
+    end
+    if state.object:get_script() and state.object:get_script_name()==OWNER then
+        state.object:script(false,OWNER)
+    end
+    -- Clear the native inputs left by the last autonomous action.
+    local actions=state.legacy_api and {key_bindings.kFWD,key_bindings.kBACK,
+        key_bindings.kL_STRAFE,key_bindings.kR_STRAFE,key_bindings.kJUMP}
+        or {key_bindings.kFWD,key_bindings.kJUMP}
+    for _,action in ipairs(actions) do
+        local key=bind_to_dik(action)
+        if key and key>0 then level.release_action(key) end
+    end
+    car:ReleaseHandBreak()
+end
+
+local function press_camera(key)
+    level.press_action(key)
+    level.release_action(key)
+end
+
+function native_camera()
+    local free=key_bindings.kCAM_3
+    local key=bind_to_dik(free)
+    if key and key>0 then press_camera(key);return true end
+    -- Anomaly commonly leaves cam_3 unbound. Invoke the native holder action
+    -- via an unused secondary slot and restore it in the same Lua call.
+    local unused=dik_to_bind(0)
+    local console=get_console()
+    for _,candidate in ipairs({{DIK_keys.DIK_F15,"kF15"},{DIK_keys.DIK_F13,"kF13"}}) do
+        local dik=candidate[1]
+        if dik and dik_to_bind(dik)==unused then
+            console:execute("bind_sec cam_3 "..candidate[2])
+            local ok,switched=pcall(function()
+                if dik_to_bind(dik)~=free then return false end
+                press_camera(dik)
+                return true
+            end)
+            console:execute("unbind_sec cam_3")
+            if ok and switched then return true end
+        end
+    end
+    key=bind_to_dik(key_bindings.kCAM_2)
+    if key and key>0 then press_camera(key);return true end
+    return false
+end
+
+function geometry(object,visual)
+    if not game or type(game.get_visual_userdata)~="function" then return end
+    local config=game.get_visual_userdata(visual)
+    local shell=object:get_physics_shell()
+    if not config or not shell or type(shell.get_joint_by_bone_name)~="function"
+        or not config:line_exist("car_definition","steering_wheels") then return end
+    local origin,heading=object:position(),object:direction()
+    local n,sumz,sumt,sumzz,sumzt=0,0,0,0,0
+    for name in config:r_string("car_definition","steering_wheels"):gmatch("[^,%s]+") do
+        local joint=shell:get_joint_by_bone_name(name)
+        if joint and type(joint.get_axes_number)=="function" and type(joint.get_limits)=="function"
+            and type(joint.get_anchor)=="function" and joint:get_axes_number()>0 then
+            local lo,hi=joint:get_limits(0)
+            local limit=type(lo)=="number" and type(hi)=="number" and math.max(math.abs(lo),math.abs(hi))
+            if limit and limit>=0 and limit<1.1 then
+                local p=vector():set(0,0,0)
+                joint:get_anchor(p)
+                -- Joint anchors are world-space. Project onto the complete
+                -- model forward vector; dropping Y shrinks the wheelbase on
+                -- hills and changes steering calibration after every load.
+                local z=(p.x-origin.x)*heading.x+(p.y-origin.y)*heading.y+(p.z-origin.z)*heading.z
+                local t=math.tan(limit)
+                n=n+1;sumz=sumz+z;sumt=sumt+t;sumzz=sumzz+z*z;sumzt=sumzt+z*t
+            end
+        end
+    end
+    if n<4 then return end
+    local variance=sumzz-sumz*sumz/n
+    if not (variance>=0.5) then return end
+    local curvature=(sumzt-sumz*sumt/n)/variance
+    if not (curvature>=0.025 and curvature<=0.25) then return end
+    local offset=(sumt-curvature*sumz)/n/curvature
+    if not (offset>=0 and offset<=5) then return end
+    -- Eight-wheel BTRs steer several axles by different angles. Fit the
+    -- rolling reference point instead of treating the hull centre as a
+    -- rear axle. Reserve steering headroom for correcting real tyre slip.
+    return {rear_offset=offset,steer_radius=1/curvature,turn_radius=1.35/curvature}
+end
+
+function take_control(object,legacy)
+    if not available(legacy) then return nil,legacy and "vehicle_legacy_api_unavailable" or "vehicle_native_api_unavailable" end
+    local car=object:get_car()
+    if not car then return nil,"vehicle_car_unavailable" end
+    if not car:HasWeapon() then return nil,"vehicle_weapon_unavailable" end
+    local shell=object:get_physics_shell()
+    if not shell then return nil,"vehicle_physics_shell_unavailable" end
+    local exact_integration=type(shell.set_force_exact_integration)=="function"
+    -- 2026.5.15 (including MT TEST) has no Lua binding for this optional
+    -- solver setting. Legacy movement uses the engine's normal integration.
+    -- Keep the existing requirement for the newer native governor.
+    if not legacy and not exact_integration then
+        return nil,"vehicle_exact_integration_unavailable"
+    end
+    if type(shell.set_linear_vel)~="function" then
+        return nil,"vehicle_velocity_api_unavailable"
+    end
+    if type(object.reset_action_queue)~="function" then return nil,"vehicle_action_queue_unavailable" end
+    if object:get_script() and object:get_script_name()~=OWNER then
+        return nil,"vehicle_already_controlled"
+    end
+    if exact_integration then shell:set_force_exact_integration() end
+    if not object:get_script() then object:script(true,OWNER) end
+    if not object:get_script() then return nil,"vehicle_control_unavailable" end
+    car:StartEngine()
+    if legacy then
+        object:reset_action_queue()
+        action_first(object,move(move.on+move.handbrake,0),cond(cond.time_end,ACTION_MS))
+    else
+        car:SetTargetSpeed(0)
+        car:SetThrottle(0)
+    end
+    car:HandBreak()
+    return {object=object,car=car,shell=shell,legacy_api=legacy==true}
+end
+
+function drive(state, now, speed, steer)
+    local car=state.car
+    state.target_speed,state.steer=speed,steer
+    local elapsed=math.min(0.2,math.max(0,(now-(state.drive_at or now-120))/1000))
+    state.drive_at=now
+    local braking=speed==0
+    local keys=move.on+(braking and move.handbrake or move.fwd)
+    if state.legacy_api then
+        keys=move.on+(braking and move.handbrake or speed<0 and move.back or move.fwd)
+        local turn=braking and 0 or (state.legacy_turn or 0)
+        if not braking then
+            if steer>0.055 then turn=1 elseif steer< -0.055 then turn=-1
+            elseif math.abs(steer)<0.025 then turn=0 end
+        end
+        state.legacy_turn=turn
+        if turn>0 then keys=keys+move.right elseif turn<0 then keys=keys+move.left end
+    end
+    if state.braking~=braking or state.legacy_api and state.legacy_keys~=keys
+        or not state.refresh_at or now>=state.refresh_at then
+        -- Without the key, the next native action tick releases the brake,
+        -- even if HandBreak() was called from Lua just before it.
+        -- action_first suspends its predecessor rather than replacing it.
+        -- Keep one owned movement command, and never accelerate while parked.
+        state.object:reset_action_queue()
+        action_first(state.object,move(keys,0),cond(cond.time_end,ACTION_MS))
+        state.refresh_at=now+ACTION_MS/2
+        state.braking=braking
+        state.legacy_keys=state.legacy_api and keys or nil
+        if not braking then car:ReleaseHandBreak() end
+    end
+    if not state.legacy_api then
+        car:SetTargetSpeed(speed)
+        car:SetThrottle(braking and 0 or 1)
+        car:SetSteer(braking and 0 or math.max(-1,math.min(1,steer)))
+    end
+    if braking then
+        car:HandBreak()
+        -- The native handbrake can still slide on hills while a route is
+        -- being calculated, making its starting pose obsolete. Brake only
+        -- this owned chassis; preserve vertical gravity and settle normally.
+        local velocity=car:CurrentVel()
+        local horizontal=math.sqrt(velocity.x^2+velocity.z^2)
+        if horizontal>0.001 then
+            local factor=math.max(0,1-12*elapsed/horizontal)
+            velocity.x,velocity.z=velocity.x*factor,velocity.z*factor
+            state.shell:set_linear_vel(velocity)
+        end
+    else
+        -- Wheel torque can lose to gravity between Lua updates. Correct
+        -- only longitudinal velocity, with a cap per second. Gravity,
+        -- lateral motion, wheel steering and collisions stay native.
+        local velocity=car:CurrentVel()
+        local heading=state.object:direction()
+        local length=math.sqrt(heading.x^2+heading.z^2)
+        if length<0.5 then return end
+        local dx,dz=heading.x/length,heading.z/length
+        local delta=speed-(velocity.x*dx+velocity.z*dz)
+        -- Full engine throttle is independent of the requested road speed.
+        -- Add grade compensation uphill, in either gear, so reducing speed
+        -- on a slope does not also remove the force needed to climb it.
+        local uphill=math.max(0,heading.y*(speed<0 and -1 or 1))
+        local limit=(5.5+9.81*uphill)*elapsed
+        local change=math.max(-limit,math.min(limit,delta))
+        velocity.x=velocity.x+dx*change
+        velocity.z=velocity.z+dz*change
+        state.shell:set_linear_vel(velocity)
+    end
+end
+
+-- Stock BTR shutters are fixed, closed meshes masquerading as glow bones.
+-- Hiding them opens the windows. Physical doors on other supported models
+-- additionally receive the native close command, on this instance only.
+function close_shutters(object)
+    if type(object.get_bone_id)~="function" or type(object.set_bone_visible)~="function" then return end
+    local car=object:get_car()
+    for _,name in ipairs({"front_left_door","front_right_door"}) do
+        local id=object:get_bone_id(name)
+        if id and id>=0 and id<65535 then
+            object:set_bone_visible(id,true,false)
+            if car and type(car.IsDoor)=="function" and type(car.DoorClose)=="function" and car:IsDoor(id) then
+                car:DoorClose(id)
+            end
+        end
+    end
+end
+
+function create_headlights(object,visual)
+    if not script_light or not game or type(game.get_visual_userdata)~="function"
+        or type(object.get_bone_id)~="function" or type(object.set_bone_visible)~="function" then return end
+    local config=game.get_visual_userdata(visual)
+    if not config or not config:line_exist("lights","headlights") then return end
+    local shutters={front_left_door=true,front_right_door=true}
+    local count=0
+    for section in config:r_string("lights","headlights"):gmatch("[^,%s]+") do
+        if not config:line_exist(section,"bone") or not shutters[config:r_string(section,"bone")] then return end
+        count=count+1
+    end
+    if count~=2 then return end
+    -- The stock BTR calls its shutters "headlights" with a 0.1 m glow.
+    -- Replace only that known setup on this instance. Other models retain
+    -- their own native lights; never edit shared visual userdata or configs.
+    local lamps={}
+    for _,name in ipairs({"left_light","right_light"}) do
+        local id=object:get_bone_id(name)
+        if not id or id<0 or id>=65535 then return end
+        lamps[#lamps+1]={bone=name,id=id}
+    end
+    for _,lamp in ipairs(lamps) do
+        local light=script_light()
+        light.enabled=false
+        lamp.light=light
+        light.type=2 -- IRender_Light::SPOT
+        light.range=45
+        light.shadow=true
+        light.volumetric=false
+        light.texture=[[lights\lights_blamplight]]
+        light:set_cone(math.rad(50))
+    end
+    return {lamps=lamps}
+end
+
+function update_headlights(object,state,enabled)
+    if not state then return end
+    enabled=enabled==true
+    if state.enabled~=enabled then
+        for _,lamp in ipairs(state.lamps) do
+            object:set_bone_visible(lamp.id,enabled,false)
+            lamp.light.enabled=enabled
+        end
+        state.enabled=enabled
+    end
+    if enabled then
+        for _,lamp in ipairs(state.lamps) do
+            local frame=object:bone_transform(lamp.bone)
+            lamp.light:set_position(frame.c)
+            lamp.light:set_direction(frame.k,frame.i)
+        end
+    end
+end
+
+function release_headlights(state)
+    if not state then return end
+    -- Render resources can be disabled during unload without dereferencing
+    -- a vehicle or its old physics shell.
+    for _,lamp in ipairs(state.lamps) do lamp.light.enabled=false end
+end
+
+function aim(state, fire_bone, target, clear_line)
+    local car=state.car
+    if not target then
+        car:Action(CCar.eWpnActivate,0)
+        return false
+    end
+    car:Action(CCar.eWpnActivate,1)
+    car:SetParam(CCar.eWpnDesiredPos,target)
+    local barrel=state.object:bone_transform(fire_bone)
+    local x,y,z=target.x-barrel.c.x,target.y-barrel.c.y,target.z-barrel.c.z
+    local distance=math.sqrt(x*x+y*y+z*z)
+    -- CanHit alone is true even when the target lies outside the turret's
+    -- travel. Inspect the actual world-space barrel axis before opening fire.
+    local aligned=distance>2 and (barrel.k.x*x+barrel.k.y*y+barrel.k.z*z)/distance>=0.998
+    local fire=aligned and car:CanHit() and clear_line(barrel.c,barrel.k,distance)
+    car:Action(CCar.eWpnFire,fire and 1 or 0)
+    return not not fire
+end
+

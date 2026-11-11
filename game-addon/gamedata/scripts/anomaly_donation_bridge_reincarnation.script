@@ -1,0 +1,1340 @@
+local ID="hardcoon.adb.new_life"
+local MODULE="anomaly_donation_bridge_reincarnation"
+local KEY="adb_new_life_v1"
+local OWNER="adb_new_life"
+local job, scan, restored, ready_frame, last_frame
+local wait_started
+local last_maintenance=0
+local azazel_before_death, azazel_tick, azazel_failed, azazel_finished
+local function companions() return anomaly_donation_bridge_relife_companions end
+local function az_hud() return anomaly_donation_bridge_azazel_hud end
+local TIMEOUT=15000
+-- Native inventory_space.h uses 1-based slots. LTX 'slot' is ZERO-based:
+-- inventory_item.cpp sets BaseSlot = slot + 1. Never pass the LTX value.
+local OUTFIT_SLOT,HELMET_SLOT=7,12
+local CINEMA_CAM,CINEMA_PP,CINEMA_WAKE,CINEMA_FADE=162801,162802,162803,162804
+local FADE_OUT,FADE_IN=0.6,0.6
+local SLEEP_WATCHDOG=6
+local input_owned
+local cinema
+local cinema_available
+local FACTIONS={stalker=true,bandit=true,dolg=true,freedom=true,ecolog=true,killer=true,
+    army=true,monolith=true,csky=true,renegade=true,greh=true,isg=true}
+local SERVICE={cash=true,device_flashlight=true,bolt=true,bolt_bullet=true,device_pda=true,
+    medkit_script=true,guitar_a=true,harmonica_a=true,anim_binoc=true,anim_knife=true,
+    hand_radio=true,hand_radio_r=true,stick_bred=true,stick_kolbasa=true,
+    stick_kolbasa_bred=true,pda_for_nps=true,sigaret_for_nps=true}
+
+local function now() return time_global() end
+local function log(message)
+    if type(printf)=="function" then pcall(printf,"[ADB] new life: %s",tostring(message)) end
+end
+local function input_state()
+    return db and db.actor and db.storage and db.storage[db.actor:id()]
+end
+local function input_release()
+    local s=input_state()
+    if input_owned and s and s.disable_input_time==nil and s.disable_input_idle==nil then
+        if type(level.enable_input)=="function" then pcall(level.enable_input) end
+    end
+    input_owned=nil
+end
+local function input_capture()
+    local s=input_state()
+    if not s or type(level.disable_input)~="function" then return false end
+    if input_owned then return true end
+    if s.disable_input_time~=nil or s.disable_input_idle~=nil then return false end
+    -- Same direct API as the alternative sleep mode, without the modpack's
+    -- game-time input lock or sleep manager. No artificial hour-long lease.
+    input_owned=true
+    local ok=pcall(level.disable_input)
+    if not ok then input_release();return false end
+    return true
+end
+local function cinema_camera_stop()
+    if cinema and cinema.camera and db and db.actor and level.present() then
+        local id=cinema.camera
+        cinema.camera=nil;level.remove_cam_effector(id)
+    end
+end
+local function cinema_clear(keep_input)
+    if keep_input~=true then input_release() end
+    if cinema then
+        pcall(cinema_camera_stop)
+        if cinema.pp and db and db.actor and level.present() then
+            -- Remove only our effect. Never reset another mod's camera/PPE.
+            pcall(level.remove_pp_effector,CINEMA_PP)
+            pcall(level.remove_pp_effector,CINEMA_FADE)
+        end
+        if cinema.hud_hidden then
+            pcall(level.show_weapon,true);pcall(level.show_indicators)
+        end
+        cinema=nil
+    end
+end
+-- Native completion callbacks only acknowledge the animation. Inventory and
+-- teleport work stays in update(), never inside effector destruction.
+function sleep_midpoint()
+    if cinema and cinema.mode=="out" then cinema.completed=true;cinema.camera=nil end
+end
+function sleep_finish()
+    if cinema and cinema.mode=="in" then cinema.completed=true;cinema.camera=nil end
+end
+local function cinema_begin_native(mode)
+    if not cinema then
+        if not cinema_available() then return false end
+        cinema={pp=true,mode=mode,elapsed=0,last_tick=now()}
+        level.add_pp_effector("black_infinite_2.ppe",CINEMA_PP,true)
+    else cinema.mode=mode;cinema.elapsed=0;cinema.last_tick=now() end
+    cinema.completed=false
+    -- Native PP deletes itself at factor zero: use a small positive start.
+    level.set_pp_effector_factor(CINEMA_PP,mode=="out" and 0.01 or 1)
+    if mode=="out" or mode=="in" then
+        cinema.hud_hidden=true
+        level.show_weapon(false);level.hide_indicators_safe()
+        local out=mode=="out"
+        cinema.camera=out and CINEMA_CAM or CINEMA_WAKE
+        if out then level.add_pp_effector("surge_fade.ppe",CINEMA_FADE,false) end
+        level.add_cam_effector(out and "camera_effects\\surge_02.anm" or "camera_effects\\surge_01.anm",
+            cinema.camera,false,MODULE..(out and ".sleep_midpoint" or ".sleep_finish"))
+    end
+    return true
+end
+local function cinema_failure(reason)
+    if job then job.skip_cinema=true end
+    log("sleep visual skipped; continuing exchange: "..tostring(reason))
+    cinema_clear(true)
+end
+local function cinema_begin(mode)
+    if job and job.skip_cinema then return false end
+    local ok,result=pcall(cinema_begin_native,mode)
+    if ok and result then return true end
+    cinema_failure(ok and "animation API/resource unavailable" or result)
+    return false
+end
+local function cinema_tick_native(mode)
+    if (not cinema or cinema.mode~=mode) and not cinema_begin(mode) then return true end
+    -- Registry updates are throttled to 100 ms, NOT every rendered frame.
+    -- Summing f_time_delta here made high-FPS fades take >15 s and time out.
+    local current=now()
+    cinema.elapsed=cinema.elapsed+math.min(0.25,math.max(0,current-(cinema.last_tick or current))/1000)
+    cinema.last_tick=current
+    local t=math.min(1,cinema.elapsed/(mode=="out" and FADE_OUT or FADE_IN))
+    local smooth=t*t*(3-2*t)
+    level.set_pp_effector_factor(CINEMA_PP,math.max(0.01,mode=="out" and smooth or 1-smooth))
+    if t<1 or not cinema.completed and cinema.elapsed<SLEEP_WATCHDOG then return false end
+    -- A missing callback cannot leave the actor blacked out indefinitely.
+    -- Any forced removal happens here, outside the native callback stack.
+    cinema_camera_stop()
+    if mode=="out" then cinema.mode="black" end
+    return true
+end
+local function cinema_tick(mode)
+    if job and job.skip_cinema then return true end
+    local ok,result=pcall(cinema_tick_native,mode)
+    if ok then return result end
+    cinema_failure(result)
+    return true
+end
+cinema_available=function()
+    if type(level.add_pp_effector)~="function" or type(level.remove_pp_effector)~="function" or
+        type(level.set_pp_effector_factor)~="function" or type(level.add_cam_effector)~="function" or
+        type(level.remove_cam_effector)~="function" or type(level.show_weapon)~="function" or
+        type(level.hide_indicators_safe)~="function" or type(level.show_indicators)~="function" or
+        type(getFS)~="function" then return false end
+    local fs=getFS()
+    -- Do this before native Load/Start: missing files can be native fatals,
+    -- not recoverable Lua errors in an arbitrary modpack.
+    return fs:exist("$game_anims$","black_infinite_2.ppe") and
+        fs:exist("$game_anims$","surge_fade.ppe") and
+        fs:exist("$game_anims$","camera_effects\\surge_02.anm") and
+        fs:exist("$game_anims$","camera_effects\\surge_01.anm") and true or false
+end
+local function data()
+    local state=alife_storage_manager.get_state()
+    if type(state)~="table" then return end
+    if state[KEY]==nil then state[KEY]={version=1,bodies={},sequence=0} end
+    local d=state[KEY]
+    if type(d)~="table" or d.version~=1 or type(d.bodies)~="table" then error("new_life_storage_invalid") end
+    return d
+end
+local function persist()
+    local d=assert(data(),"storage_unavailable");d.job=job
+    d.selection=scan and {version=1,options=scan.options} or nil
+end
+local function cinema_restore()
+    local ok,reason=pcall(function()
+        if not cinema and db and db.actor and level.present() then
+            local d=data()
+            if d and d.job and not d.job.skip_cinema and cinema_available() then
+                input_capture();cinema_begin("black")
+            end
+        end
+    end)
+    if not ok then log("arrival visual: "..tostring(reason)) end
+end
+local function server(id) return alife():object(id) end
+local function online(id) return level.object_by_id(id) end
+local function plain(v) return {x=v.x,y=v.y,z=v.z} end
+local function vec(v) return vector():set(v.x,v.y,v.z) end
+local function valid_id(id) return type(id)=="number" and id>=0 and id<65535 and id%1==0 end
+local function same_object(se,snapshot)
+    return se and snapshot and se.id==snapshot.id and se:name()==snapshot.internal and
+        se:section_name()==snapshot.section
+end
+local function level_id(gvid)
+    assert(valid_id(gvid),"invalid_game_vertex_id")
+    local graph=game_graph()
+    if type(graph.valid_vertex_id)=="function" then assert(graph:valid_vertex_id(gvid),"invalid_game_vertex_id") end
+    return graph:vertex(gvid):level_id()
+end
+local function close_to(a,b)
+    local dx,dy,dz=a.x-b.x,a.y-b.y,a.z-b.z
+    return dx*dx+dz*dz<9 and math.abs(dy)<3
+end
+local function supported()
+    return type(alife)=="function" and type(game_graph)=="function" and
+        alife_storage_manager~=nil and type(alife_storage_manager.get_state)=="function" and
+        type(IsStalker)=="function" and type(IsItem)=="function" and type(IsWeapon)=="function" and
+        type(get_object_story_id)=="function" and type(task_manager)=="table" and
+        type(task_manager.get_task_manager)=="function" and death_manager~=nil and
+        type(death_manager.get_outfit_by_npc_visual)=="function" and
+        type(alife_create_item)=="function" and type(alife_release_id)=="function" and
+        type(RegisterScriptCallback)=="function" and gameplay_disguise~=nil and
+        type(gameplay_disguise.get_default_comm)=="function" and utils_stpk~=nil and
+        type(utils_stpk.get_stalker_data)=="function" and net_packet~=nil and
+        level and type(level.send)=="function", "new_life_native_api_unavailable"
+end
+local function playable()
+    if not db or not db.actor or not level.present() then return end
+    if type(app_ready)=="function" and not app_ready() then return end
+    local d=device()
+    if d:is_paused() or (tonumber(d.precache_frame) or 0)>0 then return end
+    local a=db.actor
+    if not a:alive() or a:is_talking() or a:get_current_holder() then return end
+    if actor_menu and not actor_menu.is_hud_free() then return end
+    if type(Check_UI)=="function" and Check_UI() then return end
+    if type(_GUIs)=="table" and next(_GUIs) then return end
+    if actor_effects and actor_effects.item_not_in_use==false then return end
+    return a,tonumber(d.frame)
+end
+local function ready_actor()
+    local a,frame=playable()
+    if not a or not frame then ready_frame,last_frame=nil,nil;return end
+    -- The queue must remain deferred, not mark the effect as started while
+    -- menus close. Reuse the same 15 rendered ready-frame barrier as arrival.
+    if not restored or not ready_frame or not last_frame or frame<last_frame or frame-ready_frame<15 then return end
+    return a,frame
+end
+local function ini(section,key)
+    if not ini_sys:section_exist(section) then return end
+    return ini_sys:r_string_ex(section,key)
+end
+local function native_slot(section)
+    local value=tonumber(ini(section,"slot"))
+    if not value or value%1~=0 or value<0 or value>17 then return end
+    return value+1
+end
+local function compatible_slot(section,slot)
+    local base=native_slot(section)
+    if IsItem("outfit",section) then return base==OUTFIT_SLOT and slot==OUTFIT_SLOT end
+    if IsItem("helmet",section) then return base==HELMET_SLOT and slot==HELMET_SLOT end
+    if (base==2 or base==3) and (slot==2 or slot==3) then
+        return true -- stock pistol/rifle slots are interchangeable
+    end
+    return base~=nil and slot==base
+end
+local function has_method(obj,key)
+    local ok,value=pcall(function() return obj and obj[key] end)
+    return ok and type(value)=="function"
+end
+local ACTOR_METHODS={"iterate_inventory","item_in_slot","move_to_slot","move_to_ruck","activate_slot","active_item",
+    "transfer_item","set_character_icon","set_visual_name","set_actor_position","get_task","give_task"}
+local NPC_METHODS={"iterate_inventory","item_in_slot","move_to_slot","transfer_item","active_item",
+    "script","get_script","get_script_name","invulnerable","set_character_icon","get_visual_name",
+    "character_name","character_community","set_character_community","goodwill","force_set_goodwill"}
+local function contract(a,se_actor,n,se_npc)
+    if not has_method(alife(),"teleport_object") then return false,"alife_teleport_api_missing" end
+    if not utils_stpk or type(utils_stpk.get_stalker_data)~="function" or
+        net_packet==nil or type(level.send)~="function" then return false,"server_visual_api_missing" end
+    for _,name in ipairs(ACTOR_METHODS) do if not has_method(a,name) then return false,"actor_api_missing_"..name end end
+    if not has_method(se_actor,"set_character_name") then return false,"actor_server_name_api_missing" end
+    if se_npc and not has_method(se_npc,"set_character_name") then return false,"npc_server_name_api_missing" end
+    if n then for _,name in ipairs(NPC_METHODS) do if not has_method(n,name) then return false,"npc_api_missing_"..name end end end
+    return true
+end
+local function story(id)
+    local value=get_object_story_id(id)
+    return value~=nil and value~="" and value~=false
+end
+local function protected_sections(section,id)
+    if SERVICE[section] or section:match("^device_pda") or story(id) then return true end
+    -- IsItem('quest') includes both quest_item=true and kind=i_quest, including
+    -- mod-added sections. No imaginary game_object:quest_item() binding.
+    return IsItem("quest",section)==true
+end
+local function protected_npcs()
+    local protected={}
+    local tm=assert(task_manager.get_task_manager(),"task_manager_unavailable")
+    assert(type(tm.task_info)=="table","task_info_unavailable")
+    for _,t in pairs(tm.task_info) do
+        for _,k in ipairs({"current_target","task_giver_id","target"}) do
+            local id=tonumber(t[k]);if valid_id(id) then protected[id]=true end
+        end
+    end
+    return protected
+end
+local function eligible(se,protected,any,azazel)
+    if not se or not IsStalker(nil,se:clsid()) or not se:alive() or
+        (not se:name():find("sim_default_",1,true) and not (azazel and companions().owned(se))) or not FACTIONS[se:community()] or
+        story(se.id) or protected[se.id] or not valid_id(se.m_game_vertex_id) then return false end
+    local group=se.group_id
+    if not valid_id(group) or story(group) or protected[group] then return false end
+    local squad=server(group)
+    -- Leaving an empty scripted sim squad is unsafe in some packs. Select a
+    -- member only when a real squadmate remains; never delete its squad.
+    if not squad or type(squad.npc_count)~="function" or (not azazel and squad:npc_count()<2) or
+        type(squad.unregister_member)~="function" or type(squad.register_member)~="function" then return false end
+    if not azazel and axr_companions and ((axr_companions.companion_squads or {})[group] or
+        (axr_companions.non_task_companions or {})[se.id]) then return false end
+    if not azazel and type(se_load_var)=="function" and se_load_var(se.id,se:name(),"companion")==true then return false end
+    if azazel and companions().protected(se,protected) then return false end
+    for _,body in pairs(data().bodies) do if same_object(se,body) then return false end end
+    if not any and level_id(se.m_game_vertex_id)~=level_id(alife():actor().m_game_vertex_id) then return false end
+    return true
+end
+local function snapshot(se,obj)
+    local visual=obj and obj:get_visual_name()
+    if not visual then
+        local packet=utils_stpk.get_stalker_data(se);visual=packet and packet.visual_name
+    end
+    assert(type(visual)=="string" and visual~="","npc_visual_unavailable")
+    local is_actor=se.id==alife():actor().id
+    local result={id=se.id,internal=se:name(),section=se:section_name(),name=se:character_name(),
+        icon=se:character_icon(),faction=se:community(),visual=visual,position=plain(obj and obj:position() or se.position),
+        lvid=obj and obj:level_vertex_id() or se.m_level_vertex_id,
+        gvid=obj and obj:game_vertex_id() or se.m_game_vertex_id,group=is_actor and 65535 or se.group_id,
+        smart=is_actor and 65535 or se:smart_terrain_id()}
+    assert(type(result.name)=="string" and result.name~="" and type(result.icon)=="string" and result.icon~="",
+        "identity_text_unavailable")
+    for _,axis in ipairs({"x","y","z"}) do
+        local v=result.position[axis]
+        assert(type(v)=="number" and v==v and math.abs(v)<math.huge,"identity_position_invalid")
+    end
+    return result
+end
+local function release_npc_guard(j)
+    if not j then return end
+    local se=j.npc and server(j.npc.id)
+    local n=same_object(se,j.npc) and online(j.npc.id)
+    if n then
+        if j.npc_invulnerable~=nil then n:invulnerable(j.npc_invulnerable) end
+        if n:get_script() and n:get_script_name()==OWNER then n:script(false,OWNER) end
+    end
+end
+local function release_guards(j)
+    if not j then return end
+    j.protect_actor=false
+    release_npc_guard(j)
+end
+local function hold(j,a,n)
+    if n:get_script() and n:get_script_name()~=OWNER then error("npc_script_control_busy") end
+    if not n:get_script() then n:script(true,OWNER) end
+    assert(n:get_script() and n:get_script_name()==OWNER,"npc_script_capture_rejected")
+    if j.npc_invulnerable==nil then j.npc_invulnerable=n:invulnerable() end
+    j.protect_actor=true
+    persist() -- persist originals BEFORE leasing native flags
+    -- CActor is NOT CCustomMonster: actor:invulnerable() exists in Lua but
+    -- rejects actors natively. Actor protection is a scoped hit callback.
+    n:invulnerable(true)
+end
+local function slot_of(obj,id)
+    for slot=1,13 do local item=obj:item_in_slot(slot);if item and item:id()==id then return slot end end
+end
+local function inventory(obj)
+    local items,result={},{}
+    -- The C++ iterator calls a luabind functor. An error escaping THAT
+    -- callback invokes CScriptEngine::lua_pcall_failed (fatal on retail
+    -- engines), even if iterate_inventory itself has an outer Lua pcall.
+    -- Collect references only; no validation, assert or native calls here.
+    obj:iterate_inventory(function(_,item)
+        items[#items+1]=item
+        return false
+    end,nil)
+    local owner=obj:id()
+    for _,item in ipairs(items) do
+        local id,section=item:id(),item:section()
+        -- HUD/animation props and service objects can be client-only. They
+        -- are not exchangeable inventory and must remain with their owner.
+        if not SERVICE[section] and not section:match("^device_pda") and not IsItem("anim",section) then
+            local se=server(id)
+            local detail=" owner="..owner.." item="..id.." section="..section
+            if not se then return nil,"inventory_server_missing"..detail end
+            if se.parent_id~=owner then return nil,"inventory_owner_unsettled"..detail end
+            if se:section_name()~=section then return nil,"inventory_identity_unsettled"..detail end
+            result[#result+1]={id=id,section=section,internal=se:name(),slot=slot_of(obj,id)}
+        end
+    end
+    return result
+end
+local function item_server(entry)
+    local se=server(entry.id)
+    assert(se and se:section_name()==entry.section and se:name()==entry.internal,"inventory_item_missing_or_reused")
+    return se
+end
+local function matching_clothes(j,npc_items)
+    -- Online visuals may have .ogf, upper case, forward slashes or a deeper
+    -- directory than stock's fixed third component. The death table is keyed
+    -- by the model basename, NOT by the NPC section or its faction.
+    local visual=j.npc.visual:gsub("/","\\"):lower():gsub("%.ogf$","")
+    local leaf=visual:match("([^\\]+)$")
+    local mapped
+    if type(death_manager.get_outfit_by_visual)=="function" then
+        mapped=death_manager.get_outfit_by_visual(leaf)
+    end
+    if type(mapped)~="table" or not IsItem("outfit",mapped[1]) then
+        mapped=death_manager.get_outfit_by_npc_visual(visual)
+    end
+    local has_outfit,has_helmet=false,false
+    for _,entry in ipairs(npc_items) do
+        if IsItem("outfit",entry.section) and (entry.slot==OUTFIT_SLOT or mapped and entry.section==mapped[1]) then
+            j.outfit=entry.id;j.outfit_section=entry.section;has_outfit=true
+        end
+        if IsItem("helmet",entry.section) and (entry.slot==HELMET_SLOT or mapped and entry.section==mapped[2]) then
+            j.helmet=entry.id;has_helmet=true
+        end
+    end
+    if not has_outfit then
+        assert(mapped and mapped[1] and IsItem("outfit",mapped[1]),"npc_matching_outfit_unavailable")
+        j.create_outfit=mapped[1];j.outfit_section=mapped[1]
+    end
+    assert(native_slot(j.outfit_section)==OUTFIT_SLOT,"matching_outfit_slot_invalid")
+    local helmet_allowed=ini(j.outfit_section,"helmet_avaliable")
+    if helmet_allowed=="false" or helmet_allowed=="0" then j.helmet=nil;return end
+    if not has_helmet and mapped and mapped[2] and mapped[2]~="nil" then
+        assert(ini_sys:section_exist(mapped[2]),"npc_matching_helmet_unavailable")
+        assert(IsItem("helmet",mapped[2]) and native_slot(mapped[2])==HELMET_SLOT,"matching_helmet_slot_invalid")
+        j.create_helmet=mapped[2]
+    end
+end
+local function clothing_preview(se)
+    local n=online(se.id)
+    local preview={npc=snapshot(se,n)}
+    local worn={}
+    if n then
+        for _,slot in ipairs({OUTFIT_SLOT,HELMET_SLOT}) do
+            local item=n:item_in_slot(slot)
+            if item then worn[#worn+1]={id=item:id(),section=item:section(),slot=slot} end
+        end
+    end
+    matching_clothes(preview,worn)
+    return preview.npc
+end
+local function prepare_inventory(j,a,n)
+    j.actor_slots={};j.npc_slots={};j.transfers={};j.created={}
+    if j.options.keep_inventory then
+        -- Preserve means NO gear exchange, not old gear in the backpack plus
+        -- a second NPC kit. Do not even iterate/validate unrelated inventory.
+        return true
+    end
+    local actor_items,why=inventory(a)
+    if not actor_items then return false,why end
+    local npc_items,why=inventory(n)
+    if not npc_items then return false,why end
+    local active=n:active_item()
+    local function usable(item)
+        local slot=item and native_slot(item:section())
+        return item and IsWeapon(item) and (slot==2 or slot==3)
+    end
+    j.weapon=usable(active) and active:id() or nil
+    j.actor_slots={};j.npc_slots={};j.transfers={};j.created={}
+    for _,e in ipairs(actor_items) do if e.slot then j.actor_slots[#j.actor_slots+1]=e end end
+    for _,e in ipairs(npc_items) do
+        if e.slot then j.npc_slots[#j.npc_slots+1]=e end
+        assert(not story(e.id) and not IsItem("quest",e.section),"npc_has_quest_inventory")
+        if not j.weapon and usable(online(e.id)) then j.weapon=e.id end
+    end
+    matching_clothes(j,npc_items) -- fail before the first ownership event
+    for _,entries in ipairs({j.actor_slots,j.npc_slots}) do
+        for _,e in ipairs(entries) do assert(compatible_slot(e.section,e.slot),"original_slot_incompatible_"..e.section) end
+    end
+    for _,e in ipairs(actor_items) do
+        if not j.options.keep_inventory and not protected_sections(e.section,e.id) then
+            e.from=a:id();e.to=n:id();j.transfers[#j.transfers+1]=e
+        end
+    end
+    for _,e in ipairs(npc_items) do
+        if not SERVICE[e.section] and not e.section:match("^device_pda") then
+            e.from=n:id();e.to=a:id();j.transfers[#j.transfers+1]=e
+        end
+    end
+    -- Reject an unarmed/unequippable target, rather than completing a naked
+    -- reincarnation or manufacturing a random starter gun.
+    local weapon=j.weapon and server(j.weapon)
+    assert(weapon and usable(online(j.weapon)),"npc_has_no_usable_weapon")
+    return true
+end
+local function transfer_pass(j,rollback)
+    local done=true
+    for _,entry in ipairs(j.transfers or {}) do
+        local se=item_server(entry)
+        local target=rollback and entry.from or entry.to
+        local source=rollback and entry.to or entry.from
+        if se.parent_id~=target then
+            done=false
+            -- Ownership changes are GE_TRADE_SELL/BUY, not synchronous Lua
+            -- assignments. Submit once per direction and wait for parent_id.
+            local sent
+            if rollback then sent=entry.reverse_sent else sent=entry.sent end
+            if se.parent_id==source and not sent then
+                local owner,dest=assert(online(source),"transfer_owner_offline"),assert(online(target),"transfer_target_offline")
+                local item=assert(online(entry.id),"transfer_item_offline")
+                if rollback then entry.reverse_sent=true else entry.sent=true end
+                j.send_frame=device().frame
+                persist();owner:transfer_item(item,dest)
+            end
+        end
+    end
+    return done
+end
+local function equip(obj,id,slot)
+    local item=online(id);local se=server(id)
+    if not item or not se or se.parent_id~=obj:id() then return false end
+    local current=obj:item_in_slot(slot)
+    if current and current:id()==id then return true end
+    assert(compatible_slot(item:section(),slot),"refusing_incompatible_slot_"..item:section().."_"..slot)
+    if job then job.equip_frame=device().frame;persist() end
+    obj:move_to_slot(item,slot,true)
+    return false
+end
+local function create_clothing(j,a,section,key)
+    if not section or j[key] then return end
+    local se=alife_create_item(section,a)
+    local id=type(se)=="number" and se or se and se.id
+    assert(valid_id(id),"matching_clothing_creation_failed")
+    local object=assert(server(id),"matching_clothing_server_missing")
+    local e={id=id,section=section,internal=object:name()}
+    j.created[#j.created+1]=e;j[key]=id;persist()
+    -- No corpse-drop difficulty/progression filter and no random degradation.
+    -- This is the materialisation of clothing already visible on this NPC.
+end
+local function equip_inherited(j,a)
+    if j.options.keep_inventory then return true end
+    create_clothing(j,a,j.create_outfit,"outfit")
+    create_clothing(j,a,j.create_helmet,"helmet")
+    local done=true
+    if j.outfit and not equip(a,j.outfit,OUTFIT_SLOT) then done=false end
+    if j.helmet and not equip(a,j.helmet,HELMET_SLOT) then done=false end
+    if not done then return false end
+    local weapon=assert(server(j.weapon),"inherited_weapon_missing")
+    local slot=native_slot(weapon:section_name())
+    assert(slot==2 or slot==3,"inherited_weapon_slot_unsupported")
+    if not equip(a,j.weapon,slot) then return false end
+    a:activate_slot(slot)
+    local active=a:active_item()
+    return active and active:id()==j.weapon or false
+end
+local function detach(j)
+    local se=assert(server(j.npc.id))
+    if j.azazel and companions().owned(se) then
+        j.possessed_companion={group=se.group_id};persist()
+        companions().detach(se);j.detached=true
+    end
+    if j.azazel and not j.registration then
+        j.registration=anomaly_donation_bridge_named_companion.snapshot_registration(se);persist()
+        anomaly_donation_bridge_named_companion.release_following(se,true)
+    end
+    if valid_id(se.group_id) then
+        assert(se.group_id==j.npc.group,"npc_squad_changed")
+        local group=assert(server(se.group_id),"npc_squad_missing")
+        assert(j.azazel or group:npc_count()>=2,"npc_last_squad_member")
+        -- Native unregister_member changes read-only group_id safely. Do NOT
+        -- call scripted remove_npc: its offline branch deletes the real NPC.
+        j.detached=true;persist();group:unregister_member(se.id)
+    end
+    if valid_id(se:smart_terrain_id()) then
+        local smart=assert(server(se:smart_terrain_id()),"npc_smart_missing")
+        assert(type(smart.unregister_npc)=="function","npc_smart_api_missing")
+        j.smart_detached=true;persist();smart:unregister_npc(se)
+    end
+    -- The brain flag has a setter only in the Lua export, so it cannot be
+    -- safely leased/restored on rollback. Detaching from the squad/smart and
+    -- the scoped online script capture are sufficient; don't alter that flag.
+end
+local function set_name(identity,name)
+    local se=server(identity.id)
+    assert(same_object(se,identity) and has_method(se,"set_character_name") and type(name)=="string" and name~="",
+        "server_name_api_unavailable")
+    -- Only CSE_ALifeTraderAbstract exports this setter. The server setter also
+    -- calls ChangeName on its online owner; game_object has no such method.
+    se:set_character_name(name)
+    assert(se:character_name()==name,"server_name_change_unconfirmed")
+end
+local function set_actor_identity(j,rollback)
+    local a=db.actor;local identity=rollback and j.actor or j.npc
+    set_name(j.actor,identity.name);a:set_character_icon(identity.icon)
+    if db.actor_binder then db.actor_binder.character_icon=identity.icon end
+    if not j.options.keep_faction then
+        -- _g.set_actor_true_community cancels DRX storylines. This lower-level
+        -- stock operation updates true faction without touching task tables.
+        gameplay_disguise.update_default(rollback and j.true_faction or j.npc.faction,true)
+    end
+end
+local function visual_key(value)
+    return tostring(value or ""):lower():gsub("/","\\"):gsub("%.ogf$","")
+end
+local function set_server_visual(se,visual)
+    -- NEVER rewrite a complete stalker STATE packet: stock set_stalker_data
+    -- can disagree with the running engine and corrupt it in STATE_Read.
+    -- Use only the native GE_CHANGE_VISUAL server event (xrMessages.h:
+    -- M_EVENT=8, GE_CHANGE_VISUAL=35), with the exact u_EventGen wire layout.
+    -- Its server branch changes ONE CSE_Visual string and does NOT broadcast
+    -- a live ChangeVisual. Respawn below makes the client pick up that model.
+    local packet=assert(utils_stpk.get_stalker_data(se),"npc_visual_packet_unavailable")
+    if visual_key(packet.visual_name)==visual_key(visual) then return end
+    assert(type(visual)=="string" and #visual>0 and #visual<256 and not visual:find("%z"),"npc_visual_invalid")
+    -- xrServer requires a live receiver/owner. Never send to an offline id.
+    local n=online(se.id)
+    assert(se.online==true and n and n:alive(),"npc_visual_requires_online")
+    local p=net_packet()
+    p:w_begin(8);p:w_u32(math.floor(now())%4294967296)
+    p:w_u16(35);p:w_u16(se.id);p:w_stringZ(visual)
+    -- Single-player direct-connect CLevel::Send invokes the local server
+    -- synchronously; confirm the field before any subsequent offline switch.
+    -- No ChangeLevel, no STATE_Read, no native model reload occurs here.
+    level.send(p,true,true,true,true)
+    local confirmed=utils_stpk.get_stalker_data(se)
+    assert(confirmed and visual_key(confirmed.visual_name)==visual_key(visual),"npc_visual_event_not_applied")
+end
+local function body_identity(j)
+    local n=assert(online(j.npc.id),"previous_body_offline")
+    assert(visual_key(n:get_visual_name())==visual_key(j.actor.visual),"previous_body_visual_not_confirmed")
+    set_name(j.npc,j.actor.name);n:set_character_icon(j.actor.icon)
+    n:set_character_community(j.options.hostile_previous_body and "arena_enemy" or j.true_faction,0,0)
+    if j.options.hostile_previous_body then
+        n:force_set_goodwill(-5000,db.actor)
+    end
+end
+local function finish(j)
+    if j.azazel then
+        release_guards(j)
+        azazel_finished(j)
+        cinema_clear();job=nil;persist()
+        return
+    end
+    local d=data()
+    local record=d.bodies[j.task_id]
+    if not record then
+        record={id=j.npc.id,internal=j.npc.internal,section=j.npc.section,name=j.actor.name,
+            visual=j.actor.visual,hostile=j.options.hostile_previous_body,faction=j.true_faction,
+            quest=j.options.quest_previous_body,task_id=j.task_id,companions=j.companions}
+        d.bodies[j.task_id]=record
+    end
+    cinema_clear();release_guards(j)
+    job=nil;persist()
+    local ok,why=pcall(companions().maintain,record)
+    if not ok then log("previous companions pending: "..tostring(why)) end
+    log("completed; npc="..j.npc.id.."; target="..j.npc.name)
+end
+local function rollback_begin(reason)
+    scan=nil
+    if not job then persist();log("cancelled before changes: "..tostring(reason));return end
+    if job.phase=="rollback" then return end
+    job.reason=tostring(reason);job.phase="rollback";job.deadline=now()+TIMEOUT
+    persist();log("rolling back: "..job.reason)
+end
+local function rollback_step(j,a)
+    local se=server(j.npc.id)
+    assert(same_object(se,j.npc),"rollback_npc_missing_or_reused")
+    local n=online(se.id)
+    if not n and level_id(se.m_game_vertex_id)~=level_id(a:game_vertex_id()) then
+        -- A level changer / external load can bypass input fences. Bring the
+        -- unresolved real NPC online for compensation on the NOW loaded map;
+        -- never feed old-map coordinates to the new map's actor setter.
+        assert(anomaly_donation_bridge_common.valid_vertex(a:level_vertex_id()),"recovery_actor_vertex_invalid")
+        j.staged=true;persist()
+        alife():teleport_object(se.id,a:game_vertex_id(),a:level_vertex_id(),a:position())
+        return
+    end
+    -- Wait through the engine event pump before interpreting original
+    -- ownership as a failed forward operation. On load pending events are
+    -- discarded; the save's actual parent_id remains authoritative.
+    local sent=math.max(j.send_frame or -100,j.equip_frame or -100)
+    if device().frame-sent<3 then return end
+    if (j.transfers or j.identity_changed or j.visual_attempted) and not n then return end
+    if n and j.npc_invulnerable~=nil then hold(j,a,n) end
+    -- Repair only OUR generated clothing in bad slots left by voting.17/18,
+    -- before restoring the original inventory. No foreign item is removed.
+    local cleared=true
+    for _,e in ipairs(j.created or {}) do
+        local se=server(e.id)
+        if se and se:name()==e.internal and se.parent_id==a:id() then
+            local slot=slot_of(a,e.id)
+            if slot and not compatible_slot(e.section,slot) then
+                j.equip_frame=device().frame;persist();a:move_to_ruck(online(e.id));cleared=false
+            end
+        end
+    end
+    if not cleared then return end
+    if not transfer_pass(j,true) then return end
+    local done=true
+    for _,e in ipairs(j.actor_slots or {}) do if not equip(a,e.id,e.slot) then done=false end end
+    for _,e in ipairs(j.npc_slots or {}) do if not equip(n,e.id,e.slot) then done=false end end
+    if not done then return end
+    if j.identity_changed then
+        set_actor_identity(j,true);a:set_visual_name(j.actor.visual,true)
+        if level_id(a:game_vertex_id())==level_id(j.actor.gvid) then a:set_actor_position(vec(j.actor.position)) end
+        set_name(j.npc,j.npc.name);n:set_character_icon(j.npc.icon)
+        n:set_character_community(j.npc.faction,0,0)
+        n:force_set_goodwill(j.goodwill,a)
+    end
+    for _,e in ipairs(j.created or {}) do
+        local created=server(e.id)
+        if created and created:name()==e.internal and created:section_name()==e.section then
+            assert(alife_release_id(e.id),"rollback_created_clothing_release_failed")
+        end
+    end
+    -- Restore only the visual field while the receiver is still online;
+    -- the normal return teleport then rebuilds its client safely. This also
+    -- covers older journals, without repeating their full-state rewrite.
+    if j.staged then set_server_visual(se,j.npc.visual) end
+    if j.registration then anomaly_donation_bridge_named_companion.restore_registration(se,j.registration) end
+    cinema_clear();release_guards(j)
+    -- There is no actor move before commit, so compensation never teleports
+    -- the player or touches another map's level.ai graph.
+    if j.staged then
+        alife():teleport_object(se.id,j.npc.gvid,j.npc.lvid,vec(j.npc.position))
+    end
+    if j.possessed_companion then
+        companions().restore(se,j.possessed_companion)
+    elseif j.detached and se.group_id==65535 then
+        local group=server(j.npc.group)
+        assert(group,"rollback_original_squad_missing")
+        group:register_member(se.id)
+    end
+    if j.smart_detached and se:smart_terrain_id()==65535 then
+        local smart=server(j.npc.smart)
+        if smart and type(smart.register_npc)=="function" then smart:register_npc(se) end
+    end
+    local reason=j.reason;job=nil;persist();log("rolled back: "..tostring(reason))
+    if j.azazel then azazel_failed(reason) end
+end
+
+-- CGameTask also invokes a native luabind functor. Keep Lua validation errors
+-- inside a LOCAL pcall; never let them escape to that engine boundary.
+local function relife_state(task_id)
+    if not restored then return false,false end
+    local d=data();local b=d and d.bodies[task_id]
+    if not b then return false,false end -- late marshal restoration
+    if b.dead then return true,false end
+    local se=server(b.id)
+    if not same_object(se,b) then return false,true end
+    return not se:alive(),false
+end
+function relife_complete(task_id)
+    local ok,complete=pcall(relife_state,task_id)
+    return ok and complete==true
+end
+function relife_fail(task_id)
+    local ok,_,failed=pcall(relife_state,task_id)
+    return ok and failed==true
+end
+local function maintain_bodies()
+    for task_id,b in pairs(data().bodies) do
+        local se=server(b.id)
+        if same_object(se,b) then
+            if not se:alive() then b.dead=true end
+            local n=se:alive() and online(se.id)
+            if n then
+                if n:character_name()~=b.name then set_name(b,b.name) end
+                local comm=b.hostile and "arena_enemy" or b.faction
+                if n:character_community()~=comm then n:set_character_community(comm,0,0) end
+                if b.hostile then n:force_set_goodwill(-5000,db.actor) end
+            end
+            companions().maintain(b)
+        end
+        if b.quest and not b.task_given then
+            if not db.actor:get_task(task_id,false) then
+                local t=CGameTask();t:set_id(task_id);t:set_type(task.additional)
+                t:set_title("ReLIFE")
+                local prefix=anomaly_donation_bridge_common.game_text_cp1251('Не помню кто я, а в PDA только одна запись "KILL ')
+                t:set_description(prefix..b.name..'".')
+                t:set_priority(10);t:set_icon_name("ui_inGame2_Odin_vistrel")
+                t:set_map_location("secondary_task_location");t:set_map_object_id(b.id)
+                t:add_complete_func(MODULE..".relife_complete");t:add_fail_func(MODULE..".relife_fail")
+                db.actor:give_task(t,0,false,0)
+            end
+            b.task_given=db.actor:get_task(task_id,false)~=nil
+        end
+    end
+end
+local function prepare_target(se,options,a)
+    assert(eligible(se,protected_npcs(),options.any_location,options.azazel),"selected_npc_no_longer_eligible")
+    local valid,reason=contract(a,alife():actor(),online(se.id),se)
+    assert(valid,reason)
+    if options.azazel then
+        assert(has_method(se,"kill") and (not online(se.id) or has_method(online(se.id),"kill")),"azazel_body_death_api_unavailable")
+    end
+    -- Reject unsupported clothing before detachment or an NPC teleport. The
+    -- selector has already skipped such models; recheck against mod changes.
+    local target=options.keep_inventory and snapshot(se,online(se.id)) or clothing_preview(se)
+    local d=data();d.sequence=(d.sequence or 0)+1
+    local se_actor=alife():actor()
+    job={version=1,phase="stage",options=options,npc=target,
+        actor=snapshot(se_actor,a),true_faction=gameplay_disguise.get_default_comm(),
+        task_id="adb_relife_"..d.sequence.."_"..se.id,deadline=now()+TIMEOUT,
+        azazel=options.azazel==true,skip_cinema=options.azazel==true}
+    if options.leave_companions then
+        job.companions=companions().capture(protected_npcs())
+        assert(#job.companions==0 or companions().available(),"new_life_companion_transfer_api_unavailable")
+    end
+    assert(FACTIONS[job.true_faction],"actor_true_faction_unsupported")
+    local nv=job.npc.lvid
+    assert(type(nv)=="number" and nv%1==0 and nv>=0 and nv<4294967295 and
+        anomaly_donation_bridge_common.valid_vertex(job.actor.lvid),"invalid_navigation_vertex")
+    -- Only level.ai for the CURRENT map is loaded. A remote NPC's real saved
+    -- level vertex must never be passed to current level.vertex_position.
+    if level_id(job.npc.gvid)==level_id(job.actor.gvid) then
+        assert(anomaly_donation_bridge_common.valid_vertex(nv),"invalid_target_navigation_vertex")
+    end
+    -- No NPC/inventory mutation until the sleep camera has faded to black.
+    job.phase="fade_out";job.protect_actor=true;persist()
+    assert(input_capture(),"new_life_input_capture_unavailable")
+    cinema_begin("out")
+end
+local function step(j,a)
+    local se=server(j.npc.id)
+    assert(same_object(se,j.npc),"target_missing_or_reused")
+    if j.phase=="reveal" then
+        if cinema_tick("in") then finish(j) end
+        return
+    end
+    if j.phase=="arrival" then
+        local here=level_id(alife():actor().m_game_vertex_id)
+        if here==level_id(j.npc.gvid) then
+            -- JumpToLevel uses a safe stock entry point. Only AFTER the new
+            -- map is playable for 15 frames may we access its local AI graph
+            -- and move to the original NPC position. Never while loading.
+            assert(anomaly_donation_bridge_common.valid_vertex(j.npc.lvid),"arrival_navigation_vertex_invalid")
+            if not close_to(a:position(),j.npc.position) then a:set_actor_position(vec(j.npc.position)) end
+            assert(close_to(a:position(),j.npc.position),"arrival_position_not_confirmed")
+            j.phase="reveal";j.deadline=now()+TIMEOUT;persist();cinema_begin("in");return
+        end
+        if j.loaded and here==level_id(j.actor.gvid) then
+            -- A source-side transition save is recoverable, but never issue
+            -- ChangeLevel recursively from loading callbacks.
+            j.phase="travel";j.deadline=now()+TIMEOUT;persist()
+        end
+        return
+    end
+    if j.phase=="rollback" then rollback_step(j,a);return end
+    if j.phase=="travel" then
+        -- Drain native ownership/equipment/visual events before the stock
+        -- transition save. Do not synchronously destroy this Lua callback's
+        -- own level/script engine with ChangeLevel(...,false).
+        if device().frame-math.max(j.send_frame or -100,j.equip_frame or -100,j.identity_frame or -100)<3 then return end
+        local target=alife():level_name(level_id(j.npc.gvid))
+        assert(type(target)=="string" and target~="","destination_level_name_missing")
+        j.phase="arrival";j.loaded=false;j.deadline=now()+120000;persist()
+        release_guards(j)
+        j.protect_actor=true;persist()
+        log("request stock travel; target="..target.."; npc="..j.npc.id)
+        local ok,result=pcall(JumpToLevel,target)
+        if not ok or result~=true then rollback_begin("stock_travel_not_requested: "..tostring(result)) end
+        return
+    end
+    assert(level_id(a:game_vertex_id())==level_id(j.actor.gvid),"unexpected_external_level_change")
+    if j.phase=="fade_out" then
+        if not cinema_tick("out") then return end
+        j.phase="stage";j.deadline=now()+TIMEOUT;persist()
+    end
+    if j.phase=="stage" then
+        detach(j)
+        -- Prepare the real NPC under the held black screen, not in view.
+        j.staged=true;persist()
+        alife():teleport_object(se.id,j.actor.gvid,j.actor.lvid,vec(j.actor.position))
+        j.phase="prepare";persist();return
+    end
+    local n=online(se.id)
+    if not n then return end
+    assert(n:alive(),"selected_npc_died")
+    hold(j,a,n)
+    if j.phase=="prepare" then
+        if not j.online_frame then j.online_frame=device().frame;persist();return end
+        if device().frame-j.online_frame<3 then return end
+        local valid,reason=contract(a,alife():actor(),n,se)
+        assert(valid,reason) -- before any ownership/identity changes
+        if not j.visual_recycled then
+            -- Before a single inventory transfer, change only the server's
+            -- model field, release OUR NPC leases, then recycle the client.
+            -- Nothing calls the old userdata after teleport_object destroys it.
+            j.visual_attempted=true;persist()
+            set_server_visual(se,j.actor.visual)
+            j.visual_recycled=true;j.online_frame=nil;persist()
+            release_npc_guard(j)
+            alife():teleport_object(se.id,j.actor.gvid,j.actor.lvid,vec(j.actor.position))
+            return
+        end
+        assert(visual_key(n:get_visual_name())==visual_key(j.actor.visual),"previous_body_visual_not_confirmed")
+        j.goodwill=n:goodwill(a)
+        local prepared,why=prepare_inventory(j,a,n)
+        if not prepared then
+            if j.prepare_reason~=why then j.prepare_reason=why;persist();log("waiting: "..tostring(why)) end
+            return -- no ownership events until BOTH complete snapshots exist
+        end
+        j.prepare_reason=nil
+        j.phase="transfer";j.deadline=now()+TIMEOUT;persist();return
+    end
+    if j.phase=="transfer" then
+        if not transfer_pass(j,false) then return end
+        j.phase="equip";j.deadline=now()+TIMEOUT;persist();return
+    end
+    if j.phase=="equip" then
+        if not equip_inherited(j,a) then return end
+        -- Journal before identity writes; compensation is idempotent even
+        -- when a mod throws halfway through a setter callback.
+        j.identity_changed=true;persist()
+        set_actor_identity(j,false);body_identity(j)
+        j.identity_frame=device().frame
+        j.phase="commit";persist();return
+    end
+    if j.phase=="commit" then
+        -- All inventory ownership AND equipped slots were verified already.
+        -- Stop AI at old position until actor has actually moved away.
+        if level_id(j.npc.gvid)==level_id(j.actor.gvid) then
+            a:set_actor_position(vec(j.npc.position))
+            assert(close_to(a:position(),j.npc.position),"actor_move_not_confirmed")
+            j.phase="reveal";j.deadline=now()+TIMEOUT;persist();cinema_begin("in")
+        else
+            j.phase="travel";persist()
+        end
+    end
+end
+local function update()
+    if azazel_tick then
+        local ok,reason=pcall(azazel_tick)
+        if not ok then
+            log("Azazel update: "..tostring(reason))
+            if job and job.azazel then rollback_begin(reason)
+            else
+                local d=data()
+                if d and d.azazel and d.azazel.pending then azazel_failed(reason)
+                elseif d then d.azazel=nil;az_hud().hide() end
+            end
+        end
+    end
+    local a,frame=playable()
+    if not a or not frame then
+        wait_started=wait_started or now()
+        if cinema then cinema.last_tick=now() end
+        ready_frame,last_frame=nil,nil;return
+    end
+    -- Also covers late marshal restoration and either callback ordering.
+    if not cinema then cinema_restore() end
+    if not ready_frame or last_frame and frame<last_frame then ready_frame=frame end
+    if frame==last_frame then return end
+    last_frame=frame
+    if frame-ready_frame<15 then
+        wait_started=wait_started or now()
+        if cinema then cinema.last_tick=now() end;return
+    end
+    if wait_started then
+        if job and job.deadline then job.deadline=job.deadline+math.max(0,now()-wait_started);persist() end
+        wait_started=nil
+    end
+    if not restored or not job and not scan and data() and (data().job~=nil or data().selection~=nil) then
+        local d=data();if not d then return end
+        job=d.job;restored=true
+        if job then
+            assert(job.version==1,"new_life_journal_version_invalid")
+            job.deadline=now()+(job.phase=="arrival" and 120000 or TIMEOUT)
+            job.loaded=true;job.send_frame=nil;job.equip_frame=nil;job.identity_frame=nil
+            -- A save made outside the normal F5 fence must not continue a
+            -- half exchange. Compensate, except a committed map transition.
+            if job.phase~="arrival" and job.phase~="travel" and job.phase~="reveal" then rollback_begin("loaded_pending_exchange") end
+        elseif type(d.selection)=="table" and d.selection.version==1 and type(d.selection.options)=="table" then
+            scan={next=1,count=0,options=d.selection.options}
+        end
+    end
+    if scan then
+        local ok,reason=pcall(function()
+            local protected=protected_npcs()
+            for id=scan.next,math.min(scan.next+2047,65534) do
+                local se=server(id)
+                if eligible(se,protected,scan.options.any_location) then
+                    local compatible,reason=true
+                    if not scan.options.keep_inventory then compatible,reason=pcall(clothing_preview,se) end
+                    if compatible then
+                        scan.count=scan.count+1
+                        if math.random(scan.count)==1 then scan.selected=id end
+                    elseif (scan.skipped or 0)<8 then
+                        scan.skipped=(scan.skipped or 0)+1
+                        log("skip unsupported clothing; npc="..id.."; "..tostring(reason))
+                    end
+                end
+            end
+            scan.next=scan.next+2048
+            if scan.next>65534 then
+                local selected,opts=scan.selected,scan.options;scan=nil
+                assert(selected,"no_safe_real_npc_available")
+                prepare_target(server(selected),opts,a)
+            end
+        end)
+        if not ok then rollback_begin(reason) end
+        return
+    end
+    if job then
+        local j=job
+        if now()>j.deadline then
+            if j.phase=="rollback" then
+                -- Keep the durable journal for a later recovery; do not
+                -- silently clear an unconfirmed native ownership operation.
+                release_guards(j);j.deadline=now()+TIMEOUT
+                log("recovery waiting: "..tostring(j.reason))
+            elseif j.phase=="arrival" then
+                log("arrival not confirmed; retained committed journal")
+                j.deadline=now()+120000
+            else rollback_begin("timeout_"..j.phase..(j.prepare_reason and ": "..j.prepare_reason or "")) end
+        end
+        local ok,reason=pcall(step,j,a)
+        if not ok then
+            if j.phase=="rollback" then
+                if not j.recovery_logged then j.recovery_logged=true;log("recovery: "..tostring(reason)) end
+            elseif j.phase=="arrival" or j.phase=="travel" then
+                log("committed transition waiting: "..tostring(reason))
+            else rollback_begin(reason) end
+        end
+    elseif now()-last_maintenance>1000 then
+        last_maintenance=now()
+        local ok,reason=pcall(maintain_bodies)
+        if not ok then log("ReLIFE maintenance: "..tostring(reason)) end
+    end
+end
+local function parse(params)
+    local defaults={keep_inventory=false,keep_faction=true,hostile_previous_body=true,
+        any_location=false,quest_previous_body=true,leave_companions=true}
+    for key,value in pairs(params) do
+        if defaults[key]==nil or value~="true" and value~="false" then return nil,"new_life_parameter_invalid_"..tostring(key) end
+    end
+    for key,default in pairs(defaults) do defaults[key]=params[key]==nil and default or params[key]=="true" end
+    return defaults
+end
+local function can_execute(context,params)
+    local options,reason=parse(params or {})
+    if not options then return false,"rejected",reason end
+    if job or scan then return false,"rejected","new_life_in_progress" end
+    local a=ready_actor()
+    if not a then return false,"deferred","new_life_waiting_closed_ui" end
+    local valid,reason=contract(a,alife():actor())
+    if not valid then return false,"rejected",reason end
+    local s=input_state()
+    if not s or type(level.disable_input)~="function" or type(level.enable_input)~="function" then
+        return false,"rejected","new_life_input_capture_unavailable"
+    end
+    if s.disable_input_time~=nil or s.disable_input_idle~=nil then return false,"deferred","actor_input_locked" end
+    local d=data();local count=0
+    for _,b in pairs(d.bodies) do if not b.dead then count=count+1 end end
+    if count>=32 then return false,"rejected","too_many_living_previous_bodies" end
+    if not options.keep_faction and (not gameplay_disguise or type(gameplay_disguise.update_default)~="function") then
+        return false,"rejected","safe_faction_api_unavailable"
+    end
+    if options.any_location and type(JumpToLevel)~="function" then
+        return false,"rejected","safe_stock_level_jump_unavailable"
+    end
+    context.new_life_options=options;return true
+end
+local function execute(context)
+    if job or scan then return "rejected","new_life_in_progress" end
+    -- The before-save/native callbacks may open a window after can_execute.
+    -- Close this race without a journal, camera, lock, NPC or inventory change.
+    if not ready_actor() then return "deferred","new_life_waiting_closed_ui" end
+    scan={next=1,count=0,options=context.new_life_options}
+    persist()
+    return "executed","new_life_requested"
+end
+local function busy()
+    if scan or job then return true end
+    -- Before lazy marshal restoration, fence only a real pending journal.
+    -- Simply installing this template must not block unrelated effects/F5
+    -- while the player has the PDA/menu open on an ordinary load.
+    if alife_storage_manager and type(alife_storage_manager.get_state)=="function" then
+        local ok,saved=pcall(alife_storage_manager.get_state)
+        return ok and type(saved)=="table" and type(saved[KEY])=="table" and
+            (saved[KEY].job~=nil or saved[KEY].selection~=nil or
+                type(saved[KEY].azazel)=="table" and saved[KEY].azazel.pending~=nil) or false
+    end
+    return false
+end
+local initialized=false
+local function shared_load()
+            cinema_clear();job,scan,restored,ready_frame,last_frame,wait_started=nil,nil,false,nil,nil,nil
+            az_hud().loaded()
+            cinema_restore()
+end
+local function descriptor(check,run,support)
+    return {is_supported=support or supported,
+        can_execute=check,execute=run,update=update,is_blocking=busy,
+        on_game_load=shared_load,
+        -- A stock transition's autosave must not serialize our camera track.
+        -- Keep the black PP until actor destruction; stock travel adds its
+        -- own fade. No UI sleep callback or actor sleep flags are involved.
+        on_level_changing=function() az_hud().hide();cinema_camera_stop();input_release() end,
+        -- Immediate post-command autosave happens during read-only selection.
+        -- Its durable marker can resume selection; no half-swapped gear is saved.
+        on_effect_save=function(stage)
+            if stage~="before" then return true end
+            local ok,saved=pcall(alife_storage_manager.get_state)
+            local pending=ok and type(saved)=="table" and saved[KEY]
+            return ok and job==nil and not(type(pending)=="table" and (pending.job~=nil or
+                type(pending.azazel)=="table" and pending.azazel.pending~=nil))
+        end}
+end
+local function initialize()
+    if initialized then return end
+    initialized=true
+    RegisterScriptCallback("actor_on_first_update",function()
+        -- Mask the ordinary entry point before the first rendered frame,
+        -- but do NOT query navigation or teleport during loading/precache.
+        cinema_restore()
+    end)
+    RegisterScriptCallback("actor_on_net_destroy",function() az_hud().hide();cinema_clear() end)
+    RegisterScriptCallback("actor_on_before_death",function(who,flags)
+        if azazel_before_death then
+            local ok,reason=pcall(azazel_before_death,who,flags)
+            if not ok then log("Azazel death callback: "..tostring(reason)) end
+        end
+        if flags.ret_value~=false then az_hud().hide();cinema_clear() end
+    end)
+    local function ui_changed()
+        -- Opening AND closing invalidate readiness even between two 100ms
+        -- registry ticks. Never force-close the user's windows.
+        ready_frame,last_frame=nil,nil
+        wait_started=wait_started or now()
+        if cinema then cinema.last_tick=now() end
+    end
+    RegisterScriptCallback("GUI_on_show",ui_changed)
+    RegisterScriptCallback("GUI_on_hide",ui_changed)
+    RegisterScriptCallback("ActorMenu_on_mode_changed",ui_changed)
+    RegisterScriptCallback("on_before_save_input",function(flags)
+        if busy() then flags.ret=true end
+    end)
+    RegisterScriptCallback("on_before_load_input",function(_,_,flags)
+        if busy() then flags.ret=true else az_hud().hide() end
+    end)
+    RegisterScriptCallback("on_console_execute",function(command)
+        if command=="load" or command=="start" or command=="disconnect" then az_hud().hide() end
+    end)
+    local function before_key(_,binding,_,flags)
+        if not busy() then return end
+        if binding==key_bindings.kQUICK_SAVE or binding==key_bindings.kQUICK_LOAD or
+            job and job.protect_actor and binding~=key_bindings.kCONSOLE and binding~=key_bindings.kQUIT then
+            flags.ret_value=false
+        end
+    end
+    RegisterScriptCallback("on_before_key_press",before_key)
+    RegisterScriptCallback("on_before_key_hold",before_key)
+    RegisterScriptCallback("actor_on_before_hit",function(_,_,flags)
+        local d=data()
+        if job and job.protect_actor or d and d.azazel and d.azazel.pending then flags.ret_value=false end
+    end)
+    RegisterScriptCallback("npc_on_before_hit",function(npc,_,_,flags)
+        if job and job.protect_actor and npc:id()==job.npc.id and same_object(server(npc:id()),job.npc) then
+            flags.ret_value=false
+        end
+    end)
+    RegisterScriptCallback("npc_on_death_callback",function(npc)
+        local d=data();if not d then return end
+        for _,b in pairs(d.bodies) do
+            if npc:id()==b.id and same_object(server(b.id),b) then b.dead=true end
+        end
+    end)
+end
+
+function register_new_life()
+    initialize()
+    local ok,reason=anomaly_donation_bridge_registry.register(ID,descriptor(can_execute,execute))
+    if not ok then log("registration: "..tostring(reason)) end
+end
+
+-- Timed Azazel shares the journalled exchange, not gamemode_azazel's global
+-- quest failure/companion dismissal/gear regeneration. The death callback only
+-- cancels final death and records a request; object transfers run in update.
+local AZAZEL_ID="hardcoon.adb.new_life_azazel"
+local az_last,az_frame,az_cache,az_scan,az_refresh
+local function az_options(params)
+    local result={keep_inventory=false,keep_faction=true,any_location=false,prefer_companions=true}
+    for key,value in pairs(params) do
+        if key~="duration_seconds" and (result[key]==nil or value~="true" and value~="false") then
+            return nil,"azazel_parameter_invalid_"..tostring(key)
+        end
+    end
+    local seconds=tonumber(params.duration_seconds or "180")
+    if not seconds or seconds~=math.floor(seconds) or seconds<1 or seconds>999999 then return nil,"azazel_duration_invalid" end
+    for key,default in pairs(result) do result[key]=params[key]==nil and default or params[key]=="true" end
+    result.duration_seconds=seconds
+    return result
+end
+local function az_supported()
+    local ok,why=supported()
+    if not ok then return false,why end
+    return callback and callback.actor_before_death~=nil and companions().available() and
+        type(anomaly_donation_bridge_named_companion.snapshot_registration)=="function" and
+        type(anomaly_donation_bridge_named_companion.restore_registration)=="function" and true or false,
+        "azazel_death_or_companion_api_unavailable"
+end
+local function az_heal()
+    db.actor:set_health_ex(1)
+    db.actor.power=1;db.actor.radiation=0;db.actor.bleeding=1;db.actor.psy_health=1
+    -- Optional pack-specific psy pool, without forcing another module to load.
+    local psy=rawget(_G,"arszi_psy")
+    if type(psy)=="table" and type(psy.set_psy_health)=="function" then pcall(psy.set_psy_health,1) end
+end
+azazel_failed=function(reason)
+    local d=data();local state=d and d.azazel
+    if not state or not state.pending then return end
+    local who=state.pending.who
+    d.azazel=nil
+    az_hud().hide()
+    log("Azazel: no reincarnation; "..tostring(reason))
+    -- Bypass our before-death callback, as prescribed by CEntity::KillEntity.
+    local attacker=valid_id(who) and online(who) or nil
+    db.actor:kill(attacker or db.actor,true)
+end
+azazel_finished=function(j)
+    local se=server(j.npc.id)
+    assert(same_object(se,j.npc),"azazel_previous_body_missing")
+    local n=online(j.npc.id)
+    -- The possessed NPC is now the old identity at the death position. Native
+    -- death leaves the actually transferred old gear on that corpse.
+    if se:alive() then
+        if n then n:kill(n) else se:kill() end
+    end
+    companions().clean_empty(j.npc.group)
+    local state=data().azazel
+    if state then state.pending=nil;state.rebirths=(state.rebirths or 0)+1 end
+    az_heal();az_cache,az_scan,az_refresh=nil,nil,nil
+    log("Azazel reincarnated; target="..j.npc.id.."; name="..j.npc.name)
+end
+azazel_before_death=function(who,flags)
+    local d=data();local state=d and d.azazel
+    if not state or type(flags)~="table" or flags.ret_value==false or alife_storage_manager.get_state().enable_azazel_mode then return end
+    if state.pending or job and job.azazel then az_heal();flags.ret_value=false;return end
+    if (state.remaining_ms or 0)<=0 or job or scan then return end
+    local ok=pcall(az_heal)
+    if not ok then return end
+    state.pending={who=who,wait_ms=0}
+    flags.ret_value=false
+    log("Azazel intercepted death")
+end
+local function az_selection(state,a)
+    local excluded=protected_npcs()
+    local candidates,seen={},{}
+    local actor_level=level_id(a:game_vertex_id())
+    local origin=a:position()
+    local function consider(id)
+        if seen[id] then return end;seen[id]=true
+        local se=server(id)
+        if not eligible(se,excluded,state.options.any_location,true) then return end
+        local is_companion=companions().owned(se)
+        local local_level=level_id(se.m_game_vertex_id)==actor_level
+        local n=local_level and online(id)
+        local pos=n and n:position() or se.position
+        local dx,dy,dz=pos.x-origin.x,pos.y-origin.y,pos.z-origin.z
+        candidates[#candidates+1]={id=id,priority=state.options.prefer_companions and is_companion and 0 or 1,
+            remote=local_level and 0 or 1,distance=local_level and dx*dx+dy*dy+dz*dz or id}
+    end
+    -- Fresh companion identities are cheap and avoid waiting for a world scan.
+    for _,row in ipairs(companions().capture(excluded)) do consider(row.id) end
+    for _,id in ipairs(az_cache or {}) do consider(id) end
+    table.sort(candidates,function(x,y)
+        if x.priority~=y.priority then return x.priority<y.priority end
+        if x.remote~=y.remote then return x.remote<y.remote end
+        if x.distance~=y.distance then return x.distance<y.distance end
+        return x.id<y.id
+    end)
+    -- Wait for the complete scan when priority cannot be decided yet.
+    if not az_cache and not (state.options.prefer_companions and candidates[1] and candidates[1].priority==0) then return end
+    for _,candidate in ipairs(candidates) do
+        local se=server(candidate.id)
+        local ok=state.options.keep_inventory or pcall(clothing_preview,se)
+        if ok then return se end
+    end
+    if az_cache then return false end
+end
+azazel_tick=function()
+    if not restored or not db or not db.actor or not level.present() then az_last=nil;az_hud().update(nil);return end
+    local dev=device()
+    local d=data();local state=d and d.azazel
+    az_hud().update(state and state.remaining_ms,job~=nil or state and state.pending~=nil)
+    if not db.actor:alive() or dev:is_paused() or (tonumber(dev.precache_frame) or 0)>0 or type(app_ready)=="function" and not app_ready() then az_last=nil;return end
+    if az_frame==dev.frame then return end;az_frame=dev.frame
+    local current=now();local delta=az_last and math.min(1000,math.max(0,current-az_last)) or 0;az_last=current
+    if not state then az_cache,az_scan=nil,nil;return end
+    if not state.pending and not (job and job.azazel) then
+        state.remaining_ms=math.max(0,(state.remaining_ms or 0)-delta)
+        if state.remaining_ms==0 then d.azazel=nil;az_cache,az_scan=nil,nil;az_hud().hide();log("Azazel expired");return end
+    end
+    if not job and not scan then
+        if not az_scan and (not az_cache or current>=(az_refresh or 0)) then az_scan={next=1,ids={}} end
+        if az_scan then
+            local excluded=protected_npcs()
+            for id=az_scan.next,math.min(65534,az_scan.next+2047) do
+                local se=server(id)
+                if eligible(se,excluded,state.options.any_location,true) then az_scan.ids[#az_scan.ids+1]=id end
+            end
+            az_scan.next=az_scan.next+2048
+            if az_scan.next>65534 then az_cache=az_scan.ids;az_scan=nil;az_refresh=current+2000 end
+        end
+    end
+    if state.pending and not job then
+        state.pending.wait_ms=state.pending.wait_ms+delta
+        if state.pending.wait_ms>15000 then azazel_failed("target_or_ui_wait_timeout");return end
+        local a=playable()
+        if not a then return end
+        local ok,target=pcall(az_selection,state,a)
+        if not ok or target==false then azazel_failed(ok and "no_eligible_living_npc" or target);return end
+        if target then
+            local options={azazel=true,leave_companions=false,hostile_previous_body=false,quest_previous_body=false,
+                keep_inventory=state.options.keep_inventory,keep_faction=state.options.keep_faction,any_location=state.options.any_location}
+            local prepared,why=pcall(prepare_target,target,options,a)
+            if not prepared then
+                if job then rollback_begin(why) else azazel_failed(why) end
+            end
+        end
+    end
+end
+local function az_check(context,params)
+    local options,why=az_options(params or {})
+    if not options then return false,"rejected",why end
+    if busy() then return false,"deferred","new_life_in_progress" end
+    local a=ready_actor()
+    if not a then return false,"deferred","new_life_waiting_closed_ui" end
+    if alife_storage_manager.get_state().enable_azazel_mode then return false,"rejected","stock_azazel_already_enabled" end
+    if not has_method(a,"set_health_ex") or not has_method(a,"kill") then return false,"rejected","azazel_death_api_unavailable" end
+    local s=input_state()
+    if not s or type(level.disable_input)~="function" or type(level.enable_input)~="function" then
+        return false,"rejected","new_life_input_capture_unavailable"
+    end
+    if s.disable_input_time~=nil or s.disable_input_idle~=nil then return false,"deferred","actor_input_locked" end
+    local valid,reason=contract(a,alife():actor())
+    if not valid then return false,"rejected",reason end
+    if options.any_location and type(JumpToLevel)~="function" then return false,"rejected","safe_stock_level_jump_unavailable" end
+    if not options.keep_faction and type(gameplay_disguise.update_default)~="function" then return false,"rejected","safe_faction_api_unavailable" end
+    context.azazel_options=options;return true
+end
+local function az_execute(context)
+    if busy() or not ready_actor() then return "deferred","new_life_waiting_closed_ui" end
+    local d=data();local old=d.azazel
+    d.azazel={remaining_ms=math.min(999999000,(old and old.remaining_ms or 0)+context.azazel_options.duration_seconds*1000),
+        options=context.azazel_options,rebirths=old and old.rebirths or 0}
+    az_last=now();az_cache,az_scan,az_refresh=nil,nil,nil
+    return "executed","azazel_enabled"
+end
+function register_azazel()
+    initialize()
+    local desc=descriptor(az_check,az_execute,az_supported)
+    local load=desc.on_game_load
+    desc.on_game_load=function() az_last,az_frame,az_cache,az_scan,az_refresh=nil,nil,nil,nil,nil;load() end
+    local ok,reason=anomaly_donation_bridge_registry.register(AZAZEL_ID,desc)
+    if not ok then log("Azazel registration: "..tostring(reason)) end
+end

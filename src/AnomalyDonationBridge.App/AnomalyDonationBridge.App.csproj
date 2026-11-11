@@ -1,0 +1,141 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <StartupObject>AnomalyDonationBridge.App.Program</StartupObject>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>AnomalyDonationBridge</AssemblyName>
+    <RootNamespace>AnomalyDonationBridge.App</RootNamespace>
+    <AssemblyTitle>Anomaly Donation Bridge</AssemblyTitle>
+    <Product>Anomaly Donation Bridge</Product>
+    <Description>Donation service bridge for S.T.A.L.K.E.R. Anomaly</Description>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AnomalyDonationBridge.ico</ApplicationIcon>
+    <Version>1.4</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="..\..\third-party\youtube\*" Link="_internal\licenses\youtube\%(Filename)%(Extension)"
+             ExcludeFromSingleFile="true" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
+    <InternalsVisibleTo Include="AnomalyDonationBridge.AppTests" />
+    <Compile Include="..\AnomalyDonationBridge.CrashGuard\Watchdog.cs" Link="Services\Watchdog.cs" />
+    <ProjectReference Include="..\AnomalyDonationBridge.CrashGuard\AnomalyDonationBridge.CrashGuard.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\AnomalyDonationBridge.Core\AnomalyDonationBridge.Core.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.Persistence\AnomalyDonationBridge.Persistence.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.DonationAlerts\AnomalyDonationBridge.DonationAlerts.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.DonateX\AnomalyDonationBridge.DonateX.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.GameIpc\AnomalyDonationBridge.GameIpc.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\AnomalyDonationBridge.ico" />
+    <Resource Include="Assets\AnomalyDonationBridge.Paused.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\third-party\roulette\*"
+             Link="_internal\licenses\roulette\%(Filename)%(Extension)"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\anomaly_donation_bridge_voting.xml"
+             Link="addon-package\gamedata\configs\ui\anomaly_donation_bridge_voting.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_voting.xml"
+             Link="addon-package\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_voting.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\textures\ui\anomaly_donation_bridge_voting_material.dds"
+             Link="addon-package\gamedata\textures\ui\anomaly_donation_bridge_voting_material.dds"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_roulette.xml"
+             Link="addon-package\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_roulette.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\text\rus\st_anomaly_donation_bridge_roulette.xml"
+             Link="addon-package\gamedata\configs\text\rus\st_anomaly_donation_bridge_roulette.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\textures\ui\anomaly_donation_bridge_roulette_atlas.dds"
+             Link="addon-package\gamedata\textures\ui\anomaly_donation_bridge_roulette_atlas.dds"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\sounds\ui\anomaly_donation_bridge_roulette_*.ogg"
+             Link="addon-package\gamedata\sounds\ui\%(Filename)%(Extension)"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\addon-manifest.json"
+             Link="addon-package\addon-manifest.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\scripts\anomaly_donation_bridge_*.script"
+             Exclude="..\..\game-addon\gamedata\scripts\anomaly_donation_bridge_actions_*.script"
+             Link="addon-package\gamedata\scripts\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\misc\task\tm_anomaly_donation_bridge.ltx"
+             Link="addon-package\gamedata\configs\misc\task\tm_anomaly_donation_bridge.ltx"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\mod_system_anomaly_donation_bridge.ltx"
+             Link="addon-package\gamedata\configs\mod_system_anomaly_donation_bridge.ltx"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\models\weapons\anomaly_donation_bridge_stationary_mgun.ltx"
+             Link="addon-package\gamedata\configs\models\weapons\anomaly_donation_bridge_stationary_mgun.ltx"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\meshes\anomaly_donation_bridge\stationary_mgun*.ogf"
+             Link="addon-package\gamedata\meshes\anomaly_donation_bridge\%(Filename)%(Extension)"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\meshes\anomaly_donation_bridge\btr_olive.ogf"
+             Link="addon-package\gamedata\meshes\anomaly_donation_bridge\btr_olive.ogf"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\textures\anomaly_donation_bridge\btr_olive.dds"
+             Link="addon-package\gamedata\textures\anomaly_donation_bridge\btr_olive.dds"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\gameplay\dialogs_anomaly_donation_bridge.xml"
+             Link="addon-package\gamedata\configs\gameplay\dialogs_anomaly_donation_bridge.xml"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\scripts\anomaly_donation_bridge_wandering_trader.ltx" Link="addon-package\gamedata\configs\scripts\anomaly_donation_bridge_wandering_trader.ltx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\misc\trade\anomaly_donation_bridge_wandering_trader.ltx" Link="addon-package\gamedata\configs\misc\trade\anomaly_donation_bridge_wandering_trader.ltx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\scripts\anomaly_donation_bridge_annoying_fan.ltx"
+             Link="addon-package\gamedata\configs\scripts\anomaly_donation_bridge_annoying_fan.ltx"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\anomaly_donation_bridge_mutant_v2.xml"
+             Link="addon-package\gamedata\configs\ui\anomaly_donation_bridge_mutant_v2.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_mutant_v2.xml"
+             Link="addon-package\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_mutant_v2.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\textures\ui\anomaly_donation_bridge_mutant_v2.dds"
+             Link="addon-package\gamedata\textures\ui\anomaly_donation_bridge_mutant_v2.dds"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_burer_form.xml"
+             Link="addon-package\gamedata\configs\ui\textures_descr\anomaly_donation_bridge_burer_form.xml"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\game-addon\gamedata\textures\ui\anomaly_donation_bridge_burer_form.dds"
+             Link="addon-package\gamedata\textures\ui\anomaly_donation_bridge_burer_form.dds"
+             ExcludeFromSingleFile="true"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\effects\gamedata\scripts\*.script"
+             Link="effects\gamedata\scripts\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\optional-effects\gamedata\scripts\*.script"
+             Link="effects\gamedata\scripts\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

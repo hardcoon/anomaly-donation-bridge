@@ -1,0 +1,29 @@
+<Window x:Class="AnomalyDonationBridge.App.DonorLaunchWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Запустить от имени донатера" Width="520" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="Запустить от имени донатера" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" />
+            <TextBlock x:Name="TemplateName" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
+        </StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,18,0,0">
+            <TextBlock Text="Ник донатера" Margin="0,0,0,6" />
+            <TextBox x:Name="DonorNameBox" MaxLength="64" MinHeight="36" AutomationProperties.Name="Ник донатера" />
+        </StackPanel>
+        <StackPanel Grid.Row="2" Margin="0,14,0,0">
+            <TextBlock Text="Текст описания" Margin="0,0,0,6" />
+            <TextBox x:Name="MessageBox" MaxLength="4096" Height="110" AcceptsReturn="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" AutomationProperties.Name="Текст описания" />
+        </StackPanel>
+        <TextBlock x:Name="ErrorText" Grid.Row="3" Foreground="{DynamicResource BadBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Отмена" IsCancel="True" MinWidth="92" />
+            <Button x:Name="LaunchButton" Content="Запустить" IsDefault="True" Click="Launch_Click"
+                    Style="{StaticResource AccentOutlineButtonStyle}" MinWidth="104" Margin="8,0,0,0" />
+        </StackPanel>
+    </Grid>
+</Window>

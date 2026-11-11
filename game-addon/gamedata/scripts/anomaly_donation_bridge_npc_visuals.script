@@ -1,0 +1,347 @@
+-- Read human skeletons from the running build's VFS, including packed meshes.
+-- No renderer objects are constructed during catalogue discovery.
+local paths={}
+local portraits={}
+local function valid(path)
+    return type(path)=="string" and #path<=180 and not path:find("..",1,true) and
+        path:match("^[%w_][%w_%.%-%/\\]*$")~=nil
+end
+local spawn_base
+local rejected={}
+local function inspect_vfs(fs,path,ini,base)
+    local safe,reason=anomaly_donation_bridge_visual_safety.check(path,ini,base)
+    if not safe then
+        rejected[path]=reason
+        if type(printf)=="function" then printf("[ADB] special appearance excluded: "..path.." ("..tostring(reason)..")") end
+    end
+    return safe
+end
+function spawn_section() return spawn_base end
+function excluded_models() return rejected end
+function resolve(id)
+    local path=paths[id]
+    if path and getFS():exist("$game_meshes$",path) then return path end
+end
+function resolve_icon(id)
+    if resolve(id) then return portraits[id] end
+end
+
+-- Special appearances are derived exclusively from installed NPC profiles and
+-- resource validation. No bundled replacements or synthetic model entries.
+local last_error
+function failure_reason() return last_error end
+local function strip(value)
+    return tostring(value or ""):match("^%s*(.-)%s*$")
+end
+local function field(text,name)
+    return strip(text:match("<"..name.."%s*>(.-)</"..name.."%s*>"))
+end
+local function attribute(text,name)
+    -- Attribute names are matched at a whitespace boundary (not story_id/id).
+    local padded=" "..text
+    return padded:match("%s"..name.."%s*=%s*\"([^\"]*)\"") or
+        padded:match("%s"..name.."%s*=%s*'([^']*)'")
+end
+local function normalized_visual(path)
+    path=strip(path):lower():gsub("/","\\")
+    if path:sub(-4)~=".ogf" then path=path..".ogf" end
+    return valid(path) and path or nil
+end
+-- Also used when restoring saves. Never trust an old marker enough to call
+-- the native setter: this is the last guard before its uncatchable fatal path.
+function prepare_visual(visual,section)
+    local path=normalized_visual(visual)
+    if not path then return nil,"special_visual_path_invalid" end
+    local ini=type(system_ini)=="function" and system_ini() or ini_sys
+    local ok,reason=anomaly_donation_bridge_visual_safety.check(path,ini,section,true)
+    if not ok then return nil,reason end
+    return path
+end
+function resolve_visual_icon(visual)
+    local path=normalized_visual(visual)
+    if path then return resolve_icon("adb_visual_"..anomaly_donation_bridge_sha256.digest(path)) end
+end
+local function technical(value)
+    value=tostring(value or ""):lower()
+    return value:find("invisible",1,true) or value:find("dummy",1,true) or
+        value:find("debug",1,true) or value:find("corpse",1,true) or
+        value:find("_dead",1,true) or value:find("_test",1,true) or
+        value:find("^actor_") or value=="actor" or value:find("^mp_")
+end
+local function tokens(value)
+    local out={}
+    for token in tostring(value or ""):gmatch("[^,%s]+") do out[#out+1]=token:gsub('^"',''):gsub('"$','') end
+    return out
+end
+local function names_in(text,tag)
+    local out={}
+    for value in text:gmatch("<"..tag.."%s*>(.-)</"..tag.."%s*>") do out[#out+1]=strip(value) end
+    return out
+end
+local function ini_text(ini,section,key)
+    if ini:line_exist(section,key) then return strip(ini:r_string(section,key)) end
+end
+local function config_reader(fs)
+    local cache,active,total={}, {}, 0
+    local include_cache={}
+    local serial=0
+    local function read_config(path)
+        if not valid(path) then error("special_visual_config_path_invalid") end
+        if not fs:exist("$game_config$",path) then return nil end
+        local full=fs:update_path("$game_config$",path)
+        local file=io.open(full,"rb")
+        local temporary
+        if not file then
+            serial=serial+1
+            temporary=fs:update_path("$app_data_root$","adb_profile_probe_"..time_global().."_"..serial..".tmp")
+            if fs:exist(temporary) then error("special_visual_temporary_file_exists") end
+            local ok=pcall(fs.file_copy,fs,full,temporary)
+            if ok then file=io.open(temporary,"rb") end
+        end
+        local ok,result=pcall(function()
+            if not file then error("special_visual_config_unreadable") end
+            local size=file:seek("end")
+            if not size or size>8*1024*1024 then error("special_visual_config_too_large") end
+            total=total+size
+            if total>64*1024*1024 then error("special_visual_config_budget_exceeded") end
+            file:seek("set",0)
+            return file:read("*a")
+        end)
+        if file then file:close() end
+        if temporary then fs:file_delete(temporary) end
+        if not ok then error(result) end
+        return result
+    end
+    local expand
+    local function wildcard_parts(path)
+        if type(path)~="string" or #path>180 or path:find("..",1,true) then return nil end
+        local normalized=path:gsub("/","\\")
+        local directory,mask=normalized:match("^(.*\\)([^\\]+)$")
+        if not directory then directory="";mask=normalized end
+        if directory~="" and not valid(directory:sub(1,-2)) then return nil end
+        if not mask or not mask:find("[*?]") or not mask:match("^[%w_%.%-%*%?]+$") then return nil end
+        return directory,mask
+    end
+    local function glob_pattern(mask)
+        local out={"^"}
+        for index=1,#mask do
+            local character=mask:sub(index,index)
+            if character=="*" then out[#out+1]=".*"
+            elseif character=="?" then out[#out+1]="."
+            elseif character=="." then out[#out+1]="%."
+            elseif character=="-" then out[#out+1]="%-"
+            else out[#out+1]=character end
+        end
+        out[#out+1]="$"
+        return table.concat(out)
+    end
+    local function matching_include_files(path)
+        local directory,mask=wildcard_parts(path)
+        if not directory then error("special_visual_include_path_invalid") end
+        local key=(directory..mask):lower()
+        if include_cache[key] then return include_cache[key] end
+        if not fs or type(fs.file_list_open)~="function" or type(fs.file_list_open_ex)~="function" or
+            not FS or FS.FS_ListFiles==nil or FS.FS_RootOnly==nil then
+            error("special_visual_include_enumeration_unavailable")
+        end
+        local listing
+        local ok,files=pcall(function()
+            local flags=FS.FS_ListFiles+FS.FS_RootOnly
+            if directory=="" then
+                listing=fs:file_list_open_ex("$game_config$",flags,mask)
+            else
+                listing=fs:file_list_open("$game_config$",directory,flags)
+            end
+            local matches,seen={},{}
+            if not listing then return matches end
+            local count=listing:Size()
+            if type(count)~="number" or count<0 or count>20000 then
+                error("special_visual_include_entry_limit")
+            end
+            local pattern=glob_pattern(mask:lower())
+            for index=0,count-1 do
+                local entry=listing:GetAt(index)
+                local name
+                if type(entry)=="string" then name=entry
+                elseif entry and type(entry.NameFull)=="function" then name=entry:NameFull()
+                elseif entry and type(entry.NameShort)=="function" then name=entry:NameShort() end
+                if type(name)=="string" and not name:find("[/\\]") and
+                    name:lower():match(pattern) and not seen[name:lower()] then
+                    seen[name:lower()]=true
+                    matches[#matches+1]=directory..name
+                end
+            end
+            table.sort(matches,function(left,right) return left:lower()<right:lower() end)
+            return matches
+        end)
+        if listing and type(listing.Free)=="function" then pcall(function() listing:Free() end) end
+        if not ok then error(files) end
+        include_cache[key]=files
+        return files
+    end
+    local function expand_include(include,current_path,depth)
+        include=include:gsub("/","\\")
+        if not include:find("[*?]") then
+            if not valid(include) then error("special_visual_include_path_invalid") end
+            if not fs:exist("$game_config$",include) then
+                include=(current_path:match("^(.*\\)") or "")..include
+            end
+            return expand(include,depth+1)
+        end
+        local matches=matching_include_files(include)
+        if #matches==0 then
+            local parent=current_path:match("^(.*\\)") or ""
+            if parent~="" then matches=matching_include_files(parent..include) end
+        end
+        local expanded={}
+        for _,match in ipairs(matches) do expanded[#expanded+1]=expand(match,depth+1) end
+        return table.concat(expanded,"\n")
+    end
+    expand=function(path,depth)
+        path=path:lower():gsub("/","\\")
+        if cache[path] then return cache[path] end
+        if active[path] or depth>32 then error("special_visual_include_cycle_or_depth") end
+        active[path]=true
+        local text=read_config(path)
+        if not text then error("special_visual_profile_file_missing_"..path) end
+        text=text:gsub("<!%-%-.-%-%->","")
+        text=text:gsub("[^\r\n]+",function(line)
+            local include=line:match('^%s*#include%s+"([^"\r\n]+)"')
+            if not include then return line end
+            return expand_include(include,path,depth)
+        end)
+        if #text>16*1024*1024 then error("special_visual_expanded_profile_too_large") end
+        active[path]=nil;cache[path]=text
+        return text
+    end
+    return function(name)
+        name=strip(name):gsub("/","\\")
+        if name:sub(-4)~=".xml" then name=name..".xml" end
+        if not name:find("\\",1,true) then name="gameplay\\"..name end
+        return expand(name,0)
+    end
+end
+
+local function discover_special(entries,ini)
+    if not getFS or not io or not io.open or not time_global then error("special_visual_vfs_api_unavailable") end
+    local fs=getFS()
+    local read_config=config_reader(fs)
+    local specific_files=tokens(ini_text(ini,"profiles","specific_characters_files"))
+    local profile_files=tokens(ini_text(ini,"profiles","files"))
+    if #specific_files==0 or #profile_files==0 then error("special_visual_profile_list_missing") end
+    local characters,classes,profiles={},{},{}
+    for _,name in ipairs(specific_files) do
+        local text=read_config(name)
+        for attrs,body in text:gmatch("<specific_character%s+([^>]-)>(.-)</specific_character%s*>") do
+            local id=attribute(attrs,"id")
+            local visual=normalized_visual(field(body,"visual"))
+            if id and visual then
+                local icon=field(body,"icon")
+                if #icon>128 or not icon:match("^[%w_%.%-]+$") then icon=nil end
+                characters[id]={id=id,visual=visual,name=field(body,"name"),icon=icon,classes=names_in(body,"class"),
+                    no_random=attribute(attrs,"no_random")=="1"}
+            end
+        end
+    end
+    for _,row in pairs(characters) do
+        if not row.no_random then
+            for _,name in ipairs(row.classes) do
+                classes[name]=classes[name] or {};classes[name][#classes[name]+1]=row
+            end
+        end
+    end
+    for _,name in ipairs(profile_files) do
+        for attrs,body in read_config(name):gmatch("<character%s+([^>]-)>(.-)</character%s*>") do
+            local id=attribute(attrs,"id")
+            if id then
+                local exact=field(body,"specific_character")
+                local rows={}
+                if exact~="" then
+                    if characters[exact] then rows[1]=characters[exact] end
+                else
+                    for _,class_name in ipairs(names_in(body,"class")) do
+                        for _,row in ipairs(classes[class_name] or {}) do rows[#rows+1]=row end
+                    end
+                end
+                profiles[id]=rows
+            end
+        end
+    end
+    local ordinary,candidates={},{}
+    for _,entry in ipairs(entries) do
+        if entry.kind=="npc" then
+            local profile=ini_text(ini,entry.section_id,"character_profile")
+            local rows=profiles[profile] or (characters[profile] and {characters[profile]}) or {}
+            if entry.available then
+                -- Missing normal profile information would mislabel ordinary
+                -- models as special. Fail this optional catalogue, not all NPCs.
+                if #rows==0 then error("special_visual_ordinary_profile_unresolved_"..tostring(profile)) end
+                for _,row in ipairs(rows) do ordinary[row.visual]=true end
+            elseif entry.quarantine_reason=="story_unique" or entry.quarantine_reason=="scripted" then
+                if not technical(entry.section_id) then
+                    for _,row in ipairs(rows) do
+                        if not technical(row.id) and not technical(row.visual) then
+                            candidates[row.visual]=candidates[row.visual] or {}
+                            candidates[row.visual][row.id]=row
+                        end
+                    end
+                end
+            end
+        end
+    end
+    local bases={}
+    for _,entry in ipairs(entries) do if entry.kind=="npc" and entry.available then bases[#bases+1]=entry.section_id end end
+    table.sort(bases)
+    spawn_base=bases[1]
+    for _,section in ipairs(bases) do if section=="sim_default_stalker_0" then spawn_base=section;break end end
+    if not spawn_base then error("special_visual_safe_spawn_base_missing") end
+    local sorted={}
+    for visual in pairs(candidates) do if not ordinary[visual] then sorted[#sorted+1]=visual end end
+    table.sort(sorted)
+    local rows,new_paths,new_portraits={},{},{}
+    for _,visual in ipairs(sorted) do
+        if inspect_vfs(fs,visual,ini,spawn_base) then
+            local labels={}
+            for _,profile in pairs(candidates[visual]) do
+                local token=profile.name~="" and profile.name or profile.id
+                if not token:find("^GENERATE_NAME") then
+                    local ok,label=pcall(function() return game.translate_string(token) end)
+                    label=ok and anomaly_donation_bridge_common.game_text_utf8(label) or token
+                    labels[#labels+1]={text=strip(label or token):gsub("[%z\1-\31\127]"," "),profile=profile}
+                end
+            end
+            table.sort(labels,function(a,b)if a.text~=b.text then return a.text<b.text end;return a.profile.id<b.profile.id end)
+            local chosen=labels[1]
+            local label=chosen and chosen.text~="" and chosen.text or visual:match("([^\\]+)$")
+            label=anomaly_donation_bridge_common.truncate_utf8(label,180)
+            local id="adb_visual_"..anomaly_donation_bridge_sha256.digest(visual)
+            new_paths[id]=visual
+            local icon_profile=chosen and chosen.profile
+            if not icon_profile then
+                for _,profile in pairs(candidates[visual]) do
+                    if not icon_profile or profile.id<icon_profile.id then icon_profile=profile end
+                end
+            end
+            new_portraits[id]=icon_profile and icon_profile.icon or nil
+            rows[#rows+1]={section_id=id,kind="npc_visual",display_name=label.." — "..visual,
+                category="Особые персонажи",strength="unclassified",faction="",available=true,quarantine_reason="none"}
+        end
+    end
+    return rows,new_paths,new_portraits
+end
+
+function append_special(entries,ini)
+    paths={};portraits={};last_error=nil;spawn_base=nil;rejected={}
+    anomaly_donation_bridge_visual_safety.clear_cache()
+    local ok,rows,new_paths,new_portraits=pcall(discover_special,entries,ini)
+    if not ok then
+        last_error=tostring(rows):match("special_visual_[%w_\\%.%-]+") or "special_visual_catalog_failed"
+        if type(printf)=="function" then printf("[ADB] special companion catalog unavailable: "..last_error) end
+        return false,last_error
+    end
+    paths=new_paths
+    portraits=new_portraits
+    for _,row in ipairs(rows) do entries[#entries+1]=row end
+    if type(printf)=="function" then printf("[ADB] special companion appearances: "..#rows) end
+    return true,#rows
+end

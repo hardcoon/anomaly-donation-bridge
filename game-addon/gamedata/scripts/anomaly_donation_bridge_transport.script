@@ -1,0 +1,166 @@
+-- Non-blocking LuaJIT FFI client for the per-user application pipe.
+
+local PIPE_PATH = "\\\\.\\pipe\\AnomalyDonationBridge.v1"
+local STATE_KEY = "__anomaly_donation_bridge_transport_v1"
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32 = nil
+local state = rawget(_G, STATE_KEY)
+
+if ffi_ok then
+	pcall(ffi.cdef, [[
+		typedef unsigned long ADB_DWORD;
+		typedef int ADB_BOOL;
+		typedef void* ADB_HANDLE;
+		ADB_BOOL __stdcall WaitNamedPipeA(const char* name, ADB_DWORD timeout);
+		ADB_HANDLE __stdcall CreateFileA(const char* name, ADB_DWORD access,
+			ADB_DWORD share, void* security, ADB_DWORD creation,
+			ADB_DWORD flags, ADB_HANDLE template_file);
+		ADB_BOOL __stdcall PeekNamedPipe(ADB_HANDLE pipe, void* buffer,
+			ADB_DWORD size, ADB_DWORD* read, ADB_DWORD* available, ADB_DWORD* left);
+		ADB_BOOL __stdcall ReadFile(ADB_HANDLE file, void* buffer,
+			ADB_DWORD size, ADB_DWORD* read, void* overlapped);
+		ADB_BOOL __stdcall WriteFile(ADB_HANDLE file, const void* buffer,
+			ADB_DWORD size, ADB_DWORD* written, void* overlapped);
+		ADB_BOOL __stdcall SetNamedPipeHandleState(ADB_HANDLE pipe,
+			ADB_DWORD* mode, ADB_DWORD* maximum_collection_count,
+			ADB_DWORD* collection_data_timeout);
+		ADB_BOOL __stdcall CloseHandle(ADB_HANDLE object);
+		ADB_DWORD __stdcall GetLastError(void);
+		ADB_DWORD __stdcall GetCurrentProcessId(void);
+	]])
+	local loaded, library = pcall(ffi.load, "kernel32")
+	if loaded then kernel32 = library end
+end
+
+if type(state) ~= "table" then
+	state = { pipe = nil, connected = false, read_buffer = "" }
+	rawset(_G, STATE_KEY, state)
+end
+
+local function invalid_handle(handle)
+	if handle == nil or not ffi_ok then return true end
+	return tonumber(ffi.cast("intptr_t", handle)) == -1
+end
+
+function disconnect()
+	if state.pipe ~= nil and not invalid_handle(state.pipe) and kernel32 ~= nil then
+		local handle = state.pipe
+		ffi.gc(handle, nil)
+		pcall(kernel32.CloseHandle, handle)
+	end
+	state.pipe = nil
+	state.connected = false
+	state.read_buffer = ""
+end
+
+function available()
+	return ffi_ok and kernel32 ~= nil
+end
+
+function connect()
+	if state.connected and not invalid_handle(state.pipe) then return true, "existing" end
+	disconnect()
+	if not available() then return false, "ffi_unavailable" end
+	if kernel32.WaitNamedPipeA(PIPE_PATH, 1) == 0 then
+		return false, "pipe_unavailable_" .. tostring(kernel32.GetLastError())
+	end
+	local pipe = kernel32.CreateFileA(PIPE_PATH, 0xC0000000, 0, nil, 3, 0, nil)
+	if invalid_handle(pipe) then
+		return false, "pipe_attach_failed_" .. tostring(kernel32.GetLastError())
+	end
+	-- Byte-read mode is zero; PIPE_NOWAIT is 0x1.  This keeps actor_on_update
+	-- from blocking if the application is suspended and its 16 KiB buffer fills.
+	local mode = ffi.new("ADB_DWORD[1]", 0x1)
+	if kernel32.SetNamedPipeHandleState(pipe, mode, nil, nil) == 0 then
+		local error_code = "pipe_nonblocking_mode_failed_" ..
+			tostring(kernel32.GetLastError())
+		pcall(kernel32.CloseHandle, pipe)
+		return false, error_code
+	end
+	state.pipe = ffi.gc(pipe, function(value)
+		if kernel32 ~= nil then pcall(kernel32.CloseHandle, value) end
+	end)
+	state.connected = true
+	state.read_buffer = ""
+	return true, "attached"
+end
+
+function send(fields)
+	if not state.connected or invalid_handle(state.pipe) then
+		return false, "pipe_not_connected"
+	end
+	local data, encode_error = anomaly_donation_bridge_protocol.encode_fields(fields)
+	if data == nil then return false, encode_error end
+	local written = ffi.new("ADB_DWORD[1]")
+	if kernel32.WriteFile(state.pipe, data, #data, written, nil) == 0 or
+		tonumber(written[0]) ~= #data then
+		local error_code = "pipe_write_failed_" .. tostring(kernel32.GetLastError())
+		disconnect()
+		return false, error_code
+	end
+	return true
+end
+
+local function extract_events(events, max_events)
+	while #events < max_events do
+		local delimiter = state.read_buffer:find("\n", 1, true)
+		if delimiter == nil then
+			if #state.read_buffer + 1 > anomaly_donation_bridge_protocol.max_wire_bytes() then
+				return false, "wire_message_too_large"
+			end
+			return true
+		end
+		if delimiter > anomaly_donation_bridge_protocol.max_wire_bytes() then
+			return false, "wire_message_too_large"
+		end
+		local line = state.read_buffer:sub(1, delimiter - 1):gsub("\r$", "")
+		state.read_buffer = state.read_buffer:sub(delimiter + 1)
+		if line ~= "" then
+			local fields, decode_error = anomaly_donation_bridge_protocol.decode_line(line)
+			if fields == nil then return false, decode_error end
+			events[#events + 1] = fields
+		end
+	end
+	return true
+end
+
+function poll(max_events)
+	local events = {}
+	if not state.connected or invalid_handle(state.pipe) then
+		return events, "pipe_not_connected"
+	end
+	max_events = math.max(1, math.min(tonumber(max_events) or 8, 32))
+	local extracted, extract_error = extract_events(events, max_events)
+	if not extracted then disconnect() return events, extract_error end
+	while #events < max_events do
+		local available_bytes = ffi.new("ADB_DWORD[1]")
+		if kernel32.PeekNamedPipe(state.pipe, nil, 0, nil, available_bytes, nil) == 0 then
+			local error_code = "pipe_read_failed_" .. tostring(kernel32.GetLastError())
+			disconnect()
+			return events, error_code
+		end
+		local count = tonumber(available_bytes[0]) or 0
+		if count <= 0 then break end
+		count = math.min(count, 4096)
+		local buffer = ffi.new("char[?]", count)
+		local bytes_read = ffi.new("ADB_DWORD[1]")
+		if kernel32.ReadFile(state.pipe, buffer, count, bytes_read, nil) == 0 then
+			local error_code = "pipe_read_failed_" .. tostring(kernel32.GetLastError())
+			disconnect()
+			return events, error_code
+		end
+		state.read_buffer = state.read_buffer .. ffi.string(buffer, tonumber(bytes_read[0]))
+		extracted, extract_error = extract_events(events, max_events)
+		if not extracted then disconnect() return events, extract_error end
+	end
+	return events, nil
+end
+
+function is_connected()
+	return state.connected == true and not invalid_handle(state.pipe)
+end
+
+function process_id()
+	if not available() then return 0 end
+	return tonumber(kernel32.GetCurrentProcessId()) or 0
+end

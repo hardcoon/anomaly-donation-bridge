@@ -1,0 +1,227 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "block_inventory",
+  "displayName": "Заблокировать инвентарь",
+  "description": "Штатным callback Anomaly запрещает открывать обычный инвентарь в течение выбранного времени. Торговля, ремонт и обыск не блокируются.",
+  "category": "inventory",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {
+      "key": "duration_seconds",
+      "displayName": "Время блокировки, сек.",
+      "kind": "Integer",
+      "minimum": 10,
+      "maximum": 600,
+      "options": [],
+      "optionGroups": {},
+      "optionLabels": {},
+      "defaultValue": "30",
+      "catalogKind": null,
+      "minimumSelections": 0
+    }
+  ],
+  "parameters": {
+    "duration_seconds": "30"
+  },
+  "itemSpawns": [],
+  "spawnGroups": []
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_inventory_lock_v1"
+local SAVE_KEY = "adb_inventory_lock_v1"
+local MAX_DURATION_MS = 600000
+local state = rawget(_G, STATE_KEY)
+if type(state) ~= "table" then
+	state = {
+		active = false, expires_at = 0, next_persist_at = 0,
+		load_pending = false, callback_registered = false
+	}
+	rawset(_G, STATE_KEY, state)
+end
+
+local function now_ms(value)
+	return tonumber(value) or (time_global and time_global() or 0)
+end
+
+local function actor_id(actor)
+	if actor == nil then return nil end
+	local ok, id = pcall(function() return tonumber(actor:id()) end)
+	return ok and id and id >= 0 and id or nil
+end
+
+local function clear_saved(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	return pcall(se_save_var, id, nil, SAVE_KEY, nil)
+end
+
+local function clear_state(actor, erase_saved)
+	state.active = false
+	state.expires_at = 0
+	state.next_persist_at = 0
+	state.load_pending = false
+	if erase_saved then clear_saved(actor) end
+end
+
+local function persist_state(actor, now)
+	local id = actor_id(actor)
+	if id == nil or type(se_save_var) ~= "function" then return false end
+	if not state.active then return clear_saved(actor) end
+	local remaining = math.floor((tonumber(state.expires_at) or 0) - now_ms(now))
+	if remaining <= 0 then return clear_saved(actor) end
+	if remaining > MAX_DURATION_MS then remaining = MAX_DURATION_MS end
+	return pcall(se_save_var, id, nil, SAVE_KEY, {
+		version = 1, active = true, remaining_ms = remaining
+	})
+end
+
+local function load_state(actor)
+	local id = actor_id(actor)
+	if id == nil or type(se_load_var) ~= "function" then return nil end
+	local ok, saved = pcall(se_load_var, id, nil, SAVE_KEY)
+	local remaining = ok and type(saved) == "table" and
+		tonumber(saved.remaining_ms) or nil
+	if not ok or type(saved) ~= "table" or saved.version ~= 1 or
+		saved.active ~= true or remaining == nil or remaining <= 0 or
+		remaining > MAX_DURATION_MS then
+		clear_saved(actor)
+		return nil
+	end
+	return math.floor(remaining)
+end
+
+local function timer_active(now)
+	if not state.active then return false end
+	if now_ms(now) < tonumber(state.expires_at or 0) then return true end
+	clear_state(db and db.actor or nil, true)
+	return false
+end
+
+local function block_inventory_open(mode, flags)
+	if mode == "inventory" and type(flags) == "table" and timer_active(now_ms()) then
+		flags.ret = true
+	end
+end
+
+local function close_inventory_if_open()
+	local closed = false
+	-- Stock Anomaly normally replaces the native actor menu with ui_inventory.
+	-- Another callback may open that window even after flags.ret was set, so
+	-- close only its ordinary inventory mode through the script's own API.
+	local inventory_script = rawget(_G, "ui_inventory")
+	local gui = type(inventory_script) == "table" and inventory_script.GUI or nil
+	if gui ~= nil then
+		local mode_ok, mode = pcall(function() return gui.mode end)
+		if mode_ok and mode == "inventory" then
+			local close_ok = pcall(function()
+				if type(gui.Close) == "function" then gui:Close()
+				else gui:HideDialog() end
+			end)
+			closed = close_ok or closed
+		end
+	end
+
+	local menu_script = rawget(_G, "actor_menu")
+	if type(menu_script) ~= "table" or type(menu_script.get_last_mode) ~= "function" then
+		return closed
+	end
+	local mode_ok, mode = pcall(menu_script.get_last_mode)
+	if not mode_ok or tonumber(mode) ~= 1 then return closed end
+	local menu_api = rawget(_G, "ActorMenu")
+	if type(menu_api) ~= "table" or type(menu_api.get_actor_menu) ~= "function" then
+		return closed
+	end
+	local ok, menu = pcall(menu_api.get_actor_menu)
+	if not ok or menu == nil then return closed end
+	local native_closed = pcall(function() menu:HideDialog() end)
+	return native_closed or closed
+end
+
+local function block_inventory_can(context, params)
+	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
+		duration_seconds = true
+	})
+	if not valid then return false, "rejected", reason end
+	local duration, parse_error = anomaly_donation_bridge_common.parse_integer(
+		params.duration_seconds, 30, 10, 600, "inventory_lock_duration_invalid")
+	if duration == nil then return false, "rejected", parse_error end
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if not state.callback_registered then
+		return false, "rejected", "inventory_callback_unavailable"
+	end
+	context.options = { duration = duration }
+	return true
+end
+
+local function block_inventory_execute(context)
+	local current = now_ms(context.now)
+	state.active = true
+	state.expires_at = math.max(tonumber(state.expires_at) or 0,
+		current + context.options.duration * 1000)
+	state.next_persist_at = current + 1000
+	persist_state(context.actor, current)
+	close_inventory_if_open()
+	return "executed", "inventory_locked_seconds_" ..
+		tostring(context.options.duration)
+end
+
+local function block_inventory_update(now)
+	local actor = db and db.actor or nil
+	if actor == nil then return end
+	local current = now_ms(now)
+	if state.load_pending then
+		state.load_pending = false
+		local remaining = load_state(actor)
+		clear_state(actor, false)
+		if remaining ~= nil then
+			state.active = true
+			state.expires_at = current + remaining
+			state.next_persist_at = current + 1000
+		end
+	end
+	if not timer_active(current) then return end
+	close_inventory_if_open()
+	if current >= tonumber(state.next_persist_at or 0) then
+		persist_state(actor, current)
+		state.next_persist_at = current + 1000
+	end
+end
+
+local function block_inventory_load()
+	clear_state(db and db.actor or nil, false)
+	state.load_pending = true
+	block_inventory_update(now_ms())
+end
+
+local function block_inventory_level_changing()
+	if state.active then persist_state(db and db.actor or nil, now_ms()) end
+end
+
+local function block_inventory_supported(context)
+	local actor = context and context.actor or (db and db.actor or nil)
+	local supported = actor_id(actor) ~= nil and state.callback_registered == true
+	return supported, supported and nil or "inventory_callback_unavailable"
+end
+
+function on_game_start()
+	if not state.callback_registered and type(RegisterScriptCallback) == "function" then
+		local ok = pcall(RegisterScriptCallback,
+			"ActorMenu_on_before_init_mode", block_inventory_open)
+		state.callback_registered = ok
+	end
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin(
+		"block_inventory", {
+			can_execute = block_inventory_can,
+			execute = block_inventory_execute,
+			update = block_inventory_update,
+			on_game_load = block_inventory_load,
+			on_level_changing = block_inventory_level_changing,
+			is_supported = block_inventory_supported,
+			support_probe_is_hint = true
+		})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] block_inventory registration failed: %s", tostring(reason))
+	end
+end

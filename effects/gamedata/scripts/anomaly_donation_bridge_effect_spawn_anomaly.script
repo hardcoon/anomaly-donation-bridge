@@ -1,0 +1,728 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion": 1,
+  "handlerId": "spawn_anomaly",
+  "displayName": "Создать временную аномалию",
+  "description": "Создаёт вокруг героя равномерное кольцо временных аномалий выбранного либо случайного типа.",
+  "category": "world",
+  "cooldownSeconds": 3,
+  "parameterDefinitions": [
+    {"key":"section_id","displayName":"Аномалия","kind":"Choice","catalogKind":"Anomaly","defaultValue":""},
+    {"key":"distance_meters","displayName":"Радиус спавна, м","kind":"Integer","minimum":0,"maximum":100,"defaultValue":"20"},
+    {"key":"count","displayName":"Количество аномалий","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"1"},
+    {"key":"lifetime_seconds","displayName":"Время жизни, сек.","kind":"Integer","minimum":10,"maximum":60000,"defaultValue":"60"}
+  ],
+  "parameters": {"section_id":"","distance_meters":"20","count":"1","lifetime_seconds":"60"}
+}
+ADB_PRESET_END]]
+
+local STATE_KEY = "__anomaly_donation_bridge_spawn_effects_v1"
+local ANOMALY_PSTOR_KEY = "anomaly_donation_bridge_active_anomalies_v1"
+local state = rawget(_G, STATE_KEY)
+local MAX_ACTIVE_ANOMALIES = 100
+local MAX_PERSISTED_ANOMALY_BYTES = 32768
+local MAX_OBJECT_ID = 65534
+local ANOMALY_LOAD_GRACE_MS = 1500
+local ANOMALY_PERSIST_INTERVAL_MS = 1000
+local MAX_ANOMALY_LIFETIME_MS = 60000000
+local SQUAD_MINIMUM_RADIUS = 10
+local SQUAD_MAXIMUM_RADIUS = 100
+local SQUAD_DEFAULT_RADIUS = 25
+local SQUAD_VISIBILITY_MS = 30000
+local RANDOM_ANOMALY_SECTION = "__adb_random_anomaly__"
+local EACH_RANDOM_ANOMALY_SECTION = "__adb_each_random_anomaly__"
+local VISUAL_ANOMALY_CLASSES = {
+	ZS_BFUZZ = true, Z_RUSTYH = true, ZS_AMEBA = true
+}
+
+if type(state) ~= "table" then
+	state = { anomalies = {}, anomalies_loaded = false,
+		anomalies_restore_after = 0, anomalies_persist_dirty = false,
+		anomalies_next_persist_at = 0, squad_visibility = {} }
+	rawset(_G, STATE_KEY, state)
+end
+if type(state.anomalies) ~= "table" then state.anomalies = {} end
+if type(state.anomalies_loaded) ~= "boolean" then state.anomalies_loaded = false end
+if type(state.anomalies_restore_after) ~= "number" then state.anomalies_restore_after = 0 end
+if type(state.anomalies_persist_dirty) ~= "boolean" then state.anomalies_persist_dirty = false end
+if type(state.anomalies_next_persist_at) ~= "number" then
+	state.anomalies_next_persist_at = 0
+end
+if type(state.squad_visibility) ~= "table" then state.squad_visibility = {} end
+
+
+local function actor_for_probe(context)
+	return context and context.actor or (db and db.actor or nil)
+end
+
+local function object_has_methods(object, methods)
+	if object == nil then return false end
+	for _, method_name in ipairs(methods) do
+		local ok, method = pcall(function() return object[method_name] end)
+		if not ok or type(method) ~= "function" then return false end
+	end
+	return true
+end
+
+local function catalog_api_supported()
+	local ok, supported = pcall(function()
+		return anomaly_donation_bridge_catalog.capable()
+	end)
+	return ok and supported == true
+end
+
+local function alife_object()
+	if type(alife) ~= "function" then return nil end
+	local ok, life = pcall(alife)
+	return ok and life or nil
+end
+
+local function create_server_object(section, position, level_vertex_id, game_vertex_id,
+	expected_kind)
+	-- alife_create is Anomaly's stock wrapper around alife():create.  Besides
+	-- validating the section it updates the game's ALife bookkeeping and fires
+	-- the normal callbacks expected by other addons.
+	-- Native entity constructors may assert before Lua regains control, so pcall
+	-- alone is not crash protection. Reclassify the merged section immediately
+	-- before entering C++.
+	if expected_kind ~= nil and
+		not anomaly_donation_bridge_catalog.is_spawn_safe(section, expected_kind) then
+		return nil, "spawn_section_unsafe"
+	end
+	if type(alife_create) ~= "function" then return nil, "alife_create_unavailable" end
+	local ok, object = pcall(alife_create, section, position, level_vertex_id,
+		game_vertex_id)
+	if not ok then return nil, "alife_create_failed" end
+	return object
+end
+
+
+local function anomaly_ring_points(actor, radius, count)
+    local start_vertex = actor:level_vertex_id()
+    if not anomaly_donation_bridge_common.valid_vertex(start_vertex) then
+        return nil, "actor_vertex_invalid"
+    end
+    local origin = actor:position()
+    if origin == nil then return nil, "actor_position_invalid" end
+    if radius == 0 then
+        local points = {}
+        for index = 1, count do
+            points[index] = {
+                vertex_id = start_vertex,
+                position = vector():set(origin.x, origin.y + 0.05, origin.z),
+                distance = 0
+            }
+        end
+        return points
+    end
+
+    local forward_angle = nil
+    if count == 1 then
+        local direction_ok, dx, dz = pcall(function()
+            local forward = actor:direction()
+            return forward.x, forward.z
+        end)
+        local magnitude = direction_ok and type(dx) == "number" and
+            type(dz) == "number" and math.sqrt(dx * dx + dz * dz) or 0
+        if magnitude <= 0.0001 or magnitude ~= magnitude then
+            return nil, "actor_direction_invalid"
+        end
+        forward_angle = math.atan2(dz / magnitude, dx / magnitude)
+    end
+
+    -- vertex_in_direction can return the actor's own AI vertex when the ray
+    -- meets an obstacle.  The vertex is still a valid ALife anchor, but its
+    -- snapped X/Z must not replace the requested ring coordinates.  Keep the
+    -- anchor and build the actual regular polygon at the exact radius.
+    local points = {}
+    for index = 1, count do
+        local angle = count == 1 and forward_angle or
+            2 * math.pi * (index - 1) / count
+        local direction = vector():set(math.cos(angle), 0, math.sin(angle))
+        local vertex_ok, vertex_id = pcall(function()
+            return level.vertex_in_direction(start_vertex, direction, radius)
+        end)
+        if not vertex_ok or
+            not anomaly_donation_bridge_common.valid_vertex(vertex_id) then
+            vertex_id = start_vertex
+        end
+        local y = origin.y
+        local position_ok, snapped = pcall(level.vertex_position, vertex_id)
+        if position_ok and snapped ~= nil and type(snapped.y) == "number" and
+            math.abs(snapped.y - origin.y) <= 3 then
+            y = snapped.y
+        end
+        points[index] = {
+            vertex_id = vertex_id,
+            position = vector():set(
+                origin.x + direction.x * radius,
+                y + 0.05,
+                origin.z + direction.z * radius),
+            distance = radius
+        }
+    end
+    return points
+end
+
+local function active_anomaly_count()
+	local count = 0
+	for _ in pairs(state.anomalies) do count = count + 1 end
+	return count
+end
+
+local function script_namespace(name)
+	local ok, value = pcall(function() return _G[name] end)
+	return ok and type(value) == "table" and value or nil
+end
+
+local function anomaly_class(section)
+	if type(system_ini) ~= "function" then return nil end
+	local ok, ini = pcall(system_ini)
+	if not ok or ini == nil then return nil end
+	local class_name = anomaly_donation_bridge_common.ini_string(ini, section, "class")
+	return class_name and class_name:upper() or nil
+end
+
+local function anomaly_shape_adapter(section)
+	local toolkit = script_namespace("utils_stpk")
+	local class_name = anomaly_class(section)
+	if toolkit == nil or class_name == nil then return nil end
+	local getter_name = VISUAL_ANOMALY_CLASSES[class_name] and
+		"get_visual_zone_data" or "get_anom_zone_data"
+	local setter_name = VISUAL_ANOMALY_CLASSES[class_name] and
+		"set_visual_zone_data" or "set_anom_zone_data"
+	local getter, setter = toolkit[getter_name], toolkit[setter_name]
+	if type(getter) == "function" and type(setter) == "function" then
+		return { get = getter, set = setter, class_name = class_name }
+	end
+	-- Modified binaries sometimes retain only the stock debug-spawner wrapper.
+	-- It is safe here because the catalog admitted only known anomaly classes.
+	if type(toolkit.get_object_data) == "function" and
+		type(toolkit.set_object_data) == "function" then
+		return { get = toolkit.get_object_data, set = toolkit.set_object_data,
+			class_name = class_name }
+	end
+	return nil
+end
+
+local function initialize_anomaly_shape(object, adapter)
+	if adapter == nil or object == nil then return false end
+	local ok, initialized = pcall(function()
+		local data = adapter.get(object)
+		if type(data) ~= "table" then return false end
+		local offset = vector():set(0, 0, 0)
+		local center = vector():set(0, 0, 0)
+		-- This is the stock bind_anomaly_field dynamic-anomaly shape. A bare
+		-- alife_create entity has no active restrictor volume.
+		data.object_flags = 31
+		data.restrictor_type = 0
+		data.shapes = {
+			{ shtype = 0, offset = offset, center = center, radius = 3 }
+		}
+		adapter.set(data, object)
+		local verified = adapter.get(object)
+		local shape = type(verified) == "table" and type(verified.shapes) == "table" and
+			verified.shapes[1] or nil
+		return type(shape) == "table" and tonumber(shape.shtype) == 0 and
+			tonumber(shape.radius) ~= nil and tonumber(shape.radius) >= 2.9
+	end)
+	return ok and initialized == true
+end
+
+local function sorted_anomaly_ids()
+	local ids = {}
+	for id in pairs(state.anomalies) do ids[#ids + 1] = id end
+	table.sort(ids)
+	return ids
+end
+
+local function valid_coordinate(value)
+	return type(value) == "number" and value == value and math.abs(value) <= 1000000
+end
+
+local function current_level_name()
+	if level == nil or type(level.name) ~= "function" then return nil end
+	local ok, name = pcall(level.name)
+	name = ok and tostring(name or "") or ""
+	if not anomaly_donation_bridge_common.valid_section_id(name) then return nil end
+	return name
+end
+
+local function encode_anomaly_records(now)
+	now = tonumber(now) or (time_global and time_global() or 0)
+	local encoded = {}
+	for _, id in ipairs(sorted_anomaly_ids()) do
+		local record = state.anomalies[id]
+		local remaining_ms = math.max(0, math.min(MAX_ANOMALY_LIFETIME_MS,
+			math.floor(record.expires_at - now)))
+		encoded[#encoded + 1] = string.format("%d|%s|%.3f|%.3f|%.3f|%d|%s",
+			id, record.section, record.x, record.y, record.z,
+			remaining_ms, record.level_name)
+	end
+	return "2|" .. table.concat(encoded, ";")
+end
+
+local function persist_anomaly_records()
+	local now = time_global and time_global() or 0
+	local encoded = encode_anomaly_records(now)
+	local save_ok = false
+	if db == nil or db.actor == nil then
+		state.anomalies_persist_dirty = true
+		return false
+	elseif type(save_var) == "function" and type(load_var) == "function" then
+		save_ok = pcall(save_var, db.actor, ANOMALY_PSTOR_KEY, encoded)
+		if save_ok then
+			local read_ok, stored = pcall(load_var, db.actor, ANOMALY_PSTOR_KEY,
+				"__anomaly_donation_bridge_missing__")
+			save_ok = read_ok and stored == encoded
+		end
+	elseif xr_logic ~= nil and type(xr_logic.pstor_store) == "function" and
+		type(xr_logic.pstor_retrieve) == "function" then
+		-- Compatibility adapter for a third-party script pack which exposes the
+		-- older pstor helpers.  Vanilla 1.5.3 uses save_var/load_var above.
+		save_ok = pcall(xr_logic.pstor_store, db.actor, ANOMALY_PSTOR_KEY, encoded)
+	end
+	-- The records deliberately live only in actor pstor so every save owns its
+	-- exact anomaly set and remaining lifetime. Failure remains non-fatal: an
+	-- incompatible script pack must not disable the original spawn effect.
+	state.anomalies_persist_dirty = not save_ok
+	if save_ok then
+		state.anomalies_next_persist_at = now + ANOMALY_PERSIST_INTERVAL_MS
+	end
+	return save_ok
+end
+
+local function retrieve_anomaly_records()
+	if db == nil or db.actor == nil then return false, nil end
+	if type(load_var) == "function" then
+		local ok, encoded = pcall(load_var, db.actor, ANOMALY_PSTOR_KEY, "")
+		return ok, encoded
+	end
+	if xr_logic ~= nil and type(xr_logic.pstor_retrieve) == "function" then
+		local ok, encoded = pcall(xr_logic.pstor_retrieve, db.actor,
+			ANOMALY_PSTOR_KEY, "")
+		return ok, encoded
+	end
+	return false, nil
+end
+
+local function decode_anomaly_records(encoded)
+	local records, seen = {}, {}
+    if type(encoded) ~= "string" or
+        #encoded > MAX_PERSISTED_ANOMALY_BYTES then return nil, false end
+	if encoded == "" then return records, true end
+	local version, payload = encoded:match("^(%d+)|(.*)$")
+	local current_format = version == "2"
+	if version ~= nil and not current_format then return nil, false end
+	if not current_format then payload = encoded end
+	if payload == "" then return records, true end
+	if payload:sub(1, 1) == ";" or payload:sub(-1) == ";" or
+		payload:find(";;", 1, true) then return nil, false end
+	for row in payload:gmatch("[^;]+") do
+		local fields = {}
+		for value in row:gmatch("[^|]+") do fields[#fields + 1] = value end
+		if (current_format and #fields ~= 7) or
+			(not current_format and #fields ~= 5) or #fields[1] > 10 or
+			not anomaly_donation_bridge_common.valid_section_id(fields[2]) then
+			return nil, false
+		end
+		local id = tonumber(fields[1])
+		local x, y, z = tonumber(fields[3]), tonumber(fields[4]), tonumber(fields[5])
+		local remaining_ms = current_format and tonumber(fields[6]) or 0
+		local level_name = current_format and fields[7] or ""
+		if id == nil or id ~= math.floor(id) or id <= 0 or id > MAX_OBJECT_ID or
+			seen[id] or #records >= MAX_ACTIVE_ANOMALIES or not valid_coordinate(x) or
+			not valid_coordinate(y) or not valid_coordinate(z) or remaining_ms == nil or
+			remaining_ms ~= math.floor(remaining_ms) or remaining_ms < 0 or
+			remaining_ms > MAX_ANOMALY_LIFETIME_MS or
+			(current_format and not anomaly_donation_bridge_common.valid_section_id(
+				level_name)) then return nil, false end
+		seen[id] = true
+		records[#records + 1] = { id = id, section = fields[2], x = x, y = y, z = z,
+			remaining_ms = remaining_ms, level_name = level_name }
+	end
+	return records, true
+end
+
+local function anomaly_matches(object, record)
+	if object == nil or type(record) ~= "table" then return false end
+	local section_ok, section = pcall(function() return object:section_name() end)
+	if not section_ok then return nil end
+	if section ~= record.section then return false end
+	local position_ok, x, y, z = pcall(function()
+		return object.position.x, object.position.y, object.position.z
+	end)
+	if not position_ok or not valid_coordinate(x) or not valid_coordinate(y) or
+		not valid_coordinate(z) then return nil end
+	local dx, dy, dz = x - record.x, y - record.y, z - record.z
+	return dx * dx + dy * dy + dz * dz <= 1
+end
+
+local function forget_anomaly(id, persist)
+	state.anomalies[id] = nil
+	if persist ~= false then persist_anomaly_records() end
+end
+
+local function release_anomaly_object(id, record)
+	local life = alife and alife() or nil
+	if life == nil then return false end
+	local ok, object = pcall(function() return life:object(id, true) end)
+	if not ok then return false end
+	if object == nil then return true end
+	local matches = anomaly_matches(object, record)
+	if matches == nil then return false end
+	if matches and not pcall(function() life:release(object, true) end) then return false end
+	return true
+end
+
+local function forget_or_release_anomaly(id, record, persist)
+	if not release_anomaly_object(id, record) then return false end
+	forget_anomaly(id, persist)
+	return true
+end
+
+local function restore_anomaly_record(record, actor, game_vertex_id)
+	local life = alife_object()
+	if life == nil then return nil, nil end
+	local lookup_ok, existing = pcall(function() return life:object(record.id, true) end)
+	if not lookup_ok then return nil, nil end
+	local matches = anomaly_matches(existing, record)
+	if matches == nil then return nil, nil end
+	if matches then return record, nil end
+	if not anomaly_donation_bridge_catalog.is_spawn_safe(record.section, "anomaly") then
+		return nil, nil
+	end
+	local adapter = anomaly_shape_adapter(record.section)
+	if adapter == nil or level == nil or type(level.vertex_id) ~= "function" then
+		return nil, nil
+	end
+	local position = vector():set(record.x, record.y, record.z)
+	local vertex_ok, level_vertex_id = pcall(level.vertex_id, position)
+	if not vertex_ok or
+		not anomaly_donation_bridge_common.valid_vertex(level_vertex_id) then
+		return nil, nil
+	end
+	local object, create_error = create_server_object(record.section, position,
+		level_vertex_id, game_vertex_id, "anomaly")
+	if create_error ~= nil or object == nil then return nil, nil end
+	if not initialize_anomaly_shape(object, adapter) then
+		pcall(function() life:release(object, true) end)
+		return nil, nil
+	end
+	local id_ok, id = pcall(function() return object.id end)
+	local position_ok, x, y, z = pcall(function()
+		return object.position.x, object.position.y, object.position.z
+	end)
+	if not id_ok or type(id) ~= "number" or id ~= math.floor(id) or id <= 0 or
+		id > MAX_OBJECT_ID or not position_ok or not valid_coordinate(x) or
+		not valid_coordinate(y) or not valid_coordinate(z) then
+		pcall(function() life:release(object, true) end)
+		return nil, nil
+	end
+	return { id = id, section = record.section, x = x, y = y, z = z,
+		expires_at = record.expires_at, level_name = record.level_name }, object
+end
+
+local function restore_and_cleanup_anomalies()
+	if state.anomalies_loaded then
+		if state.anomalies_persist_dirty then persist_anomaly_records() end
+		return true
+	end
+	local now = time_global and time_global() or 0
+	if now < state.anomalies_restore_after then return false end
+	if db == nil or db.actor == nil or alife_object() == nil then
+		return false
+	end
+	local ok, encoded = retrieve_anomaly_records()
+	local records, valid
+	if ok then records, valid = decode_anomaly_records(encoded) end
+	-- Missing or stale persistence is equivalent to an empty active set. This
+	-- keeps the original template operational even on script packs whose
+	-- save_var/load_var implementation returns nil for a missing value.
+	if not valid then records, valid = {}, true end
+	local level_name = current_level_name()
+	if level_name == nil then return false end
+	local game_vertex_ok, game_vertex_id = pcall(function()
+		return db.actor:game_vertex_id()
+	end)
+	if not game_vertex_ok then return false end
+	local restored = {}
+	for _, record in ipairs(records) do
+		if record.remaining_ms <= 0 or record.level_name ~= level_name then
+			release_anomaly_object(record.id, record)
+		else
+			record.expires_at = now + record.remaining_ms
+			record.remaining_ms = nil
+			local restored_record = restore_anomaly_record(record,
+				db.actor, game_vertex_id)
+			if restored_record == nil or restored[restored_record.id] ~= nil then
+				-- One stale or incompatible record must not poison the complete
+				-- template. Discard it and keep restoring the remaining anomalies.
+				release_anomaly_object(record.id, record)
+			else
+				restored[restored_record.id] = restored_record
+			end
+		end
+	end
+	state.anomalies = restored
+	state.anomalies_loaded = true
+	state.anomalies_persist_dirty = true
+	persist_anomaly_records()
+	return true
+end
+
+local function randomize_each_anomaly(value)
+    value = tostring(value or "")
+    if value == "" then return false end
+    local options, error_code = anomaly_donation_bridge_common.split_csv(value)
+    if options == nil then return nil, error_code end
+    for _, option in ipairs(options) do
+        if option ~= "each_random" then return nil, "anomaly_randomization_invalid" end
+    end
+    return true
+end
+
+local function anomaly_spawn_specs(params, requested_section, count, each_random)
+    local specs, adapter_cache = {}, {}
+    local function add_entry(entry)
+        if entry == nil then return false end
+        local adapter = adapter_cache[entry.section_id]
+        if adapter == nil then
+            adapter = anomaly_shape_adapter(entry.section_id)
+            if adapter == nil then return false end
+            adapter_cache[entry.section_id] = adapter
+        end
+        specs[#specs + 1] = { section = entry.section_id, shape_adapter = adapter }
+        return true
+    end
+
+    if requested_section == RANDOM_ANOMALY_SECTION or
+        requested_section == EACH_RANDOM_ANOMALY_SECTION then
+        local revision_ok, revision_error =
+            anomaly_donation_bridge_catalog.validate_revision(params)
+        if not revision_ok then return nil, revision_error end
+        local rolls = each_random and count or 1
+        for _ = 1, rolls do
+            local entry, catalog_error =
+                anomaly_donation_bridge_catalog.random_available_anomaly()
+            if entry == nil then return nil, catalog_error end
+            if not add_entry(entry) then return nil, "anomaly_shape_api_unsupported" end
+        end
+        if not each_random then
+            local selected = specs[1]
+            for _ = 2, count do specs[#specs + 1] = selected end
+        end
+        return specs
+    end
+
+    local entry, catalog_error = anomaly_donation_bridge_catalog.validate_section(
+        params, "section_id", "anomaly")
+    if entry == nil then return nil, catalog_error end
+    if not add_entry(entry) then return nil, "anomaly_shape_api_unsupported" end
+    local selected = specs[1]
+    for _ = 2, count do specs[#specs + 1] = selected end
+    return specs
+end
+
+local function spawn_anomaly_can(context, params)
+	local valid, error_code = anomaly_donation_bridge_common.params_only(params, {
+        section_id = true, distance_meters = true, count = true,
+        lifetime_seconds = true, randomization_options = true,
+        catalog_revision = true
+	})
+	if not valid then return false, "rejected", error_code end
+	local requested_section = tostring(params.section_id or "")
+	local distance, distance_error = anomaly_donation_bridge_common.parse_number(
+		params.distance_meters, 20, 0, 100, "anomaly_distance_invalid")
+	if distance == nil then return false, "rejected", distance_error end
+    local count, count_error = anomaly_donation_bridge_common.parse_integer(
+        params.count, 1, 1, 100, "anomaly_count_invalid")
+    if count == nil then return false, "rejected", count_error end
+	local lifetime, lifetime_error = anomaly_donation_bridge_common.parse_integer(
+		params.lifetime_seconds, 60, 10, 60000, "anomaly_lifetime_invalid")
+	if lifetime == nil then return false, "rejected", lifetime_error end
+    local legacy_each_random, randomization_error =
+        randomize_each_anomaly(params.randomization_options)
+    if legacy_each_random == nil then return false, "rejected", randomization_error end
+    local each_random = requested_section == EACH_RANDOM_ANOMALY_SECTION or
+        (requested_section == RANDOM_ANOMALY_SECTION and legacy_each_random)
+	if context.actor == nil then return false, "deferred", "actor_unavailable" end
+	if alife_object() == nil then return false, "deferred", "alife_unavailable" end
+	local level_name = current_level_name()
+	if level_name == nil then return false, "deferred", "level_name_unavailable" end
+	if not restore_and_cleanup_anomalies() then
+		-- Restoration is optional. Start a clean runtime tracker instead of
+		-- blocking a valid new donation behind incompatible persisted metadata.
+		state.anomalies = {}
+		state.anomalies_loaded = true
+		state.anomalies_persist_dirty = true
+	end
+    if active_anomaly_count() + count > MAX_ACTIVE_ANOMALIES then
+		return false, "rejected", "active_anomaly_limit_reached"
+	end
+    local specs, specs_error = anomaly_spawn_specs(params, requested_section, count, each_random)
+    if specs == nil then return false, "rejected", specs_error end
+    local points, point_error = anomaly_ring_points(context.actor, distance, count)
+    if points == nil then return false, "deferred", point_error end
+    context.options = { lifetime = lifetime, radius = distance, count = count,
+        points = points, specs = specs, level_name = level_name }
+	return true
+end
+
+local function spawn_anomaly_execute(context)
+    local game_vertex_ok, game_vertex_id = pcall(function()
+        return context.actor:game_vertex_id()
+    end)
+    if not game_vertex_ok then return "deferred", "actor_vertex_invalid" end
+    local created, records, seen_ids = {}, {}, {}
+    local function fail(status, clean_reason, dirty_reason)
+        local cleaned = anomaly_donation_bridge_common.rollback_server_objects(created)
+        return cleaned and status or "uncertain", cleaned and clean_reason or dirty_reason
+    end
+    local expires_at = (context.now or time_global()) +
+        context.options.lifetime * 1000
+    for index = 1, context.options.count do
+        local spec, point = context.options.specs[index], context.options.points[index]
+        local object, create_error = create_server_object(spec.section,
+            point.position, point.vertex_id, game_vertex_id, "anomaly")
+        if create_error == "spawn_section_unsafe" then
+            return fail("rejected", "spawn_section_unsafe_rolled_back",
+                "spawn_section_unsafe_cleanup_failed")
+        end
+        if create_error ~= nil then
+            return fail("uncertain", "anomaly_spawn_failed_rolled_back",
+                "anomaly_spawn_state_unknown")
+        end
+        if object == nil then
+            return fail("rejected", "anomaly_spawn_failed_rolled_back",
+                "anomaly_spawn_failed_cleanup_failed")
+        end
+        created[#created + 1] = object
+        if not initialize_anomaly_shape(object, spec.shape_adapter) then
+            return fail("rejected", "anomaly_shape_failed_rolled_back",
+                "anomaly_shape_failed_cleanup_failed")
+        end
+        local id_ok, id = pcall(function() return object.id end)
+        if not id_ok or type(id) ~= "number" or id ~= math.floor(id) or id <= 0 or
+            id > MAX_OBJECT_ID or seen_ids[id] then
+            return fail("rejected", "anomaly_id_invalid_rolled_back",
+                "anomaly_id_invalid_cleanup_failed")
+        end
+        local position_ok, x, y, z = pcall(function()
+            return object.position.x, object.position.y, object.position.z
+        end)
+        if not position_ok or not valid_coordinate(x) or not valid_coordinate(y) or
+            not valid_coordinate(z) then
+            return fail("rejected", "anomaly_position_invalid_rolled_back",
+                "anomaly_position_invalid_cleanup_failed")
+        end
+        seen_ids[id] = true
+        records[#records + 1] = { id = id, expires_at = expires_at,
+            section = spec.section, x = x, y = y, z = z,
+			level_name = context.options.level_name }
+    end
+    for _, record in ipairs(records) do state.anomalies[record.id] = record end
+	-- The effect itself is already valid at this point. Saving its F9 recovery
+	-- metadata is optional and must not roll back successfully spawned objects.
+	persist_anomaly_records()
+    return "executed", "temporary_anomaly_ring_count_" ..
+        tostring(context.options.count) .. "_radius_" ..
+        tostring(context.options.radius) .. "m_" ..
+        tostring(context.options.lifetime) .. "s"
+end
+
+local function anomaly_update(now)
+	if not state.anomalies_loaded and not restore_and_cleanup_anomalies() then return end
+	if state.anomalies_persist_dirty then persist_anomaly_records() end
+    local changed = false
+	for _, id in ipairs(sorted_anomaly_ids()) do
+		local record = state.anomalies[id]
+		if now >= record.expires_at then
+            if forget_or_release_anomaly(id, record, false) then changed = true end
+		else
+			local life = alife and alife() or nil
+			if life ~= nil then
+				local ok, object = pcall(function() return life:object(id, true) end)
+				if ok and object == nil then
+                    forget_anomaly(id, false)
+                    changed = true
+				elseif ok and anomaly_matches(object, record) == false then
+                    forget_anomaly(id, false)
+                    changed = true
+				end
+			end
+		end
+	end
+    if changed then persist_anomaly_records() end
+	if not changed and next(state.anomalies) ~= nil and
+		now >= state.anomalies_next_persist_at then
+		persist_anomaly_records()
+	end
+end
+
+local function anomaly_load()
+	-- Never carry the previous world state across a load. Once the actor from
+	-- the selected save is ready, restore only that save's pstor snapshot.
+	state.anomalies = {}
+	state.anomalies_loaded = false
+	state.anomalies_persist_dirty = false
+	state.anomalies_next_persist_at = 0
+	state.teleport_anchor = nil
+	state.anomalies_restore_after = (time_global and time_global() or 0) +
+		ANOMALY_LOAD_GRACE_MS
+end
+
+local function anomaly_level_changing()
+	-- Preserve the complete effect before the old level is destroyed. On a
+	-- same-level F9 the records are restored after the new actor is ready; on an
+	-- actual transition the level name differs and the records are discarded.
+	if not state.anomalies_loaded then
+		state.anomalies_restore_after = 0
+		restore_and_cleanup_anomalies()
+	end
+	if state.anomalies_loaded then
+		persist_anomaly_records()
+		for _, id in ipairs(sorted_anomaly_ids()) do
+			release_anomaly_object(id, state.anomalies[id])
+		end
+	end
+	state.anomalies = {}
+	state.anomalies_loaded = false
+	state.anomalies_persist_dirty = false
+	state.anomalies_next_persist_at = 0
+	state.anomalies_restore_after = math.huge
+	state.teleport_anchor = nil
+end
+
+
+local function navigation_supported()
+	return level ~= nil and type(level.vertex_in_direction) == "function" and
+		type(level.vertex_position) == "function" and
+		type(level.vertex_id) == "function" and type(vector) == "function"
+end
+
+
+local function anomaly_supported(context)
+	local supported = catalog_api_supported() and navigation_supported() and
+		object_has_methods(actor_for_probe(context),
+			{ "level_vertex_id", "game_vertex_id", "position" }) and
+		object_has_methods(alife_object(), { "object", "release" }) and
+		type(alife_create) == "function"
+	return supported, supported and nil or "temporary_anomaly_api_unsupported"
+end
+
+
+function on_game_start()
+	local ok, reason = anomaly_donation_bridge_registry.register_builtin("spawn_anomaly", {
+		can_execute = spawn_anomaly_can,
+		execute = spawn_anomaly_execute,
+		update = anomaly_update,
+		on_game_load = anomaly_load,
+		on_level_changing = anomaly_level_changing,
+		is_supported = anomaly_supported,
+		support_probe_is_hint = true
+	})
+	if not ok and type(printf) == "function" then
+		printf("[ADB] spawn_anomaly registration failed: %s", tostring(reason))
+	end
+end
