@@ -230,6 +230,11 @@ local function ini(section,key)
     if not ini_sys:section_exist(section) then return end
     return ini_sys:r_string_ex(section,key)
 end
+local function retained_knife(section)
+    -- Knives stay with their owner, including pack-specific melee sections.
+    -- Do not infer their type from a slot: packs can remap equipped knives.
+    return ini(section,"class")=="WP_KNIFE" or ini(section,"kind")=="w_melee"
+end
 local function native_slot(section)
     local value=tonumber(ini(section,"slot"))
     if not value or value%1~=0 or value<0 or value>17 then return end
@@ -366,7 +371,10 @@ local function inventory(obj)
         local id,section=item:id(),item:section()
         -- HUD/animation props and service objects can be client-only. They
         -- are not exchangeable inventory and must remain with their owner.
-        if not SERVICE[section] and not section:match("^device_pda") and not IsItem("anim",section) then
+        -- Exclude knives before slot discovery and before building either the
+        -- forward transfer list or the original-slot list used by rollback.
+        if not SERVICE[section] and not section:match("^device_pda") and not IsItem("anim",section)
+            and not retained_knife(section) then
             local se=server(id)
             local detail=" owner="..owner.." item="..id.." section="..section
             if not se then return nil,"inventory_server_missing"..detail end
@@ -443,8 +451,9 @@ local function prepare_inventory(j,a,n)
     if not npc_items then return false,why end
     local active=n:active_item()
     local function usable(item)
-        local slot=item and native_slot(item:section())
-        return item and IsWeapon(item) and (slot==2 or slot==3)
+        if not item or retained_knife(item:section()) then return false end
+        local slot=native_slot(item:section())
+        return IsWeapon(item) and (slot==2 or slot==3)
     end
     j.weapon=usable(active) and active:id() or nil
     j.actor_slots={};j.npc_slots={};j.transfers={};j.created={}
@@ -502,6 +511,7 @@ local function equip(obj,id,slot)
     if not item or not se or se.parent_id~=obj:id() then return false end
     local current=obj:item_in_slot(slot)
     if current and current:id()==id then return true end
+    assert(not current or not retained_knife(current:section()),"preserved_knife_slot_occupied_"..slot)
     assert(compatible_slot(item:section(),slot),"refusing_incompatible_slot_"..item:section().."_"..slot)
     if job then job.equip_frame=device().frame;persist() end
     obj:move_to_slot(item,slot,true)
@@ -529,6 +539,8 @@ local function equip_inherited(j,a)
     local weapon=assert(server(j.weapon),"inherited_weapon_missing")
     local slot=native_slot(weapon:section_name())
     assert(slot==2 or slot==3,"inherited_weapon_slot_unsupported")
+    local current=a:item_in_slot(slot)
+    if current and retained_knife(current:section()) then slot=slot==2 and 3 or 2 end
     if not equip(a,j.weapon,slot) then return false end
     a:activate_slot(slot)
     local active=a:active_item()

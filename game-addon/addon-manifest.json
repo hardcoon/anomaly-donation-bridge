@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.181",
+  "addonVersion": "1.0.182",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
@@ -123,7 +123,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_reincarnation.script",
-      "sha256": "57EBC01EFDBC62168C8068C0C1196A6100CB3256B7B0BE21B41EA207A8A4AEC5"
+      "sha256": "DCC1677B285A3FD884A99F903AD1CDA9682C73BD2A58BBAD462B8B24D38F1FCA"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_relife_companions.script",
@@ -151,7 +151,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "209DC68EE12459ABDCF0CE6C042977AFB313E4E8E779262C4AEA59F7A3927848"
+      "sha256": "BE83699E435A3E345957A20BFE7E6E4437F84BAC2B3DFDE7DA0C2C8C232C0025"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",

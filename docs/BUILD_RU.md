@@ -2,7 +2,7 @@
 
 [← Первый запуск](../README.md)
 
-В `main` опубликованы исходники программы **1.4** и аддона **1.0.181**. Готовый комплект остаётся в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
+В `main` опубликованы исходники программы **1.4.1** и аддона **1.0.182**. Готовый комплект остаётся в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
 
 ## Требования
 
@@ -79,14 +79,14 @@ Lua-проверки выполняются с подставными игров
 
 ```powershell
 ./scripts/stage-minimal-release.ps1 `
-    -Version '1.4' `
+    -Version '1.4.1' `
     -ExpectedEffectCount 70 `
     -PublishedRoot './artifacts/portable-win-x64' `
     -ReadmePath './README.md' `
-    -ReleaseNotesPath './docs/RELEASE_1.4_RU.md'
+    -ReleaseNotesPath './docs/RELEASE_1.4.1_RU.md'
 ```
 
-ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.4`. Повторная подготовка архива заменяет эту локальную папку. Скрипт ничего не публикует на GitHub. Подробные инструкции из `docs` доступны в репозитории; минимальный ZIP содержит README без всего дерева документации.
+ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.4.1`. Повторная подготовка архива заменяет эту локальную папку. Скрипт ничего не публикует на GitHub. Подробные инструкции из `docs` доступны в репозитории; минимальный ZIP содержит README без всего дерева документации.
 
 ## Лицензия
 

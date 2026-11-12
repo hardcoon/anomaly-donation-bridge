@@ -15,6 +15,7 @@ local opts,staging_blocked,create_fail,transfer_fail,move_fail,loading,paused,le
 local native_pending=0
 local ghost_inventory,hidden_servers,native_callback_errors
 local native_slot_violations,name_writes,travel_requests,travel_fail
+local knife_touches
 local visuals,visual_calls,missing_visual
 local frame_delta,input_disabled,held_walk
 local suppress_sleep_callbacks,inside_camera_callback
@@ -23,7 +24,10 @@ local state_read_calls,inventory_open
 local definitions={
     player_outfit={class="E_STLK",kind="o_light",slot="6"},npc_outfit={class="E_STLK",kind="o_medium",slot="6"},
     npc_helmet={class="E_HLMET",kind="o_helmet",slot="11"},player_gun={class="WP_PM",slot="1"},
-    npc_gun={class="WP_AK74",slot="2"},ammo={class="AMMO"},quest_item={quest=true},device_pda_3={},food={},anim_prop={anim=true}
+    npc_gun={class="WP_AK74",slot="2"},ammo={class="AMMO"},quest_item={quest=true},device_pda_3={},food={},anim_prop={anim=true},
+    wpn_knife3={class="WP_KNIFE",slot="0",knife=true},
+    custom_blade={class="WP_KNIFE",slot="0,1",knife=true},
+    pack_melee={class="CUSTOM",kind="w_melee",knife=true}
 }
 local function load_module(name,dir)
     local env=setmetatable({},{__index=_G});local chunk=assert(loadfile(dir.."/"..name..".script"))
@@ -115,6 +119,7 @@ local function human(id,name,gvid,position,group)
     end
     function obj:active_item()return self:item_in_slot(self.active_slot or 2)end
     function obj:move_to_slot(it,slot,no_activate)
+        if definitions[it:section()].knife then knife_touches=knife_touches+1 end
         check(no_activate==true,"equip submits a native nonactivating slot event")
         local def=assert(definitions[it:section()]);local base=assert(tonumber(def.slot))+1
         local valid=slot==base or (base==2 or base==3)and(slot==2 or slot==3)
@@ -128,10 +133,12 @@ local function human(id,name,gvid,position,group)
         end)
     end
     function obj:move_to_ruck(it)
+        if definitions[it:section()].knife then knife_touches=knife_touches+1 end
         enqueue(function()for s,iid in pairs(self.slots)do if iid==it:id()then self.slots[s]=nil end end end)
     end
     function obj:activate_slot(slot)self.active_slot=slot end
     function obj:transfer_item(it,dest)
+        if definitions[it:section()].knife then knife_touches=knife_touches+1 end
         transfers[#transfers+1]={id=it:id(),source=id,target=dest:id()}
         if transfer_fail and #transfers==transfer_fail then error("injected transfer failure")end
         enqueue(function()
@@ -171,6 +178,7 @@ local function reset(options)
     archived_clients,death_calls={},{}
     ghost_inventory,hidden_servers,native_callback_errors={},{},0
     native_slot_violations,name_writes=0,{}
+    knife_touches=0
     visuals,visual_calls,missing_visual={pp={[11]={foreign=true}},cam={[10]={foreign=true}}},{},nil
     frame_delta,input_disabled,held_walk=.016,false,true
     packet_writes,packet_failure,packet_ignored,offline_failure,live_npc_visual_calls={},nil,false,false,0
@@ -295,9 +303,12 @@ local function reset(options)
         if packet_failure==#packet_writes then error("injected partial server event failure")end
     end
     ini_sys={section_exist=function(_,sec)return definitions[sec]~=nil end,
-        r_string_ex=function(_,sec,key)return definitions[sec]and definitions[sec][key]end}
+        r_string_ex=function(_,sec,key)
+            if definitions[sec]and definitions[sec].knife and key=="slot"then knife_touches=knife_touches+1 end
+            return definitions[sec]and definitions[sec][key]
+        end}
     function IsStalker(_,cls)return cls=="stalker"end
-    function IsWeapon(obj)return obj and (obj:section()=="npc_gun"or obj:section()=="player_gun")end
+    function IsWeapon(obj)return obj and (obj:section()=="npc_gun"or obj:section()=="player_gun"or definitions[obj:section()].knife)end
     function IsItem(kind,sec)
         assert(kind~="weapon","stock _ITM has no generic weapon table; use IsWeapon")
         local d=definitions[sec]or {}
@@ -616,6 +627,39 @@ check(objects[1001].parent_id==0 and objects[1002].parent_id==0 and objects[1100
     "keep-inventory leaves BOTH inventories and the actor's original equipment untouched, no NPC items or generated kit")
 check(gameplay_disguise.get_default_comm()=="bandit"and npc:character_community()=="stalker"and next(tasks)==nil,"optional faction switch preserves storylines; peaceful body and quest off supported")
 
+-- A pack can equip knives outside their base LTX slot. Keep actual objects,
+-- including spare knives in the backpack, entirely outside the exchange.
+local function add_knives(section,actor_slot)
+    section=section or "wpn_knife3"
+    actor_slot=actor_slot or 5
+    item(1010,section,0,actor_slot);actor.slots[actor_slot]=1010
+    item(1110,section,10,2);npc.slots[2]=1110;npc.active_slot=2
+    item(1011,section,0);item(1111,section,10)
+end
+local function knives_intact()
+    check(knife_touches==0,"knife slots are never validated or written, and knives never enter ownership events")
+    for _,entry in ipairs({{1010,0},{1011,0},{1110,10},{1111,10}})do
+        local it=objects[entry[1]]
+        check(it.parent_id==entry[2]and it.condition==.43 and it.upgrades=="test-upgrade",
+            "both owners retain equipped and spare knives with original wear/upgrades")
+    end
+    check(actor:item_in_slot(objects[1010].slot):id()==1010 and clients[10]:item_in_slot(2):id()==1110,"nonstandard knife slots remain untouched")
+end
+for _,section in ipairs({"wpn_knife3","custom_blade","pack_melee"})do
+    reset();add_knives(section);start();completed();intact();knives_intact()
+    check(objects[0].display=="Target"and #transfers==4 and objects[1002].parent_id==10 and objects[1100].parent_id==0,
+        "knives cannot block reincarnation; ordinary gear still changes owners exactly once")
+    check(actor:active_item():id()==1100,"an active NPC knife is not selected as inherited firearm")
+end
+reset();add_knives("custom_blade",3);start();completed();intact();knives_intact()
+check(objects[0].display=="Target"and actor:active_item():id()==1100 and actor.active_slot==2,
+    "inherited rifle uses the other weapon slot instead of displacing a retained knife")
+reset();add_knives();transfer_fail=2;start();completed();intact();knives_intact()
+check(objects[0].display=="Old Player"and objects[1002].parent_id==0 and objects[1100].parent_id==10,
+    "partial exchange rollback restores other gear without touching knives")
+reset({keep_inventory=true});add_knives();start({keep_inventory=true});completed();intact();knives_intact()
+check(objects[0].display=="Target"and #transfers==0,"keep-inventory behavior remains unchanged with knives present")
+
 reset();death_manager.get_outfit_by_npc_visual=function()return nil end;start();completed();intact()
 check(#transfers==0 and #created==0 and #moves==0 and squad.members[10]and objects[10].position.x==100,"missing matching clothes aborts before ownership mutation and restores actual NPC")
 
@@ -692,12 +736,13 @@ reset();definitions.npc_helmet.slot="6";start();completed();intact()
 check(#transfers==0 and #created==0,"misconfigured helmet cannot be placed in armor slot even when LTX requests it")
 definitions.npc_helmet.slot="11"
 
-reset();start()
+reset();add_knives();start()
 for _=1,250 do tick(1);if state().job and state().job.phase=="transfer"then break end end
 check(state().job and state().job.phase=="transfer","reach an unresolved transaction save point")
 check(handler.on_effect_save("before")==false,"unresolved actual ownership transaction remains fenced from saves")
 handler.on_game_load();events={};native_pending=0;tick(60)
 check(not handler.is_blocking()and #moves==0 and objects[1100].parent_id==10 and objects[1002].parent_id==0,"external F9 pending save rolls back, never resumes half exchange")
+knives_intact()
 
 reset();start()
 for _=1,250 do tick(1);if state().job and state().job.phase=="transfer"then break end end
@@ -928,7 +973,7 @@ reset();expanded_runtime();old_group=group_fixture(200,{});follower(22,old_group
 start({hostile_previous_body=false});completed()
 check(objects[22].comm=="stalker"and not clients[22].gw and objects[200]==nil,"friendly former group; only truly empty old squad is removed")
 
-reset();expanded_runtime();activate();tick(34)
+reset();expanded_runtime();add_knives();activate();tick(34)
 local left=state().azazel.remaining_ms
 check(left<180000 and objects[0].display=="Old Player","arming only starts a countdown")
 local flags=lethal()
@@ -943,6 +988,7 @@ check(objects[1002].parent_id==10 and objects[1100].parent_id==0 and not next(st
     "real equipment changes once; no old-body quest is created")
 check(state().azazel.rebirths==1 and not state().azazel.pending and actor.health==1,"mode remains armed after first death")
 check(manager.task_info.keep.title=="Existing task","Azazel never fails player tasks")
+knives_intact()
 
 reset();expanded_runtime();old_group=group_fixture(200,{})
 follower(22,old_group,200);follower(23,old_group,300)

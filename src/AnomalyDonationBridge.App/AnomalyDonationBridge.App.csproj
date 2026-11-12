@@ -20,7 +20,7 @@
     <PublishReadyToRun>false</PublishReadyToRun>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AnomalyDonationBridge.ico</ApplicationIcon>
-    <Version>1.4</Version>
+    <Version>1.4.1</Version>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="..\..\third-party\youtube\*" Link="_internal\licenses\youtube\%(Filename)%(Extension)"

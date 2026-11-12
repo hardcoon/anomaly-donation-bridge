@@ -1,7 +1,7 @@
 {
   "product": "Anomaly Donation Bridge",
-  "appVersion": "1.4",
-  "addonVersion": "1.0.181",
+  "appVersion": "1.4.1",
+  "addonVersion": "1.0.182",
   "protocolVersion": 1,
   "pipeName": "AnomalyDonationBridge.v1",
   "catalogSchemaVersion": 1
