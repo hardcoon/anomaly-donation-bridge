@@ -31,7 +31,7 @@ public sealed class AddonPackageManager
     public const string ProductId = "AnomalyDonationBridge";
     public const string ProtocolVersion = "1";
     public const string PipeName = "AnomalyDonationBridge.v1";
-    public const string ShippedAddonVersion = "1.0.182";
+    public const string ShippedAddonVersion = "1.0.183";
 
     private static readonly Regex ManagedPath = new(
         "^(?:gamedata/scripts/anomaly_donation_bridge_[a-z0-9_]+\\.script|" +

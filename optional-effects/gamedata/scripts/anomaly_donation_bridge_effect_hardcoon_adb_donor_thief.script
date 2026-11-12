@@ -3,14 +3,15 @@
   "schemaVersion": 1,
   "handlerId": "hardcoon.adb.donor_thief",
   "displayName": "Данат-воришка",
-  "description": "Создаёт за спиной героя NPC его группировки. Герой сразу получает эффект удара с выбиванием оружия; вещи из рюкзака передаются воришке. Он убегает спринтом на указанную дистанцию, затем трусцой. Приблизьтесь к нему на 2 метра, чтобы он погиб и оставил украденное на теле.",
+  "description": "Создаёт за спиной героя NPC его группировки. По умолчанию ждёт закрытия игровых окон, включая инвентарь, диалог, торговлю, обыск и КПК. Герой получает эффект удара с выбиванием оружия; вещи из рюкзака передаются воришке. Он убегает спринтом на указанную дистанцию, затем трусцой. Приблизьтесь к нему на 2 метра, чтобы он погиб и оставил украденное на теле.",
   "category": "npc_mutants",
   "cooldownSeconds": 3,
   "parameterDefinitions": [
     {"key":"item_count","displayName":"Количество похищаемых предметов","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"99"},
-    {"key":"sprint_meters","displayName":"Дистанция спринта, м","kind":"Integer","minimum":1,"maximum":10000,"defaultValue":"200"}
+    {"key":"sprint_meters","displayName":"Дистанция спринта, м","kind":"Integer","minimum":1,"maximum":10000,"defaultValue":"200"},
+    {"key":"wait_for_ui_close","displayName":"Откладывать срабатывание пока открыты диалоговые окна","kind":"Choice","options":["false","true"],"defaultValue":"true"}
   ],
-  "parameters": {"item_count":"99","sprint_meters":"200"},
+  "parameters": {"item_count":"99","sprint_meters":"200","wait_for_ui_close":"true"},
   "itemSpawns": [],
   "spawnGroups": []
 }
@@ -93,6 +94,29 @@ end
 
 local server_identity_matches
 local is_stalker
+
+local function robbery_ui_free(actor)
+	-- Same read-only UI probes as the fan/teleport effects. Never create a
+	-- native menu, close a window or change its input receiver to force a hit.
+	local ok, free = pcall(function()
+		if actor and type(actor.is_talking) == "function" and actor:is_talking() then return false end
+		if actor_menu and type(actor_menu.is_hud_free) == "function" and not actor_menu.is_hud_free() then return false end
+		if type(Check_UI) == "function" and Check_UI() then return false end
+		if type(_GUIs) == "table" and next(_GUIs) then return false end
+		if level and type(level.main_input_receiver) == "function" and level.main_input_receiver() then return false end
+		local inventory = rawget(_G, "ui_inventory")
+		if inventory and inventory.GUI and inventory.GUI:IsShown() then return false end
+		local menus = rawget(_G, "ActorMenu")
+		for _, key in ipairs({ "get_actor_menu", "get_pda_menu" }) do
+			if menus and type(menus[key]) == "function" then
+				local window = menus[key]()
+				if window and window:IsShown() then return false end
+			end
+		end
+		return true
+	end)
+	return ok and free == true
+end
 
 local function cp1251(value)
 	if anomaly_donation_bridge_common ~= nil and
@@ -886,6 +910,9 @@ local function update_thief(id, managed, record, actor, current)
 	force_online(id)
 	local npc = client_object(id)
 	if npc == nil or not is_stalker(npc, false) then return end
+	-- Online activation is asynchronous: UI can open after the spawn check.
+	-- Persisted false keeps the old immediate behavior; missing keys wait.
+	if record.phase == "robbery" and record.wait_for_ui_close ~= false and not robbery_ui_free(actor) then return end
 	if record.prepared ~= true then
 		if not prepare_npc(npc, actor, record) then return end
 		disable_side_behaviour(npc)
@@ -1070,11 +1097,16 @@ end
 
 local function can_execute(context, params)
 	local valid, reason = anomaly_donation_bridge_common.params_only(params, {
-		item_count = true, sprint_meters = true, donor_name = true, catalog_revision = true
+		item_count = true, sprint_meters = true, donor_name = true, catalog_revision = true,
+		wait_for_ui_close = true
 	})
 	if not valid then return false, "rejected", reason end
 	local actor = context.actor
 	if actor == nil then return false, "deferred", "actor_unavailable" end
+	local wait = params.wait_for_ui_close
+	if wait == nil then wait = "true" end
+	if wait ~= "true" and wait ~= "false" then return false, "rejected", "donor_thief_wait_ui_option_invalid" end
+	if wait == "true" and not robbery_ui_free(actor) then return false, "deferred", "donor_thief_waiting_ui" end
 	if not protect_stolen_stock() then return false, "rejected", "donor_thief_stock_protection_unavailable" end
 	if level == nil or type(level.add_cam_effector) ~= "function" or
 		type(set_inactivate_input_time) ~= "function" then
@@ -1141,6 +1173,7 @@ local function can_execute(context, params)
 		return false, "deferred", "actor_game_vertex_invalid"
 	end
 	context.options = {
+		wait_for_ui_close = wait == "true",
 		count = count, sprint_meters = sprint_meters, donor_name = donor_name, community = community,
 		section = entry.section_id, slot = slot, point = point,
 		game_vertex_id = game_vertex_id
@@ -1150,6 +1183,7 @@ end
 
 local function execute(context)
 	local options = context.options
+	if options.wait_for_ui_close and not robbery_ui_free(context.actor) then return "deferred", "donor_thief_waiting_ui" end
 	if not anomaly_donation_bridge_catalog.is_spawn_safe(options.section, "npc") then
 		return "rejected", "donor_thief_section_became_unsafe"
 	end
@@ -1186,6 +1220,7 @@ local function execute(context)
 		target_id = id, section = options.section, object_name = object_name,
 		donor_name = encoded_name, community = options.community,
 		requested_count = options.count, sprint_meters = options.sprint_meters,
+		wait_for_ui_close = options.wait_for_ui_close,
 		phase = "robbery", dead = false,
 		spawn_fallback = options.point.fallback == true, slot = options.slot
 	}

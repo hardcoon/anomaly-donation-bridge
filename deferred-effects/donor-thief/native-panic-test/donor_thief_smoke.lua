@@ -50,10 +50,12 @@ local equipped = { [1] = true, [6] = true, [7] = true, [8] = true,
 local actor_inventory = { weapon, medkit, ammo, artifact, quest, outfit,
 	helmet, holstered_weapon, belt_artefact, detector, backpack, spare_outfit }
 local dropped = {}
+local ui_kind, spawn_count = nil, 0
 
 local task_manager_instance
 local actor = {}
 function actor:id() return 0 end
+function actor:is_talking() return ui_kind == "talk" end
 function actor:position() return vector():set(0, 0, 0) end
 function actor:direction() return vector():set(1, 0, 0) end
 function actor:level_vertex_id() return 10 end
@@ -246,6 +248,7 @@ function life:set_switch_offline(id, value) assert(id == 101 and value == false)
 function life:release(value) assert(value == server) end
 function alife() return life end
 function alife_create(section, spawn_position, level_vertex, game_vertex)
+	spawn_count = spawn_count + 1
 	assert(section == "sim_default_stalker_1")
 	assert(spawn_position.x == -1.5 and level_vertex == 11 and game_vertex == 20,
 		"spawn must be close behind the actor, inside native punch range")
@@ -552,12 +555,44 @@ effect.on_game_start()
 local handler = assert(anomaly_donation_bridge_registry.get(
 	"hardcoon.adb.donor_thief"))
 
+actor_menu = { is_hud_free = function()
+	if ui_kind == "probe-error" then error("UI state temporarily unavailable") end
+	return ui_kind ~= "inventory" and ui_kind ~= "trade" and ui_kind ~= "upgrade" and
+		ui_kind ~= "loot" and ui_kind ~= "pda"
+end }
+function Check_UI() return ui_kind == "custom-window" end
+level.main_input_receiver = function() return ui_kind == "modal" and {} or nil end
+ui_inventory = { GUI = { IsShown = function() return ui_kind == "script-inventory" end } }
+ActorMenu = {
+	get_actor_menu = function() return { IsShown = function() return ui_kind == "native-inventory" end } end,
+	get_pda_menu = function() return { IsShown = function() return ui_kind == "native-pda" end } end
+}
+for _, window in ipairs({ "talk", "inventory", "trade", "upgrade", "loot", "pda", "custom-window",
+	"modal", "script-inventory", "native-inventory", "native-pda", "probe-error" }) do
+	ui_kind = window
+	for _, params in ipairs({ {}, { wait_for_ui_close = "true" } }) do
+		local ready, status, reason = handler.can_execute({ actor = actor }, params)
+		assert(not ready and status == "deferred" and reason == "donor_thief_waiting_ui",
+			"UI must defer an existing/default or explicitly enabled thief: " .. window)
+	end
+	assert(handler.can_execute({ actor = actor }, { wait_for_ui_close = "false" }),
+		"disabled checkbox must bypass the thief's UI probes")
+	assert(spawn_count == 0 and level.hit_effects == nil and #dropped == 0 and #npc.inventory == 0,
+		"waiting for UI must not spawn, hit, drop or transfer anything")
+end
+ui_kind = nil
+for _, invalid in ipairs({ "yes", "0", "", true }) do
+	local ready, status, reason = handler.can_execute({ actor = actor }, { wait_for_ui_close = invalid })
+	assert(not ready and status == "rejected" and reason == "donor_thief_wait_ui_option_invalid")
+end
+
 local default_context = { actor = actor, now = current_time }
 local default_allowed, default_disposition, default_reason =
 	handler.can_execute(default_context, {})
 assert(default_allowed == true and default_context.options.count == 99,
 	tostring(default_disposition) .. ":" .. tostring(default_reason))
 assert(default_context.options.sprint_meters == 200, "new thieves must default to 200m")
+assert(default_context.options.wait_for_ui_close == true, "old commands without the new key must wait by default")
 for _, invalid_distance in ipairs({ "0", "-1", "10001", "1.5", "not-a-number" }) do
 	local distance_allowed, distance_status, distance_reason = handler.can_execute(
 		{ actor = actor }, { sprint_meters = invalid_distance })
@@ -616,12 +651,22 @@ action_constructor.__call = saved_constructor
 
 local context = { actor = actor, now = current_time }
 local params = { item_count = "999" }
+if arg[3] == "ui-wait-disabled" then params.wait_for_ui_close = "false" end
 if arg[3] == "distance-jog" then params.sprint_meters = "100" end
 if arg[3] == "custom-distance-jog" then params.sprint_meters = "75" end
 local allowed, disposition, reason = handler.can_execute(context, params)
 assert(allowed == true, tostring(disposition) .. ":" .. tostring(reason))
+ui_kind = "script-inventory"
+if arg[3] ~= "ui-wait-disabled" then
+	local pending, why = handler.execute(context)
+	assert(pending == "deferred" and why == "donor_thief_waiting_ui" and spawn_count == 0,
+		"an inventory opened after validation must defer before native spawning")
+	ui_kind = nil
+end
 local status, detail = handler.execute(context)
 assert(status == "executed" and detail:find("_behind_actor", 1, true), detail)
+assert(spawn_count == 1 and saved.adb_donor_thief_01.wait_for_ui_close == (arg[3] ~= "ui-wait-disabled"),
+	"exactly one NPC is created and the checkbox is stored with its pending robbery")
 assert(server.character_name == anomaly_donation_bridge_common.game_text_cp1251("Воришка") and
 	life.forced_online == true)
 assert(saved.adb_donor_thief_01.phase == "robbery")
@@ -661,7 +706,21 @@ elseif arg[3] == "actor-moved" then
 	npc.current_position = vector():set(-30, 0, 0)
 end
 
+if arg[3] == "ui-wait-reload" then
+	ui_kind = "script-inventory"
+	handler.update(current_time)
+	assert(saved.adb_donor_thief_01.phase == "robbery" and level.hit_effects == nil and #npc.inventory == 0,
+		"opening inventory during NPC activation must postpone the actual robbery")
+	handler.on_game_load()
+	current_time = current_time + 100
+	handler.update(current_time)
+	assert(saved.adb_donor_thief_01.phase == "robbery" and level.hit_effects == nil and #npc.inventory == 0,
+		"reload preserves pending UI wait without a second NPC or robbery")
+	ui_kind = nil
+	current_time = current_time + 100
+end
 handler.update(current_time)
+ui_kind = nil
 local robbed_at = current_time
 assert(saved.adb_donor_thief_01.phase == "flee" and
 	saved.adb_donor_thief_01.hit_mode == "instant" and level.hit_effects == 1,

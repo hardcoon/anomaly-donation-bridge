@@ -1258,6 +1258,8 @@ public sealed class DonationDispatcher
                     ? "Поиск места для спавна; повторная проверка без глобальной паузы: " + result.Reason
                 : needsWaiting
                     ? "Ожидание достаточного запаса еды или воды; повторная проверка через 5 секунд."
+                : willRetry && pending.Command.ActionId == "hardcoon.adb.donor_thief" && result.Reason == "donor_thief_waiting_ui"
+                    ? "Данат-воришка ждёт закрытия игрового окна."
                     : willRetry && vehicleWaiting
                     ? result.Reason == BtrPassengerCommands.WaitingReason
                         ? "Эффект ждёт выхода из БТР."

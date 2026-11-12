@@ -126,7 +126,8 @@ foreach ($fixture in $fixtures) {
 }
 foreach ($thiefCase in @('normal', 'actor-moved', 'pending-load', 'legacy-approach',
     'legacy-punch', 'distance-jog', 'default-distance-jog', 'custom-distance-jog',
-    'legacy-distance-jog', 'early-death', 'capture-flag-failure', 'capture-kill-failure')) {
+    'legacy-distance-jog', 'early-death', 'capture-flag-failure', 'capture-kill-failure',
+    'ui-wait-reload', 'ui-wait-disabled')) {
     Invoke-LuaJit @((Join-Path $repoRoot 'deferred-effects\donor-thief\native-panic-test\donor_thief_smoke.lua'),
         $scriptRoot, $optionalRoot, $thiefCase)
 }

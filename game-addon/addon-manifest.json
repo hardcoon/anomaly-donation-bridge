@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.182",
+  "addonVersion": "1.0.183",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
@@ -151,7 +151,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "BE83699E435A3E345957A20BFE7E6E4437F84BAC2B3DFDE7DA0C2C8C232C0025"
+      "sha256": "565820CE0F3338F642255D35291677D1228F100D22577A872380B3BC51F75D64"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",

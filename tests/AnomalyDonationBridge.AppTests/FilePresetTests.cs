@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using AnomalyDonationBridge.App.Services;
 using AnomalyDonationBridge.App.ViewModels;
 using AnomalyDonationBridge.Persistence;
@@ -857,6 +858,34 @@ internal static class FilePresetTests
                 closeDialogs.DisplayName == "Безопасно закрывать штатные диалоги перед обращением",
                 "The fan's safe stock-dialog closing checkbox must be visible and disabled by default.");
             var sprint = thief.ParameterDefinitions.Single(definition => definition.Key == "sprint_meters");
+            var waitForUi = thief.ParameterDefinitions.Single(definition => definition.Key == "wait_for_ui_close");
+            Assert(waitForUi.DisplayName == "Откладывать срабатывание пока открыты диалоговые окна" &&
+                waitForUi.Options.SequenceEqual(new[] { "false", "true" }) &&
+                waitForUi.DefaultValue == "true" && thief.Parameters["wait_for_ui_close"] == "true",
+                "The thief must expose UI waiting as a checkbox enabled by default.");
+            var oldThief = thief.Clone();
+            oldThief.ParameterDefinitions.RemoveAll(definition => definition.Key == "wait_for_ui_close");
+            oldThief.Parameters.Remove("wait_for_ui_close");
+            oldThief.Parameters["item_count"] = "7";
+            new ActionManifestLoader().ApplyPresetsToInstances([oldThief], [thief]);
+            Assert(oldThief.Parameters["wait_for_ui_close"] == "true" && oldThief.Parameters["item_count"] == "7",
+                "An existing thief must receive the default UI guard without resetting its settings.");
+            var thiefSource = new ActionViewModel(oldThief);
+            var thiefEditor = new ActionEditorViewModel(thiefSource, draft =>
+            {
+                thiefSource.ApplyEditorDraft(draft);
+                return Task.CompletedTask;
+            });
+            var uiToggle = thiefEditor.Draft.Parameters.Single(parameter => parameter.Definition.Key == "wait_for_ui_close");
+            Assert(uiToggle.IsBooleanChoice && uiToggle.BooleanValue,
+                "The thief's UI guard must render as a checked checkbox.");
+            uiToggle.BooleanValue = false;
+            Assert(await thiefEditor.SaveAsync(), "Cannot save thief UI guard: " + thiefEditor.Error);
+            var savedThief = JsonSerializer.Deserialize<ActionDefinition>(
+                JsonSerializer.Serialize(thiefSource.Model, JsonDefaults.Options), JsonDefaults.Options)!;
+            new ActionManifestLoader().ApplyPresetsToInstances([savedThief], [thief]);
+            Assert(savedThief.Parameters["wait_for_ui_close"] == "false" && savedThief.Parameters["item_count"] == "7",
+                "Disabling the thief's UI guard must survive saving and schema refresh.");
             Assert(thief.Parameters["item_count"] == "99" &&
                 thief.Parameters["sprint_meters"] == "200" && sprint.DefaultValue == "200" &&
                 sprint.Minimum == 1 && sprint.Maximum == 10000 &&
