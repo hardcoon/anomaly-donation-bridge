@@ -19,23 +19,28 @@ public sealed class VotingOptionRow : ObservableObject
 {
     public VotingOption Model { get; }
     public VotingOptionRow(VotingOption model) => Model = model.Clone();
-    public bool Enabled { get => Model.Enabled; set { Model.Enabled = value; RaisePropertyChanged(); } }
-    public string Command { get => Model.Command; set { Model.Command = value; RaisePropertyChanged(); } }
+    public bool Enabled { get => Model.Enabled; set { if (Model.Enabled != value) { Model.Enabled = value; RaisePropertyChanged(); } } }
+    public string Command { get => Model.Command; set { if (Model.Command != value) { Model.Command = value; RaisePropertyChanged(); } } }
     public string BindingTitle => Model.Preset?.DisplayName ?? "Выбрать из активных";
     public bool HasPreset => Model.Preset is not null;
-    public string Statistics { get; private set; } = string.Empty;
+    private string _contributionText = string.Empty;
+    private double _percentage;
+    public string ContributionText { get => _contributionText; private set => SetProperty(ref _contributionText, value); }
+    public double Percentage => _percentage;
+    public string ShareText => _percentage.ToString("0.#", CultureInfo.CurrentCulture) + "%";
     private bool _canEdit;
     public bool CanEdit { get => _canEdit; set => SetProperty(ref _canEdit, value); }
     public void Bind(ActionDefinition action) { Model.Preset = action.Clone(); RaisePropertyChanged(nameof(BindingTitle)); RaisePropertyChanged(nameof(HasPreset)); }
     public void Update(decimal amount, decimal total, string currency)
     {
         Model.Amount = amount;
-        Statistics = VotingWindow.FormatMoney(amount, currency) + " · " + (total > 0 ? amount / total * 100 : 0).ToString("0.#") + "%";
-        RaisePropertyChanged(nameof(Statistics));
+        ContributionText = VotingWindow.FormatMoney(amount, currency);
+        var percentage = Enabled && total > 0 ? Math.Clamp((double)(amount / total * 100), 0, 100) : 0;
+        if (SetProperty(ref _percentage, percentage, nameof(Percentage))) RaisePropertyChanged(nameof(ShareText));
     }
 }
 
-public sealed class VotingWindow : Window
+public sealed partial class VotingWindow : Window
 {
     private readonly BridgeRuntime _runtime;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -43,51 +48,65 @@ public sealed class VotingWindow : Window
     private readonly SemaphoreSlim _saveGate = new(1, 1);
     private long _editRevision, _draftSession;
     private bool _autosaving, _closed;
+    private int _displayQueued;
     private readonly ObservableCollection<VotingOptionRow> _rows = [];
-    private readonly TextBlock _title = new() { FontSize = 23, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center,
-        HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 480, TextTrimming = TextTrimming.CharacterEllipsis };
-    private readonly TextBlock _automationStatus = new() { FontSize = 16, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 18) };
-    private readonly CheckBox _money = new() { Content = "Сумма голосования" }, _time = new() { Content = "Время голосования, мин" };
+    private readonly TextBlock _title = new() { FontSize = 24, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center,
+        TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly TextBlock _automationStatus = new() { FontSize = 14, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 15) };
+    private readonly CheckBox _money = new() { Content = "Набрать сумму" }, _time = new() { Content = "По времени" };
     private readonly TextBox _target = new(), _minutes = new();
-    private readonly CheckBox _donationVotes = new() { Content = "Описания доната", Margin = new Thickness(0, 0, 18, 0) };
-    private readonly CheckBox _youTubeVotes = new() { Content = "Чата YouTube" };
-    private readonly TextBox _youTubeWeight = new() { Width = 100, Height = 36, MaxLength = 16 };
-    private readonly TextBlock _youTubeCurrency = new() { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly CheckBox _donationVotes = new() { Content = "Описание доната" };
+    private readonly CheckBox _youTubeVotes = new() { Content = "Чат YouTube" };
+    private readonly TextBox _youTubeWeight = new() { Width = 88, MaxLength = 16 };
+    private readonly TextBlock _youTubeCurrency = new() { Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
     private readonly CheckBox _youTubeChange = new();
-    private readonly TextBlock _youTubeChangeLabel = new() { Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-    private readonly ComboBox _currency = new() { Width = 130, DisplayMemberPath = "Label", SelectedValuePath = "Code" };
-    private readonly Button _condition = new() { MinWidth = 48, Height = 36 };
-    private readonly TextBlock _total = new(), _remaining = new(), _status = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly ComboBox _currency = new() { DisplayMemberPath = "Label", SelectedValuePath = "Code" };
+    private readonly ComboBox _condition = new() { ItemsSource = new[] { "Любое из условий (ИЛИ)", "Оба условия (И)" } };
+    private readonly StackPanel _conditionRow = new();
+    private readonly TextBlock _targetCurrency = new() { Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _total = new() { TextTrimming = TextTrimming.CharacterEllipsis }, _remaining = new();
+    private FrameworkElement _amountMetric = null!, _timeMetric = null!;
+    private readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
     private readonly TextBlock _message = new() { TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBlock _autosaveStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 14, 0, 0) };
-    private readonly ProgressBar _progress = new() { Height = 9, Maximum = 100, Minimum = 0 };
-    private readonly Button _spin = new() { Content = "Крутить", MinWidth = 100 };
-    private readonly TextBox _testAmount = new() { Text = "100", Width = 80 }, _testMessage = new() { Text = "!команда", MaxLength = 4096 };
+    private readonly TextBlock _saveProblem = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+    private readonly TextBlock _autosaveStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 11, Margin = new Thickness(0, 4, 0, 12) };
+    private readonly ProgressBar _progress = new() { Height = 4 };
+    private readonly Button _spin = new() { Content = "Крутить", MinWidth = 90 };
+    private readonly Button _selectedSpin = new() { Content = "Крутить", Visibility = Visibility.Collapsed };
+    private readonly TextBox _testAmount = new() { Text = "100" }, _testMessage = new() { Tag = "!команда", MaxLength = 4096 };
     private readonly Grid _settings = new();
-    private readonly Button _add = new() { Content = "+ Добавить команду", MinWidth = 160, Height = 36 };
+    private readonly Button _add = new() { Content = "Добавить команду", MinHeight = 30, Height = 30, Padding = new Thickness(8, 3, 8, 3) };
     private readonly Button _test = new() { Content = "Внести", Margin = new Thickness(8, 0, 0, 0) };
-    private readonly Button _reset = new() { Content = "Сбросить прогресс", Height = 36, Margin = new Thickness(8, 0, 0, 0) };
+    private readonly Button _reset = new() { Content = "Сбросить", Height = 34, Margin = new Thickness(7, 0, 0, 0) };
     private readonly Button _rename = new() { Content = "✎" };
     private readonly Button _delete = new() { Content = "\uE74D", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 16,
-        Width = 36, Height = 36, Padding = new Thickness(0), Margin = new Thickness(8, 0, 0, 0), ToolTip = "Удалить это голосование" };
+        Width = 34, Height = 34, Padding = new Thickness(0), Margin = new Thickness(7, 0, 0, 0), ToolTip = "Удалить это голосование" };
     private readonly Button _obs = new() { Content = "Вывести окно OBS", Height = 36 };
-    private readonly Button _panelToggle = new() { Content = "\uE700", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 16,
-        Width = 36, Height = 36, Padding = new Thickness(0), Margin = new Thickness(8, 0, 0, 0) };
-    private readonly TextBlock _compactSummary = new() { FontSize = 18, FontWeight = FontWeights.Medium,
-        TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10) };
-    private readonly StackPanel _settingsActions = new() { Margin = new Thickness(0, 16, 0, 0) };
-    private readonly StackPanel _compactActions = new() { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(12, 0, 0, 0) };
-    private readonly StackPanel _compactFeedback = new() { Margin = new Thickness(0, 8, 0, 0) };
-    private readonly TextBlock _compactStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 4, 0, 0) };
-    private ColumnDefinition _settingsColumn = null!, _settingsGap = null!;
+    private readonly Button _panelToggle = new() { Content = "Настройки", Height = 34, Margin = new Thickness(7, 0, 0, 0) };
+    private readonly TextBlock _compactSummary = new() { FontSize = 12, Margin = new Thickness(8, 0, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Button _testPanelToggle = new() { Content = "Тестовый взнос", MinHeight = 29, Padding = new Thickness(6, 3, 6, 3) };
+    private FrameworkElement _testFields = null!;
+    private ColumnDefinition _settingsColumn = null!;
     private bool _settingsCollapsed;
-    private readonly Grid _headerActions = new() { Margin = new Thickness(16, 0, 0, 0) };
-    private FrameworkElement? _settingsCard;
-    private readonly Button _collectionToggle = new() { MinWidth = 118, Height = 36 };
-    private readonly TextBlock _collectionToggleLabel = new() { VerticalAlignment = VerticalAlignment.Center };
+    private readonly Grid _headerActions = new() { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+    private Border _settingsCard = null!;
+    private readonly Button _collectionToggle = new() { Height = 36, Margin = new Thickness(7, 0, 0, 0) };
+    private readonly TextBlock _collectionToggleLabel = new() { VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
     private readonly TextBlock _statusDot = new() { Text = "●", FontSize = 12, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly Button _generalButton = new() { Content = "Общие настройки" };
+    private readonly Button _playerTitle = new() { HorizontalContentAlignment = HorizontalAlignment.Left };
+    private readonly TextBlock _playerState = new() { FontSize = 11 };
+    private readonly TextBlock _playerName = new() { FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly TextBlock _playerEmpty = new() { Text = "Нет активного голосования", TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Button _playerToggle = new() { Width = 36, Height = 36, Padding = new Thickness(0), FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 15 };
+    private FrameworkElement _playerProgress = null!;
+    private readonly Border _player = new();
+    private readonly StackPanel _playerActions = new() { Orientation = Orientation.Horizontal };
+    private string? _playerCollectionId;
+    private string? _pausedPlayerId;
     private readonly CheckBox _winnerAuto = new() { Content = new TextBlock { Text = "Автоматически активировать эффект победителя", TextWrapping = TextWrapping.Wrap }, Margin = new Thickness(0, 14, 0, 0) };
     private readonly Grid _commandsPanel = new();
+    private readonly ListBox _commandList = new();
     private readonly CheckBox _automaticDraw = new() { Content = new TextBlock { Text = "Автоматический запуск рулетки по окончании голосования", TextWrapping = TextWrapping.Wrap } };
     private readonly ComboBox _order = new() { MinWidth = 200, ItemsSource = new[] { "По порядку", "Случайно" } };
     private readonly CheckBox _next = new() { Content = new TextBlock { Text = "Автоматически начинать следующее голосование", TextWrapping = TextWrapping.Wrap }, Margin = new Thickness(0, 14, 0, 20) };
@@ -99,7 +118,7 @@ public sealed class VotingWindow : Window
         ToolTip = "Показывать название шаблона под каждой командой в игровом списке голосования" };
     private readonly StackPanel _sidebar = new(), _sequence = new();
     private FrameworkElement _generalPanel = null!, _collectionPanel = null!;
-    private bool _generalSelected = true;
+    private bool _generalSelected;
     private string _selectedId;
     private string _profileId;
     private string _sidebarSignature = string.Empty;
@@ -112,7 +131,7 @@ public sealed class VotingWindow : Window
     internal const string ResetConfirmation = "Сбросить накопленные суммы этого голосования и отменить ожидающий эффект победителя?\n\nКоманды, выбранные шаблоны, настройки программы и оставшееся время не изменятся. Уже отправленные эффекты не отменяются.";
     internal static string DeleteConfirmation(VotingRound round) => "Удалить голосование «" + round.Title + "»?\n\nЕго команды, настройки и накопленные суммы будут удалены. Ожидающий эффект победителя будет отменён. Другие голосования и настройки программы не изменятся. Уже отправленные эффекты не отменяются.";
     private VotingCondition _conditionValue;
-    private bool _dirty, _loading, _busy, _spinning, _closing;
+    private bool _dirty, _loading, _busy, _closing;
     internal ObservableCollection<VotingOptionRow> Rows => _rows;
 
     public VotingWindow(BridgeRuntime runtime, VotingObsController obs)
@@ -120,10 +139,16 @@ public sealed class VotingWindow : Window
         _runtime = runtime;
         _settingsCollapsed = runtime.UiPreferences.VotingSettingsPanelCollapsed;
         _profileId = runtime.Settings.ActiveProfileId;
-        _selectedId = runtime.Voting.CollectionsFor(_profileId).FirstOrDefault(round => round.CollectionId == runtime.Voting.Snapshot.CollectionId)?.CollectionId
-            ?? runtime.Voting.CollectionsFor(_profileId).FirstOrDefault()?.CollectionId ?? string.Empty;
-        Title = "Голосование — Anomaly Donation Bridge"; Width = 1350; Height = 920; MinWidth = 1120; MinHeight = 650;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner; FontFamily = new FontFamily("Segoe UI"); FontSize = 14;
+        var rounds = runtime.Voting.CollectionsFor(_profileId);
+        var lastSelectedId = runtime.Voting.Snapshot.CollectionId;
+        _selectedId = rounds.FirstOrDefault(round => round.CollectionId == lastSelectedId)?.CollectionId
+            ?? rounds.FirstOrDefault()?.CollectionId ?? string.Empty;
+        _generalSelected = _selectedId.Length == 0;
+        InitializeComponent();
+        Title = "Голосования — Anomaly Donation Bridge"; Width = 1130; Height = 745; MinWidth = 1030; MinHeight = 640;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner; FontFamily = new FontFamily("Segoe UI"); FontSize = 13;
+        UseLayoutRounding = true;
+        Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/AnomalyDonationBridge;component/Assets/AnomalyDonationBridge.ico"));
         SetResourceReference(BackgroundProperty, "BackgroundBrush"); SetResourceReference(ForegroundProperty, "TextBrush");
         DarkSystemFrame.Attach(this);
         Content = Build();
@@ -133,20 +158,34 @@ public sealed class VotingWindow : Window
         _currency.SelectionChanged += (_, _) => Dirty();
         _money.Checked += (_, _) => Dirty(); _money.Unchecked += (_, _) => Dirty();
         _time.Checked += (_, _) => Dirty(); _time.Unchecked += (_, _) => Dirty();
-        _condition.Click += (_, _) => { _conditionValue = _conditionValue == VotingCondition.All ? VotingCondition.Any : VotingCondition.All; Dirty(); UpdateDisplay(); };
-        _spin.Click += async (_, _) => await RunAsync(SpinAsync);
-        _add.Click += (_, _) => AddRow(new VotingOption());
+        _condition.SelectionChanged += (_, _) =>
+        {
+            if (_loading) return;
+            _conditionValue = _condition.SelectedIndex == 1 ? VotingCondition.All : VotingCondition.Any;
+            Dirty();
+        };
+        _spin.Click += async (_, _) =>
+        {
+            if (_playerCollectionId is { } id)
+            {
+                var pendingId = (string?)_spin.CommandParameter;
+                await RunAsync(() => SpinAsync(id, pendingId, fromPlayer: true));
+            }
+        };
+        _selectedSpin.Click += async (_, _) =>
+        {
+            var id = _selectedId;
+            var pendingId = (string?)_selectedSpin.CommandParameter;
+            await RunAsync(() => SpinAsync(id, pendingId));
+        };
+        _add.Click += (_, _) =>
+        {
+            if (AddRow(new VotingOption()) is { } row) _commandList.ScrollIntoView(row);
+        };
         _test.Click += async (_, _) => await RunAsync(TestContributionAsync);
-        _reset.Click += async (_, _) => await RunAsync(async () =>
-        {
-            if (!VotingConfirmationWindow.Confirm(this, "Сбросить прогресс", ResetConfirmation, "Сбросить")) return;
-            await ResetSelectedAsync();
-        });
-        _delete.Click += async (_, _) => await RunAsync(async () =>
-        {
-            if (VotingConfirmationWindow.Confirm(this, "Удалить голосование", DeleteConfirmation(SelectedRound), "Удалить"))
-                await DeleteSelectedAsync();
-        });
+        _rename.Click += async (_, _) => await RunAsync(() => RenameCollectionAsync(_selectedId));
+        _reset.Click += async (_, _) => await RunAsync(() => ConfirmResetAsync(_selectedId));
+        _delete.Click += async (_, _) => await RunAsync(() => ConfirmDeleteAsync(_selectedId));
         _obs.Click += (_, _) => obs.Show();
         _obs.ToolTip = "Одно окно OBS для текущего активного голосования";
         System.Windows.Automation.AutomationProperties.SetName(_delete, "Удалить это голосование");
@@ -157,11 +196,23 @@ public sealed class VotingWindow : Window
             try { await _runtime.UpdateUiPreferencesAsync(current => current with { VotingSettingsPanelCollapsed = collapsed }); }
             catch (Exception error) { _message.Text = "Не удалось сохранить вид окна: " + error.Message; }
         };
-        _collectionToggle.Click += async (_, _) => await RunAsync(async () =>
+        _collectionToggle.Click += async (_, _) =>
         {
-            await SaveSettingsAsync();
-            await _runtime.Voting.SetCollectionActiveAsync(_selectedId, !SelectedRound.IsActive, _runtime.Settings.ActiveProfileId);
-        });
+            if (!_generalSelected) await RunAsync(() => ChangeCollectionActivityAsync(_selectedId, activate: true));
+        };
+        _playerTitle.Click += async (_, _) =>
+        {
+            if (_playerCollectionId is { } id && (_generalSelected || _selectedId != id))
+                await RunAsync(() => SelectPageAsync(id));
+        };
+        _playerToggle.Click += async (_, _) =>
+        {
+            if (_playerCollectionId is { } id)
+            {
+                var resume = _pausedPlayerId == id;
+                await RunAsync(() => ChangeCollectionActivityAsync(id, resume));
+            }
+        };
         _automaticDraw.Checked += (_, _) => Dirty(); _automaticDraw.Unchecked += (_, _) => Dirty();
         _order.SelectionChanged += (_, _) => Dirty();
         _next.Checked += (_, _) => Dirty(); _next.Unchecked += (_, _) => Dirty();
@@ -186,155 +237,6 @@ public sealed class VotingWindow : Window
         LoadDraft(); _timer.Start();
     }
 
-    private UIElement Build()
-    {
-        var shell = new Grid { Margin = new Thickness(18) };
-        shell.SetResourceReference(Panel.BackgroundProperty, "BackgroundBrush");
-        shell.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(190) });
-        shell.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
-        shell.ColumnDefinitions.Add(new ColumnDefinition());
-        var navigation = new Grid(); navigation.RowDefinitions.Add(new RowDefinition()); navigation.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        navigation.Children.Add(new ScrollViewer { Content = _sidebar, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
-        var addCollection = MakeButton("+ Добавить", async (_, _) => await RunAsync(async () =>
-        { await SaveSettingsAsync(); _selectedId = await _runtime.Voting.AddCollectionAsync(sourceCollectionId: _selectedId, profileId: _profileId); _generalSelected = false; LoadDraft(); }));
-        addCollection.ToolTip = "Добавить голосование";
-        System.Windows.Automation.AutomationProperties.SetName(addCollection, "Добавить голосование");
-        Grid.SetRow(addCollection, 1); navigation.Children.Add(addCollection);
-        var sideBorder = new Border { Child = navigation, BorderThickness = new Thickness(0, 0, 1, 0), Padding = new Thickness(0, 0, 12, 0) };
-        sideBorder.SetResourceReference(Border.BorderBrushProperty, "BorderBrush"); shell.Children.Add(sideBorder);
-        var root = new Grid(); Grid.SetColumn(root, 2); shell.Children.Add(root);
-        root.SetResourceReference(Panel.BackgroundProperty, "BackgroundBrush");
-        foreach (var height in new[] { GridLength.Auto, GridLength.Auto, new GridLength(1, GridUnitType.Star), GridLength.Auto })
-            root.RowDefinitions.Add(new RowDefinition { Height = height });
-        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 15) };
-        var headerActions = _headerActions;
-        headerActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); headerActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); headerActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        headerActions.Children.Add(_reset); Grid.SetColumn(_delete, 1); headerActions.Children.Add(_delete); Grid.SetColumn(_panelToggle, 2); headerActions.Children.Add(_panelToggle);
-        _reset.Margin = new Thickness(0);
-        _delete.SetResourceReference(Control.ForegroundProperty, "BadBrush"); DockPanel.SetDock(headerActions, Dock.Right); header.Children.Add(headerActions);
-        var rename = _rename; rename.Click += async (_, _) => await RunAsync(async () =>
-        {
-            if (_generalSelected) return;
-            await SaveSettingsAsync();
-            var dialog = new PresetNameWindow("Заголовок голосования", SelectedRound.Title) { Owner = this };
-            if (dialog.ShowDialog() == true) await _runtime.Voting.RenameAsync(dialog.PresetName, _selectedId);
-        });
-        rename.ToolTip = "Переименовать заголовок"; rename.Margin = new Thickness(9, 0, 0, 0); rename.Width = rename.Height = 36; rename.Padding = new Thickness(0);
-        var statusContent = new StackPanel { Orientation = Orientation.Horizontal }; statusContent.Children.Add(_statusDot); statusContent.Children.Add(_collectionToggleLabel);
-        _collectionToggle.Content = statusContent;
-        _title.Margin = new Thickness(12, 0, 0, 0);
-        var titleRow = new Grid(); titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); titleRow.ColumnDefinitions.Add(new ColumnDefinition());
-        titleRow.Children.Add(_collectionToggle); Grid.SetColumn(rename, 1); titleRow.Children.Add(rename); Grid.SetColumn(_title, 2); titleRow.Children.Add(_title);
-        header.Children.Add(titleRow); root.Children.Add(header);
-        _compactSummary.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
-        Grid.SetRow(_compactSummary, 1); root.Children.Add(_compactSummary);
-        _collectionPanel = BuildCollection(); Grid.SetRow(_collectionPanel, 2); root.Children.Add(_collectionPanel);
-        _generalPanel = BuildGeneral(); Grid.SetRow(_generalPanel, 2); root.Children.Add(_generalPanel);
-        return shell;
-    }
-
-    private FrameworkElement BuildCollection()
-    {
-        var columns = new Grid();
-        columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.35, GridUnitType.Star) });
-        _settingsGap = new ColumnDefinition { Width = new GridLength(24) };
-        _settingsColumn = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 380, MaxWidth = 440 };
-        columns.ColumnDefinitions.Add(_settingsGap); columns.ColumnDefinitions.Add(_settingsColumn);
-        var commands = _commandsPanel; commands.Margin = new Thickness(0, 16, 0, 0);
-        commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); commands.RowDefinitions.Add(new RowDefinition());
-        commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        commands.Children.Add(Heading("Команды голосования"));
-        var items = new ItemsControl { ItemsSource = _rows, ItemTemplate = RowTemplate() };
-        var scroll = new ScrollViewer { Content = items, Margin = new Thickness(0, 14, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-        Grid.SetRow(scroll, 1); commands.Children.Add(scroll);
-        var adding = new StackPanel { Margin = new Thickness(0, 12, 0, 16) };
-        var addRow = new Grid(); addRow.ColumnDefinitions.Add(new ColumnDefinition()); addRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        _add.HorizontalAlignment = HorizontalAlignment.Left; addRow.Children.Add(_add);
-        Grid.SetColumn(_compactActions, 1); addRow.Children.Add(_compactActions); adding.Children.Add(addRow);
-        var hint = new TextBlock { Text = "или Шаблон → ⋯ → Добавить в голосование", FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 7, 0, 0) };
-        hint.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); adding.Children.Add(hint); Grid.SetRow(adding, 2); commands.Children.Add(adding);
-        var testing = new StackPanel(); testing.Children.Add(Heading("Тестовый взнос"));
-        var testHint = new TextBlock { Text = "Без запуска обычного эффекта доната", FontSize = 12, Margin = new Thickness(0, 5, 0, 12), TextWrapping = TextWrapping.Wrap };
-        testHint.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); testing.Children.Add(testHint);
-        var testRow = new Grid(); testRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(88) });
-        testRow.ColumnDefinitions.Add(new ColumnDefinition()); testRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(88) });
-        _testAmount.Width = double.NaN; _testMessage.Margin = new Thickness(8, 0, 8, 0); _test.Margin = new Thickness(0);
-        foreach (var input in new[] { _target, _minutes, _testAmount, _testMessage, _youTubeWeight }) { input.Height = 36; input.Padding = new Thickness(8, 3, 8, 3); }
-        _test.Height = 36; _test.Padding = new Thickness(10, 6, 10, 6);
-        testRow.Children.Add(_testAmount); Grid.SetColumn(_testMessage, 1); testRow.Children.Add(_testMessage); Grid.SetColumn(_test, 2); testRow.Children.Add(_test);
-        testing.Children.Add(testRow);
-        var testCard = Card(testing, 12); Grid.SetRow(testCard, 3); commands.Children.Add(testCard); columns.Children.Add(commands);
-        var compactSaving = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
-        compactSaving.SetBinding(TextBlock.TextProperty, new Binding(nameof(TextBlock.Text)) { Source = _autosaveStatus });
-        compactSaving.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(TextBlock.Foreground)) { Source = _autosaveStatus });
-        _compactFeedback.Children.Add(compactSaving);
-        var compactMessage = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
-        compactMessage.SetBinding(TextBlock.TextProperty, new Binding(nameof(TextBlock.Text)) { Source = _message });
-        _compactFeedback.Children.Add(compactMessage);
-        _compactStatus.SetBinding(TextBlock.TextProperty, new Binding(nameof(TextBlock.Text)) { Source = _status });
-        _compactStatus.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); _compactFeedback.Children.Add(_compactStatus);
-        Grid.SetRow(_compactFeedback, 4); commands.Children.Add(_compactFeedback);
-
-        _settings.RowDefinitions.Add(new RowDefinition()); _settings.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var settings = new StackPanel(); settings.Children.Add(Heading("Прогресс и настройки"));
-        var goals = new Grid { Margin = new Thickness(0, 16, 0, 16) };
-        goals.ColumnDefinitions.Add(new ColumnDefinition()); goals.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(64) }); goals.ColumnDefinitions.Add(new ColumnDefinition());
-        goals.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); goals.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        _money.Content = "Сумма"; _time.Content = "Время, мин"; _money.MinHeight = _time.MinHeight = 24;
-        goals.Children.Add(_money); Grid.SetColumn(_time, 2); goals.Children.Add(_time);
-        Grid.SetRow(_target, 1); _target.Margin = new Thickness(0, 8, 0, 0); goals.Children.Add(_target);
-        Grid.SetColumn(_condition, 1); Grid.SetRow(_condition, 1); _condition.Margin = new Thickness(8, 8, 8, 0); _condition.Padding = new Thickness(0); goals.Children.Add(_condition);
-        Grid.SetColumn(_minutes, 2); Grid.SetRow(_minutes, 1); _minutes.Margin = new Thickness(0, 8, 0, 0); _minutes.ToolTip = "Длительность в минутах"; goals.Children.Add(_minutes); settings.Children.Add(goals);
-        var currencyRow = new Grid { Margin = new Thickness(0, 0, 0, 20) }; currencyRow.ColumnDefinitions.Add(new ColumnDefinition()); currencyRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        currencyRow.Children.Add(new TextBlock { Text = "Валюта голосования", VerticalAlignment = VerticalAlignment.Center });
-        _currency.Width = 148; _currency.Height = 36; Grid.SetColumn(_currency, 1);
-        _currency.ItemsSource = new[] { "RUB", "USD", "EUR" }.Concat(_runtime.Settings.ObservedCurrencies).Distinct()
-            .Select(code => new { Code = code, Label = code == "RUB" ? "руб. (RUB)" : code }).ToList(); currencyRow.Children.Add(_currency); settings.Children.Add(currencyRow);
-        settings.Children.Add(BuildVoteSources());
-        _total.FontSize = 18; _total.FontWeight = FontWeights.Medium; _total.TextWrapping = TextWrapping.Wrap;
-        _total.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush"); settings.Children.Add(_total);
-        _remaining.FontSize = 12; _remaining.Margin = new Thickness(0, 5, 0, 9); _remaining.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); settings.Children.Add(_remaining);
-        _progress.Height = 10; settings.Children.Add(_progress);
-        _status.Margin = new Thickness(0, 14, 0, 0); _status.FontSize = 13; _status.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); settings.Children.Add(_status);
-        var explanation = new TextBlock { Text = "Команды учитываются из выбранных источников. Обычные эффекты по сумме доната работают независимо.", TextWrapping = TextWrapping.Wrap, FontSize = 12 };
-        explanation.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush");
-        var separator = new Border { Child = explanation, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(0, 14, 0, 0), Margin = new Thickness(0, 20, 0, 0) };
-        separator.SetResourceReference(Border.BorderBrushProperty, "BorderBrush"); settings.Children.Add(separator);
-        settings.Children.Add(_autosaveStatus);
-        _message.FontSize = 12; _message.Margin = new Thickness(0, 10, 0, 0); settings.Children.Add(_message);
-        _settings.Children.Add(new ScrollViewer { Content = settings, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
-        var actions = _settingsActions;
-        _spin.Height = 36; _spin.Style = (Style)FindResource("PrimaryButtonStyle"); actions.Children.Add(_spin);
-        Grid.SetRow(actions, 1); _settings.Children.Add(actions);
-        var settingsCard = Card(_settings, 16); _settingsCard = settingsCard;
-        Grid.SetColumn(settingsCard, 2); columns.Children.Add(settingsCard);
-        return columns;
-    }
-
-    private FrameworkElement BuildVoteSources()
-    {
-        var panel = new StackPanel();
-        panel.Children.Add(new TextBlock { Text = "Обрабатывать голоса из:", FontWeight = FontWeights.Medium, Margin = new Thickness(0, 0, 0, 10) });
-        var sources = new WrapPanel(); sources.Children.Add(_donationVotes); sources.Children.Add(_youTubeVotes); panel.Children.Add(sources);
-        panel.Children.Add(new TextBlock { Text = "Воспринимать сообщение из чата YouTube как:", TextWrapping = TextWrapping.Wrap,
-            FontSize = 12, Margin = new Thickness(0, 14, 0, 7) });
-        var weight = new StackPanel { Orientation = Orientation.Horizontal };
-        weight.Children.Add(_youTubeWeight); weight.Children.Add(_youTubeCurrency); panel.Children.Add(weight);
-        var change = new Grid { Margin = new Thickness(0, 14, 0, 0) };
-        change.ColumnDefinitions.Add(new ColumnDefinition()); change.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        change.Children.Add(new TextBlock { Text = "Пользователь YouTube может менять голос", TextWrapping = TextWrapping.Wrap,
-            FontSize = 12, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) });
-        _youTubeChange.Style = (Style)FindResource("SwitchCheckBoxStyle");
-        _youTubeChange.ToolTip = "Переносит уже учтённый голос на другую команду, не добавляя вес.";
-        System.Windows.Automation.AutomationProperties.SetName(_youTubeChange, "Пользователь YouTube может менять голос");
-        var toggle = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        toggle.Children.Add(_youTubeChange); toggle.Children.Add(_youTubeChangeLabel); Grid.SetColumn(toggle, 1); change.Children.Add(toggle); panel.Children.Add(change);
-        var block = new Border { Child = panel, BorderThickness = new Thickness(0, 1, 0, 1),
-            Padding = new Thickness(0, 16, 0, 16), Margin = new Thickness(0, 0, 0, 20) };
-        block.SetResourceReference(Border.BorderBrushProperty, "BorderBrush"); return block;
-    }
-
     private static Border Card(UIElement child, double padding)
     {
         var border = new Border { Child = child, Padding = new Thickness(padding), CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1) };
@@ -344,7 +246,7 @@ public sealed class VotingWindow : Window
     private FrameworkElement BuildGeneral()
     {
         var content = new Grid { Margin = new Thickness(0, 0, 8, 0) };
-        for (var row = 0; row < 4; row++) content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        for (var row = 0; row < 3; row++) content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.Children.Add(_automationStatus);
         var columns = new Grid(); Grid.SetRow(columns, 1); content.Children.Add(columns);
         columns.ColumnDefinitions.Add(new ColumnDefinition());
@@ -377,22 +279,20 @@ public sealed class VotingWindow : Window
         saving.SetBinding(TextBlock.TextProperty, new Binding(nameof(TextBlock.Text)) { Source = _autosaveStatus });
         saving.SetBinding(TextBlock.ForegroundProperty, new Binding(nameof(TextBlock.Foreground)) { Source = _autosaveStatus });
         Grid.SetRow(saving, 2); content.Children.Add(saving);
-        var message = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
-        message.SetBinding(TextBlock.TextProperty, new Binding(nameof(TextBlock.Text)) { Source = _message });
-        Grid.SetRow(message, 3); content.Children.Add(message);
         return new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
     }
 
     private IReadOnlyList<VotingRound> ProfileCollections => _runtime.Voting.CollectionsFor(_profileId);
-    private VotingRound SelectedRound
+    private VotingRound SelectedRound => FindCollection(_selectedId)
+        ?? new VotingRound { CollectionId = string.Empty, ProfileId = _profileId };
+
+    private VotingRound? FindCollection(string collectionId)
     {
-        get
-        {
-            var round = _runtime.Voting.SnapshotFor(_selectedId);
-            return round.CollectionId == _selectedId && round.ProfileId == _profileId
-                ? round : new VotingRound { CollectionId = string.Empty, ProfileId = _profileId };
-        }
+        var round = _runtime.Voting.SnapshotFor(collectionId);
+        return round.CollectionId == collectionId && round.ProfileId == _profileId ? round : null;
     }
+
+    private bool IsEditingCollection(string collectionId) => !_generalSelected && _selectedId == collectionId;
 
     private void ProfileChanged() => Dispatcher.BeginInvoke(async () =>
     {
@@ -403,46 +303,84 @@ public sealed class VotingWindow : Window
             // replacing the editor with the new profile's independent draft.
             await SaveSettingsAsync();
             _profileId = _runtime.Settings.ActiveProfileId;
+            _pausedPlayerId = null;
             _selectedId = ProfileCollections.FirstOrDefault()?.CollectionId ?? string.Empty;
-            _generalSelected = true; CancelSequenceDrag(); LoadDraft();
+            _generalSelected = _selectedId.Length == 0;
+            CancelSequenceDrag();
+            LoadDraft();
         }
         catch (Exception error) { _message.Text = error.Message; }
     });
 
     private async Task SelectPageAsync(string? collectionId)
     {
-        await SaveSettingsAsync(); _generalSelected = collectionId is null;
+        await SaveSettingsAsync();
         if (collectionId is not null)
-        { _selectedId = collectionId; await _runtime.Voting.SelectCollectionAsync(collectionId, _runtime.Settings.ActiveProfileId); }
+        {
+            await _runtime.Voting.SelectCollectionAsync(collectionId, _profileId);
+            _selectedId = collectionId;
+        }
+        _generalSelected = collectionId is null;
         LoadDraft();
     }
 
-    private void UpdateNavigation()
+    private void UpdateNavigation(IReadOnlyList<VotingRound> rounds, VotingRound? active)
     {
-        var rounds = ProfileCollections;
-        var activeId = rounds.FirstOrDefault(round => round.IsActive)?.CollectionId ?? string.Empty;
-        var signature = string.Join("|", rounds.Select(round => round.CollectionId + ":" + round.Title + ":" + round.UseInSequence)) + activeId + _selectedId + _generalSelected;
+        var activeId = active?.CollectionId ?? string.Empty;
+        var signature = string.Join("|", rounds.Select(round => round.CollectionId + ":" + round.Title + ":" + round.UseInSequence)) +
+            activeId + active?.Phase + _selectedId + _generalSelected;
         if (_dragCard is not null || _sidebarSignature == signature) return; _sidebarSignature = signature;
+        var focusedId = _sidebar.Children.OfType<Button>().FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag as string;
         _sidebar.Children.Clear();
-        var general = MakeButton("Общие настройки", async (_, _) => await RunAsync(() => SelectPageAsync(null)));
-        general.Margin = new Thickness(0, 0, 0, 12); general.HorizontalContentAlignment = HorizontalAlignment.Left;
-        if (_generalSelected) general.SetResourceReference(BackgroundProperty, "SelectionSurfaceBrush");
-        _sidebar.Children.Add(general);
+        if (_generalSelected) _generalButton.SetResourceReference(Control.BackgroundProperty, "WarningPanelBrush");
+        else _generalButton.ClearValue(Control.BackgroundProperty);
         foreach (var round in rounds)
         {
-            var button = MakeButton(round.Title + (round.CollectionId == activeId ? "  ●" : ""), async (_, _) => await RunAsync(() => SelectPageAsync(round.CollectionId)));
-            var label = new Grid(); label.ColumnDefinitions.Add(new ColumnDefinition()); label.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            label.Children.Add(new TextBlock { Text = round.Title, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) });
-            if (round.IsActive)
+            var isSelected = !_generalSelected && round.CollectionId == _selectedId;
+            var isOnAir = round.CollectionId == activeId;
+            var button = MakeButton(round.Title, async (_, _) =>
             {
-                var dot = new TextBlock { Text = "●", FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
-                dot.SetResourceReference(TextBlock.ForegroundProperty, "GoodBrush"); Grid.SetColumn(dot, 1); label.Children.Add(dot);
+                if (_generalSelected || _selectedId != round.CollectionId)
+                    await RunAsync(() => SelectPageAsync(round.CollectionId));
+            });
+            var labels = new StackPanel();
+            labels.Children.Add(new TextBlock { Text = round.Title, TextTrimming = TextTrimming.CharacterEllipsis });
+            var activity = isOnAir ? round.Phase switch
+            {
+                VotingPhase.Collecting => "В эфире",
+                VotingPhase.Ready => "Готово к розыгрышу",
+                VotingPhase.Draft => "Ожидает настройки",
+                _ => "Завершено"
+            } : "";
+            if (isOnAir)
+            {
+                var live = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 0) };
+                var dot = new TextBlock { Text = "●", FontSize = 10, Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center };
+                var caption = new TextBlock { Text = activity, FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
+                dot.SetResourceReference(TextBlock.ForegroundProperty, "GoodBrush");
+                caption.SetResourceReference(TextBlock.ForegroundProperty, "GoodBrush");
+                live.Children.Add(dot);
+                live.Children.Add(caption);
+                labels.Children.Add(live);
             }
-            button.Content = label; button.ToolTip = round.Title + (round.IsActive ? " — активно" : " — отключено");
-            button.Tag = round.CollectionId; button.Template = LeftAlignedButtonTemplate(); button.Padding = new Thickness(10, 8, 10, 8);
-            button.HorizontalContentAlignment = HorizontalAlignment.Left; button.Margin = new Thickness(0, 0, 0, 6);
-            if (!_generalSelected && round.CollectionId == _selectedId) button.SetResourceReference(BackgroundProperty, "SelectionSurfaceBrush");
+            var marker = new Border { Child = labels, Padding = new Thickness(6, 0, 0, 0), BorderThickness = new Thickness(2, 0, 0, 0) };
+            if (isSelected)
+            {
+                marker.SetResourceReference(Border.BorderBrushProperty, "AccentBrush");
+                button.SetResourceReference(Control.BackgroundProperty, "WarningPanelBrush");
+                button.SetResourceReference(Control.BorderBrushProperty, "WarningBorderBrush");
+            }
+            button.Content = marker;
+            button.ToolTip = isOnAir ? round.Title + " · " + activity : round.Title;
+            System.Windows.Automation.AutomationProperties.SetName(button, (string)button.ToolTip);
+            button.Tag = round.CollectionId;
+            button.ContextMenu = BuildCollectionMenu(round.CollectionId);
+            button.SetResourceReference(StyleProperty, "VotingListButtonStyle");
+            button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            button.Padding = new Thickness(1, 7, 9, 7);
+            button.Margin = new Thickness(0, 0, 0, 4);
             _sidebar.Children.Add(button);
+            if (round.CollectionId == focusedId) Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => button.Focus()));
         }
         _sequence.Children.Clear();
         foreach (var round in rounds)
@@ -462,6 +400,35 @@ public sealed class VotingWindow : Window
             var card = Card(row, 10); card.Margin = new Thickness(0, 0, 0, 8); card.Tag = round.CollectionId;
             WireSequenceDrag(card, round.CollectionId); _sequence.Children.Add(card);
         }
+    }
+
+    private ContextMenu BuildCollectionMenu(string collectionId)
+    {
+        var toggle = new MenuItem();
+        var rename = new MenuItem { Header = "Переименовать" };
+        var reset = new MenuItem { Header = "Сбросить" };
+        var delete = new MenuItem { Header = "Удалить" };
+        delete.SetResourceReference(StyleProperty, "DangerMenuItemStyle");
+
+        var menu = new ContextMenu { Items = { toggle, rename, reset, delete } };
+        menu.Opened += (_, _) =>
+        {
+            var round = FindCollection(collectionId);
+            var canUse = round is not null && _profileId == _runtime.Settings.ActiveProfileId && !_busy && _runtime.VotingError.Length == 0;
+            rename.IsEnabled = reset.IsEnabled = delete.IsEnabled = canUse;
+            toggle.Header = round is null ? "Запустить" : ActivityCaption(round);
+            toggle.CommandParameter = round?.IsActive == false;
+            toggle.IsEnabled = round is not null && canUse && CanChangeActivity(round);
+        };
+        toggle.Click += async (_, _) =>
+        {
+            var activate = toggle.CommandParameter is true;
+            await RunAsync(() => ChangeCollectionActivityAsync(collectionId, activate));
+        };
+        rename.Click += async (_, _) => await RunAsync(() => RenameCollectionAsync(collectionId));
+        reset.Click += async (_, _) => await RunAsync(() => ConfirmResetAsync(collectionId));
+        delete.Click += async (_, _) => await RunAsync(() => ConfirmDeleteAsync(collectionId));
+        return menu;
     }
 
     private void WireSequenceDrag(Border card, string collectionId)
@@ -555,77 +522,23 @@ public sealed class VotingWindow : Window
         await _runtime.Voting.SetSequenceAsync(latest.Select(item => item.CollectionId).ToList(), latest.Where(item => item.UseInSequence).Select(item => item.CollectionId).ToHashSet(), profileId: _profileId);
     }
 
-    private DataTemplate RowTemplate()
+    private void RemoveCommand(object sender, RoutedEventArgs args)
     {
-        var border = new FrameworkElementFactory(typeof(Border)); border.SetResourceReference(Border.BackgroundProperty, "PanelBrush");
-        border.SetValue(Border.PaddingProperty, new Thickness(12)); border.SetValue(Border.MarginProperty, new Thickness(0, 0, 0, 10)); border.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
-        border.SetValue(MinHeightProperty, 78d);
-        var dock = new FrameworkElementFactory(typeof(DockPanel)); border.AppendChild(dock);
-        var remove = new FrameworkElementFactory(typeof(Button)); remove.SetValue(ContentControl.ContentProperty, "×"); remove.SetValue(DockPanel.DockProperty, Dock.Right);
-        remove.SetValue(FrameworkElement.MarginProperty, new Thickness(5, 0, 0, 0)); remove.SetBinding(IsEnabledProperty, new Binding(nameof(VotingOptionRow.CanEdit)));
-        remove.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-        remove.SetValue(WidthProperty, 32d); remove.SetValue(HeightProperty, 32d); remove.SetValue(Control.PaddingProperty, new Thickness(0));
-        remove.AddHandler(Button.ClickEvent, new RoutedEventHandler((sender, _) => { if (sender is FrameworkElement { DataContext: VotingOptionRow row }) { _rows.Remove(row); Dirty(); } })); dock.AppendChild(remove);
-        var enabled = new FrameworkElementFactory(typeof(CheckBox)); enabled.SetValue(DockPanel.DockProperty, Dock.Left); enabled.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-        enabled.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(VotingOptionRow.Enabled)) { Mode = BindingMode.TwoWay }); enabled.SetBinding(IsEnabledProperty, new Binding(nameof(VotingOptionRow.CanEdit))); dock.AppendChild(enabled);
-        var command = new FrameworkElementFactory(typeof(TextBox)); command.SetValue(DockPanel.DockProperty, Dock.Left); command.SetValue(WidthProperty, 116d); command.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 0, 12, 0));
-        command.SetValue(HeightProperty, 36d); command.SetValue(Control.PaddingProperty, new Thickness(8, 3, 8, 3));
-        command.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-        command.SetValue(TextBox.MaxLengthProperty, 80); command.SetBinding(TextBox.TextProperty, new Binding(nameof(VotingOptionRow.Command)) { Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }); command.SetBinding(IsEnabledProperty, new Binding(nameof(VotingOptionRow.CanEdit))); dock.AppendChild(command);
-        var details = new FrameworkElementFactory(typeof(StackPanel)); details.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
-        var bind = new FrameworkElementFactory(typeof(Button)); bind.SetValue(StyleProperty, PresetPickerStyle());
-        bind.SetValue(MinHeightProperty, 20d); bind.SetValue(CursorProperty, Cursors.Hand); bind.SetValue(Control.FontWeightProperty, FontWeights.Medium);
-        bind.SetResourceReference(Control.ForegroundProperty, "AccentBrush"); bind.SetValue(ToolTipProperty, "Выбрать или заменить шаблон");
-        bind.SetValue(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Left); bind.SetValue(Control.FontSizeProperty, 13d);
-        bind.SetBinding(IsEnabledProperty, new Binding(nameof(VotingOptionRow.CanEdit))); var title = new FrameworkElementFactory(typeof(TextBlock)); title.SetValue(TextBlock.TextWrappingProperty, TextWrapping.Wrap); title.SetBinding(TextBlock.TextProperty, new Binding(nameof(VotingOptionRow.BindingTitle))); bind.AppendChild(title);
-        bind.AddHandler(Button.ClickEvent, new RoutedEventHandler(PickActive)); details.AppendChild(bind);
-        var statistics = new FrameworkElementFactory(typeof(TextBlock)); statistics.SetValue(TextBlock.FontSizeProperty, 12d); statistics.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 4, 0, 0)); statistics.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush"); statistics.SetBinding(TextBlock.TextProperty, new Binding(nameof(VotingOptionRow.Statistics))); details.AppendChild(statistics); dock.AppendChild(details);
-        return new DataTemplate { VisualTree = border };
-    }
-
-    private Style PresetPickerStyle()
-    {
-        var style = new Style(typeof(Button), (Style)FindResource("GhostButtonStyle"));
-        style.Setters.Add(new Setter(Control.TemplateProperty, LeftAlignedButtonTemplate(drawBorder: true)));
-        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
-        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
-        var missing = new DataTrigger { Binding = new Binding(nameof(VotingOptionRow.HasPreset)), Value = false };
-        missing.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension("PanelAltBrush")));
-        missing.Setters.Add(new Setter(Control.BorderBrushProperty, new DynamicResourceExtension("BorderStrongBrush")));
-        missing.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
-        missing.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(7, 0, 7, 0)));
-        missing.Setters.Add(new Setter(HorizontalAlignmentProperty, HorizontalAlignment.Left));
-        style.Triggers.Add(missing); return style;
-    }
-
-    private static ControlTemplate LeftAlignedButtonTemplate(bool drawBorder = false)
-    {
-        var border = new FrameworkElementFactory(typeof(Border));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
-        border.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
-        if (drawBorder)
-        {
-            border.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = RelativeSource.TemplatedParent });
-            border.SetBinding(Border.BorderThicknessProperty, new Binding("BorderThickness") { RelativeSource = RelativeSource.TemplatedParent });
-        }
-        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
-        presenter.SetBinding(ContentPresenter.ContentProperty, new Binding("Content") { RelativeSource = RelativeSource.TemplatedParent });
-        presenter.SetBinding(MarginProperty, new Binding("Padding") { RelativeSource = RelativeSource.TemplatedParent });
-        presenter.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
-        presenter.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center); border.AppendChild(presenter);
-        return new ControlTemplate(typeof(Button)) { VisualTree = border };
+        if (sender is FrameworkElement { DataContext: VotingOptionRow { CanEdit: true } row }) _rows.Remove(row);
     }
 
     private void PickActive(object sender, RoutedEventArgs args)
     {
         if (sender is not Button { DataContext: VotingOptionRow row } button) return;
-        var menu = new ContextMenu { PlacementTarget = button };
+        var menu = new ContextMenu { PlacementTarget = button, Placement = PlacementMode.Bottom, MinWidth = button.ActualWidth };
         foreach (var action in _runtime.Settings.Actions.Where(action => action.IsActive))
         {
             var item = new MenuItem { Header = action.DisplayName };
-            item.Click += (_, _) => { row.Bind(action); Dirty(); }; menu.Items.Add(item);
+            item.Click += (_, _) => { if (row.CanEdit && _rows.Contains(row)) row.Bind(action); }; menu.Items.Add(item);
         }
         if (menu.Items.Count == 0) menu.Items.Add(new MenuItem { Header = "Нет активных шаблонов", IsEnabled = false });
+        button.ContextMenu = menu;
+        menu.Closed += (_, _) => { if (ReferenceEquals(button.ContextMenu, menu)) button.ContextMenu = null; };
         menu.IsOpen = true;
     }
 
@@ -641,17 +554,18 @@ public sealed class VotingWindow : Window
         });
     }
 
-    private void AddRow(VotingOption option)
+    private VotingOptionRow? AddRow(VotingOption option)
     {
-        if (_rows.Count >= 200) { _message.Text = "Допускается не более 200 команд."; return; }
-        var row = new VotingOptionRow(option) { CanEdit = SelectedRound.CanEdit };
+        if (_rows.Count >= 200) { _message.Text = "Допускается не более 200 команд."; return null; }
+        var row = new VotingOptionRow(option);
         row.PropertyChanged += (_, e) => { if (e.PropertyName is nameof(VotingOptionRow.Command) or nameof(VotingOptionRow.Enabled) or nameof(VotingOptionRow.BindingTitle)) Dirty(); };
-        _rows.Add(row); Dirty();
+        _rows.Add(row);
+        return row;
     }
 
     private void Dirty()
     {
-        if (_loading || _closed || !SelectedRound.CanEdit) return;
+        if (_loading || _closed) return;
         _dirty = true; _editRevision++;
         SetAutosaveStatus("Изменения сохранятся автоматически…");
         ScheduleAutosave(); UpdateDisplay();
@@ -668,6 +582,7 @@ public sealed class VotingWindow : Window
     {
         _autosaveStatus.Text = text;
         _autosaveStatus.SetResourceReference(TextBlock.ForegroundProperty, error ? "BadBrush" : "MutedBrush");
+        _saveProblem.Text = error ? text : "";
     }
 
     private async Task AutosaveAsync()
@@ -697,6 +612,7 @@ public sealed class VotingWindow : Window
         _autosaveTimer.Stop(); _draftSession++; _loading = true; _message.Text = string.Empty; var round = SelectedRound;
         _target.Text = round.Target.ToString(CultureInfo.CurrentCulture); _minutes.Text = (round.DurationSeconds / 60m).ToString("0.####", CultureInfo.CurrentCulture);
         _money.IsChecked = round.MoneyGoal; _time.IsChecked = round.TimeGoal; _currency.SelectedValue = round.Currency; _conditionValue = round.Condition;
+        _condition.SelectedIndex = round.Condition == VotingCondition.All ? 1 : 0;
         _donationVotes.IsChecked = round.AcceptDonationVotes; _youTubeVotes.IsChecked = round.AcceptYouTubeVotes;
         _youTubeWeight.Text = round.YouTubeVoteWeight.ToString(CultureInfo.CurrentCulture); _youTubeChange.IsChecked = round.AllowYouTubeVoteChange;
         _rows.Clear(); foreach (var option in round.Options) AddRow(option);
@@ -706,6 +622,10 @@ public sealed class VotingWindow : Window
         _gameHud.IsChecked = automation.ShowGameHud; _gameHudCommands.IsChecked = automation.ShowGameHudCommands;
         _gameHudTemplateNames.IsChecked = automation.ShowGameHudTemplateNames;
         _gameHudFormat.SelectedIndex = (int)automation.GameHudFormat;
+        _testMessage.Text = _testFields.Visibility == Visibility.Visible
+            ? _rows.FirstOrDefault(row => row.Enabled && row.Command.Length > 0)?.Command ?? ""
+            : "";
+        _commandList.SelectedIndex = -1;
         _dirty = false; _loading = false; SetAutosaveStatus("Изменения сохраняются автоматически."); UpdateDisplay();
     }
 
@@ -752,9 +672,29 @@ public sealed class VotingWindow : Window
         finally { _saveGate.Release(); }
     }
 
-    internal async Task ResetSelectedAsync()
+    private async Task RenameCollectionAsync(string collectionId)
     {
-        await SaveSettingsAsync(); await _runtime.ResetVotingAsync(_selectedId); LoadDraft(); _message.Text = string.Empty;
+        if (IsEditingCollection(collectionId)) await SaveSettingsAsync();
+        if (FindCollection(collectionId) is not { } round) return;
+        var dialog = new PresetNameWindow("Заголовок голосования", round.Title) { Owner = this };
+        if (dialog.ShowDialog() == true && round.ProfileId == _runtime.Settings.ActiveProfileId)
+            await _runtime.Voting.RenameAsync(dialog.PresetName, collectionId);
+    }
+
+    private async Task ConfirmResetAsync(string collectionId)
+    {
+        if (FindCollection(collectionId) is { } round &&
+            VotingConfirmationWindow.Confirm(this, "Сбросить прогресс", $"«{round.Title}»\n\n{ResetConfirmation}", "Сбросить"))
+            await ResetCollectionAsync(collectionId);
+    }
+
+    internal async Task ResetCollectionAsync(string collectionId)
+    {
+        if (IsEditingCollection(collectionId)) await SaveSettingsAsync();
+        if (_profileId != _runtime.Settings.ActiveProfileId || FindCollection(collectionId) is null) return;
+        await _runtime.ResetVotingAsync(collectionId);
+        if (IsEditingCollection(collectionId)) LoadDraft();
+        _message.Text = FindCollection(collectionId)?.Notice ?? string.Empty;
     }
 
     private async Task EditHudPositionAsync()
@@ -768,14 +708,29 @@ public sealed class VotingWindow : Window
         _message.Text = "Положение HUD сохранено. Оно применяется в игре автоматически при подключении.";
     }
 
-    internal async Task DeleteSelectedAsync()
+    private async Task ConfirmDeleteAsync(string collectionId)
+    {
+        if (FindCollection(collectionId) is { } round &&
+            VotingConfirmationWindow.Confirm(this, "Удалить голосование", DeleteConfirmation(round), "Удалить"))
+            await DeleteCollectionAsync(collectionId);
+    }
+
+    internal async Task DeleteCollectionAsync(string collectionId)
     {
         await _saveGate.WaitAsync();
         try
         {
-            _autosaveTimer.Stop(); var id = _selectedId; await _runtime.DeleteVotingAsync(id);
-            _selectedId = ProfileCollections.FirstOrDefault()?.CollectionId ?? string.Empty;
-            _generalSelected = ProfileCollections.Count == 0; _dirty = false; LoadDraft();
+            if (_profileId != _runtime.Settings.ActiveProfileId || FindCollection(collectionId) is null) return;
+            await _runtime.DeleteVotingAsync(collectionId);
+            if (_selectedId == collectionId)
+            {
+                _selectedId = ProfileCollections.FirstOrDefault()?.CollectionId ?? string.Empty;
+                if (!_generalSelected)
+                {
+                    _generalSelected = _selectedId.Length == 0;
+                    LoadDraft();
+                }
+            }
             _message.Text = "Голосование удалено. Другие голосования и настройки сохранены.";
         }
         finally { _saveGate.Release(); }
@@ -793,96 +748,230 @@ public sealed class VotingWindow : Window
             "no_command" => "Команда не найдена в сообщении.", _ => "Взнос не учтён: " + result };
     }
 
-    private async Task SpinAsync()
+    private async Task SpinAsync(string collectionId, string? pendingRoundId, bool fromPlayer = false)
     {
-        await SaveSettingsAsync();
-        var pending = _runtime.Voting.PendingWinners.FirstOrDefault(round => round.CollectionId == _selectedId);
-        if (pending is not null) { await _runtime.SubmitVotingWinnerAsync(roundId: pending.Id); return; }
+        if (!_generalSelected && collectionId == _selectedId) await SaveSettingsAsync();
+        var round = ProfileCollections.FirstOrDefault(item => item.CollectionId == collectionId);
+        if (round is null || fromPlayer && !round.IsActive) return;
+        if (pendingRoundId is not null)
+        {
+            await _runtime.SubmitVotingWinnerAsync(roundId: pendingRoundId);
+            return;
+        }
+        if (round.Phase != VotingPhase.Ready) return;
         var started = false;
         try
         {
-            await _runtime.BeginVotingDrawAsync(collectionId: _selectedId); started = true;
+            await _runtime.BeginVotingDrawAsync(collectionId: collectionId);
+            started = true;
         }
-        finally { if (started) await _runtime.FinishVotingDrawAsync(); UpdateDisplay(); }
+        finally
+        {
+            if (started) await _runtime.FinishVotingDrawAsync();
+            UpdateDisplay();
+        }
     }
 
-    private void VotingChanged() => Dispatcher.BeginInvoke(new Action(UpdateDisplay));
+    private static string ActivityCaption(VotingRound round) => round switch
+    {
+        { IsActive: true, Phase: VotingPhase.Collecting } => "Пауза",
+        { IsActive: true } => "Отключить",
+        { Phase: VotingPhase.Paused } => "Продолжить",
+        _ => "Запустить"
+    };
+
+    private bool CanChangeActivity(VotingRound round) => !_runtime.VotingIsSpinning ||
+        round is { IsActive: true, Phase: VotingPhase.Collecting };
+
+    private async Task ChangeCollectionActivityAsync(string collectionId, bool activate)
+    {
+        if (activate && IsEditingCollection(collectionId)) await SaveSettingsAsync();
+        if (FindCollection(collectionId) is not { } target || target.ProfileId != _runtime.Settings.ActiveProfileId ||
+            target.IsActive == activate || !CanChangeActivity(target)) return;
+
+        if (activate)
+        {
+            if (target.Phase is VotingPhase.Draft or VotingPhase.Paused) VotingRules.Validate(target);
+            if (ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
+                    round is { IsActive: true, Phase: VotingPhase.Collecting }) is { } active &&
+                !VotingConfirmationWindow.Confirm(this, "Переключить голосование?",
+                    $"«{active.Title}» встанет на паузу. Прогресс и оставшееся время сохранятся.", ActivityCaption(target)))
+                return;
+            if (target.ProfileId != _runtime.Settings.ActiveProfileId || !CanChangeActivity(target)) return;
+        }
+
+        await _runtime.Voting.SetCollectionActiveAsync(collectionId, activate, target.ProfileId);
+        if (target.ProfileId == _profileId) _pausedPlayerId = activate ? null : collectionId;
+    }
+
+    private void VotingChanged()
+    {
+        if (_closed || Dispatcher.HasShutdownStarted || Interlocked.Exchange(ref _displayQueued, 1) != 0) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            Interlocked.Exchange(ref _displayQueued, 0);
+            if (!_closed) UpdateDisplay();
+        }));
+    }
+
     private void ApplyPanelLayout()
     {
-        var compact = !_generalSelected && _settingsCollapsed;
-        MinWidth = compact ? 780 : 1120;
-        MinHeight = compact ? 560 : 650;
-        _settingsCard!.Visibility = _settingsCollapsed ? Visibility.Collapsed : Visibility.Visible;
-        _settingsColumn.MinWidth = 0;
-        _settingsColumn.MaxWidth = _settingsCollapsed ? 0 : 440;
-        _settingsColumn.Width = _settingsCollapsed ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
-        _settingsColumn.MinWidth = _settingsCollapsed ? 0 : 380;
-        _settingsGap.Width = new GridLength(_settingsCollapsed ? 0 : 24);
-        _commandsPanel.Margin = new Thickness(0, _settingsCollapsed ? 0 : 16, 0, 0);
-        _compactSummary.Visibility = _compactActions.Visibility = _compactFeedback.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
-        _headerActions.Visibility = _generalSelected ? Visibility.Collapsed : Visibility.Visible;
+        MinWidth = !_generalSelected && _settingsCollapsed ? 780 : 1030;
+        _settingsCard.Visibility = _settingsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        _settingsColumn.Width = new GridLength(_settingsCollapsed ? 0 : 266);
+        _panelToggle.Tag = _settingsCollapsed ? "\uE70D" : "\uE70E";
+        if (_settingsCollapsed)
+        {
+            _panelToggle.ClearValue(Control.BackgroundProperty);
+            _panelToggle.ClearValue(Control.ForegroundProperty);
+            _panelToggle.ClearValue(Control.BorderBrushProperty);
+        }
+        else
+        {
+            _panelToggle.SetResourceReference(Control.BackgroundProperty, "WarningPanelBrush");
+            _panelToggle.SetResourceReference(Control.ForegroundProperty, "AccentForegroundBrush");
+            _panelToggle.SetResourceReference(Control.BorderBrushProperty, "WarningBorderBrush");
+        }
         _panelToggle.ToolTip = _settingsCollapsed ? "Показать настройки" : "Скрыть настройки";
         System.Windows.Automation.AutomationProperties.SetName(_panelToggle, (string)_panelToggle.ToolTip);
-        var spinHost = _settingsCollapsed ? _compactActions : _settingsActions;
-        if (!ReferenceEquals(_spin.Parent, spinHost))
-        {
-            if (_spin.Parent is Panel previous) previous.Children.Remove(_spin);
-            spinHost.Children.Add(_spin);
-        }
     }
+
+    private void UpdatePlayer(VotingRound? active, IReadOnlyList<VotingRound> rounds, IReadOnlyDictionary<string, VotingRound> pending, DateTimeOffset now, bool canUse)
+    {
+        if (active is not null || !rounds.Any(item => item.CollectionId == _pausedPlayerId && item.Phase == VotingPhase.Paused))
+            _pausedPlayerId = null;
+        var round = active ?? rounds.FirstOrDefault(item => item.CollectionId == _pausedPlayerId);
+        _playerCollectionId = round?.CollectionId;
+        var hasRound = round is not null ? Visibility.Visible : Visibility.Collapsed;
+        _playerTitle.Visibility = _playerProgress.Visibility = hasRound;
+        _playerToggle.Visibility = round is null || round.Phase == VotingPhase.Paused && IsEditingCollection(round.CollectionId)
+            ? Visibility.Collapsed : Visibility.Visible;
+        _playerEmpty.Visibility = round is null ? Visibility.Visible : Visibility.Collapsed;
+        _playerState.Text = round is null ? "Сейчас в эфире" : round.Phase switch
+        {
+            VotingPhase.Collecting => "Сейчас в эфире",
+            VotingPhase.Paused => "На паузе",
+            VotingPhase.Ready => "Готово к розыгрышу",
+            VotingPhase.Failed => "Голосование завершено",
+            VotingPhase.Drawn => _runtime.VotingDrawingCollectionId == round.CollectionId ? "Идёт розыгрыш" : "Победитель · " + round.Winner?.Command,
+            _ => "Ожидает настройки"
+        };
+        _playerState.SetResourceReference(TextBlock.ForegroundProperty, active is null ? "MutedBrush" : "GoodBrush");
+        if (round is null)
+        {
+            _spin.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _playerName.Text = round.Title;
+        _playerTitle.ToolTip = "Открыть «" + round.Title + "»";
+        System.Windows.Automation.AutomationProperties.SetName(_playerTitle, (string)_playerTitle.ToolTip);
+        _total.Text = round.MoneyGoal ? FormatMoney(round.Total, round.Currency, round.Target) : "";
+        _total.ToolTip = _total.Text;
+        _amountMetric.Visibility = round.MoneyGoal ? Visibility.Visible : Visibility.Collapsed;
+        _remaining.Text = VotingProgressDisplay.Remaining(round, now);
+        _timeMetric.Visibility = string.IsNullOrEmpty(_remaining.Text) ? Visibility.Collapsed : Visibility.Visible;
+        _progress.Value = (double)VotingProgressDisplay.Percent(round, now);
+        (_playerToggle.Content, _playerToggle.ToolTip) = (round.IsActive, round.Phase) switch
+        {
+            (false, _) => ("\uE768", "Продолжить голосование"),
+            (true, VotingPhase.Collecting) => ("\uE769", "Поставить на паузу"),
+            _ => ("\uE71A", "Отключить голосование")
+        };
+        System.Windows.Automation.AutomationProperties.SetName(_playerToggle, (string)_playerToggle.ToolTip);
+        _playerToggle.IsEnabled = canUse && CanChangeActivity(round);
+        UpdateSpinButton(_spin, round, pending.GetValueOrDefault(round.CollectionId), canUse && round.IsActive);
+    }
+
+    private void UpdateSpinButton(Button button, VotingRound round, VotingRound? pending, bool canUse)
+    {
+        var waitingForGame = pending is { GamePresentationRequired: true, GamePresentationCompleted: false };
+        button.CommandParameter = pending?.Id;
+        button.Content = waitingForGame ? "Ожидает игровую рулетку" : pending is not null ? "Активировать эффект победителя" : "Крутить";
+        button.Visibility = pending is not null || round.Phase != VotingPhase.Drawn ? Visibility.Visible : Visibility.Collapsed;
+        button.IsEnabled = canUse && !_runtime.VotingIsSpinning && !waitingForGame && (pending is not null || round.Phase == VotingPhase.Ready);
+        button.ToolTip = pending is not null ? pending.Winner?.Command + " → " + pending.Winner?.Preset?.DisplayName
+            : button.IsEnabled ? "Разыграть голосование по накопленным долям" : "Крутить можно после выполнения условий голосования";
+    }
+
     private void UpdateDisplay()
     {
-        var round = SelectedRound;
-        _spinning = _runtime.VotingDrawingCollectionId == _selectedId; UpdateNavigation();
-        _generalPanel.Visibility = _generalSelected ? Visibility.Visible : Visibility.Collapsed;
-        _collectionPanel.Visibility = _generalSelected ? Visibility.Collapsed : Visibility.Visible;
-        _reset.Visibility = _generalSelected ? Visibility.Collapsed : Visibility.Visible;
-        _rename.Visibility = _delete.Visibility = _collectionToggle.Visibility = _generalSelected ? Visibility.Collapsed : Visibility.Visible;
-        _statusDot.Visibility = !_generalSelected && round.IsActive ? Visibility.Visible : Visibility.Collapsed;
-        _title.Text = _generalSelected ? "Голосование: Общие настройки" : round.Title;
-        _collectionToggleLabel.Text = round.IsActive ? "Активно" : "Отключено";
-        _collectionToggle.SetResourceReference(Control.ForegroundProperty, round.IsActive ? "GoodBrush" : "BadBrush");
-        _statusDot.SetResourceReference(TextBlock.ForegroundProperty, "GoodBrush");
-        _statusDot.ToolTip = "Голосование активно";
+        var rounds = ProfileCollections;
+        var round = rounds.FirstOrDefault(item => item.CollectionId == _selectedId);
+        var active = rounds.FirstOrDefault(item => item.IsActive);
+        var error = _runtime.VotingError;
+        var canUse = !_busy && error.Length == 0;
+        var pending = _runtime.Voting.PendingWinners.Where(item => item.ProfileId == _profileId)
+            .GroupBy(item => item.CollectionId).ToDictionary(group => group.Key, group => group.First());
+        var now = DateTimeOffset.UtcNow;
+        UpdateNavigation(rounds, active);
+        UpdatePlayer(active, rounds, pending, now, canUse);
+
+        var editing = !_generalSelected && round is not null;
+        _generalPanel.Visibility = editing ? Visibility.Collapsed : Visibility.Visible;
+        _collectionPanel.Visibility = _headerActions.Visibility = _rename.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
+        _collectionToggle.Visibility = editing && !round!.IsActive ? Visibility.Visible : Visibility.Collapsed;
+        _title.Text = editing ? round!.Title : "Голосование: Общие настройки";
         _title.ToolTip = _title.Text;
-        var active = ProfileCollections.FirstOrDefault(item => item.IsActive);
+        _statusDot.Visibility = editing && round!.IsActive ? Visibility.Visible : Visibility.Collapsed;
+        _collectionToggleLabel.Visibility = _compactSummary.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
         _automationStatus.Text = active is null ? "Голосования выключены. Включите нужное голосование на его странице." : "Активно: " + active.Title;
         _automationStatus.SetResourceReference(TextBlock.ForegroundProperty, active is null ? "MutedBrush" : "GoodBrush");
+        _automaticDraw.IsEnabled = _order.IsEnabled = _next.IsEnabled = _winnerAuto.IsEnabled = canUse;
+        _gameHudTemplateNames.IsEnabled = canUse && _gameHud.IsChecked == true && _gameHudCommands.IsChecked == true;
+        if (error.Length > 0) _saveProblem.Text = error;
         ApplyPanelLayout();
-        var canEdit = !_busy && round.CanEdit && _runtime.VotingError.Length == 0;
-        _settings.IsEnabled = _runtime.VotingError.Length == 0;
+        if (!editing || round is null) return;
+
+        var canEdit = canUse && round.CanEdit;
+        _reset.IsEnabled = _delete.IsEnabled = _rename.IsEnabled = canUse;
+        var activityCaption = ActivityCaption(round);
+        _collectionToggle.Content = activityCaption;
+        _collectionToggle.ToolTip = $"{activityCaption} «{round.Title}»";
+        System.Windows.Automation.AutomationProperties.SetName(_collectionToggle, (string)_collectionToggle.ToolTip);
+        _collectionToggle.IsEnabled = canUse && CanChangeActivity(round);
+        _collectionToggleLabel.Text = round.Phase switch
+        {
+            VotingPhase.Collecting => "В эфире",
+            VotingPhase.Paused => "На паузе",
+            VotingPhase.Ready => "Готово к розыгрышу",
+            VotingPhase.Drawn or VotingPhase.Failed => "Завершено",
+            _ => "Отключено"
+        };
+        _collectionToggleLabel.SetResourceReference(TextBlock.ForegroundProperty, round.IsActive ? "GoodBrush" : "MutedBrush");
+        _settings.IsEnabled = error.Length == 0;
         _money.IsEnabled = _time.IsEnabled = _currency.IsEnabled = canEdit;
         _donationVotes.IsEnabled = _youTubeVotes.IsEnabled = canEdit;
         _youTubeWeight.IsEnabled = _youTubeChange.IsEnabled = canEdit && _youTubeVotes.IsChecked == true;
-        _youTubeCurrency.Text = (_currency.SelectedValue as string ?? round.Currency) is "RUB" ? "руб." : _currency.SelectedValue as string ?? round.Currency;
-        _youTubeChangeLabel.Text = _youTubeChange.IsChecked == true ? "Да" : "Нет";
-        _target.IsEnabled = canEdit && _money.IsChecked == true; _minutes.IsEnabled = canEdit && _time.IsChecked == true;
-        _condition.Content = _conditionValue == VotingCondition.All ? "И" : "ИЛИ"; _condition.IsEnabled = canEdit && _money.IsChecked == true && _time.IsChecked == true;
+        _targetCurrency.Text = _youTubeCurrency.Text = CurrencySuffix(_currency.SelectedValue as string ?? round.Currency);
+        _target.IsEnabled = canEdit && _money.IsChecked == true;
+        _minutes.IsEnabled = canEdit && _time.IsChecked == true;
+        _conditionRow.Visibility = _money.IsChecked == true && _time.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        _condition.IsEnabled = canEdit;
+        var amounts = round.Options.ToDictionary(option => option.Id, option => option.Amount);
+        var total = _rows.Where(row => row.Enabled).Sum(row => amounts.GetValueOrDefault(row.Model.Id));
         foreach (var row in _rows)
         {
             row.CanEdit = canEdit;
-            row.Update(round.Options.FirstOrDefault(option => option.Id == row.Model.Id)?.Amount ?? 0, round.Total, round.Currency);
+            row.Update(amounts.GetValueOrDefault(row.Model.Id), total, round.Currency);
         }
-        _total.Text = FormatMoney(round.Total, round.Currency) + (round.MoneyGoal ? " / " + FormatMoney(round.Target, round.Currency) : "");
-        _remaining.Text = RemainingText(round); _progress.Value = Progress(round);
-        _compactSummary.Text = CompactConditions(round, DateTimeOffset.UtcNow);
-        _status.Text = _runtime.VotingError.Length > 0 ? _runtime.VotingError : round.Notice.Length > 0 ? round.Notice : "Настройте команды и включите голосование. Изменения сохраняются автоматически.";
-        if (round.Winner is { } winner) _status.Text += "\nПобедитель: " + winner.Command + " → " + winner.Preset?.DisplayName;
-        if (round.DeliveryNote.Length > 0) _status.Text += "\n" + round.DeliveryNote;
-        var pending = _runtime.Voting.PendingWinners.FirstOrDefault(item => item.CollectionId == _selectedId);
-        if (pending is not null && pending.Id != round.Id)
-            _status.Text += "\nОжидает активации: " + pending.Winner?.Command + " → " + pending.Winner?.Preset?.DisplayName;
-        _compactStatus.Visibility = _runtime.VotingError.Length > 0 || pending is not null || round.Phase is VotingPhase.Ready or VotingPhase.Failed or VotingPhase.Drawn
-            ? Visibility.Visible : Visibility.Collapsed;
-        var waitingForGame = pending is { GamePresentationRequired: true, GamePresentationCompleted: false };
-        _spin.Content = waitingForGame ? "Ожидает игровую рулетку" : pending is not null ? "Активировать эффект победителя" : "Крутить";
-        _spin.ToolTip = pending is not null ? pending.Winner?.Command + " → " + pending.Winner?.Preset?.DisplayName : "Разыграть голосование по накопленным долям";
-        _spin.Visibility = !_generalSelected && (pending is not null || round.Phase != VotingPhase.Drawn) ? Visibility.Visible : Visibility.Collapsed;
-        _spin.IsEnabled = !_busy && _runtime.VotingError.Length == 0 && !_runtime.VotingIsSpinning && !waitingForGame && (pending is not null || round.Phase == VotingPhase.Ready);
-        _reset.IsEnabled = _delete.IsEnabled = _collectionToggle.IsEnabled = !_busy && _runtime.VotingError.Length == 0;
-        _automaticDraw.IsEnabled = _order.IsEnabled = _next.IsEnabled = _winnerAuto.IsEnabled = !_busy && _runtime.VotingError.Length == 0;
-        _gameHudTemplateNames.IsEnabled = !_busy && _runtime.VotingError.Length == 0 && _gameHud.IsChecked == true && _gameHudCommands.IsChecked == true;
-        _add.IsEnabled = canEdit && _rows.Count < 200; _test.IsEnabled = !_busy && round.Phase == VotingPhase.Collecting;
+        var summary = _settingsCollapsed ? CompactConditions(round, now) : GoalSummary(round);
+        _compactSummary.Text = summary.Length == 0 ? "" : "·  " + summary;
+        _compactSummary.ToolTip = summary;
+        var selectedPending = pending.GetValueOrDefault(round.CollectionId);
+        UpdateSpinButton(_selectedSpin, round, selectedPending, canUse);
+        if (_playerCollectionId == round.CollectionId || selectedPending is null && round.Phase != VotingPhase.Ready)
+            _selectedSpin.Visibility = Visibility.Collapsed;
+
+        var details = new List<string>();
+        if (round.Phase is (VotingPhase.Ready or VotingPhase.Failed or VotingPhase.Drawn) && round.Notice.Length > 0) details.Add(round.Notice);
+        if (round.Winner is { } winner) details.Add("Победитель: " + winner.Command + " → " + winner.Preset?.DisplayName);
+        if (round.DeliveryNote.Length > 0) details.Add(round.DeliveryNote);
+        if (selectedPending is not null && selectedPending.Id != round.Id)
+            details.Add("Ожидает активации: " + selectedPending.Winner?.Command + " → " + selectedPending.Winner?.Preset?.DisplayName);
+        _status.Text = string.Join("\n", details);
+        _add.IsEnabled = canEdit && _rows.Count < 200;
+        _test.IsEnabled = canUse && round.Phase == VotingPhase.Collecting;
     }
 
     private async Task RunAsync(Func<Task> operation)
@@ -910,7 +999,26 @@ public sealed class VotingWindow : Window
         if (decimal.TryParse(value.Replace(',', '.'), NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var result)) return result;
         throw new InvalidOperationException(label + ": введите число.");
     }
-    public static string FormatMoney(decimal amount, string currency) => amount.ToString("N2", CultureInfo.GetCultureInfo("ru-RU")).TrimEnd('0').TrimEnd(',') + " " + (currency == "RUB" ? "руб." : currency);
+    private static string CurrencySuffix(string currency) => currency switch { "RUB" => "₽", "USD" => "$", "EUR" => "€", _ => currency };
+    internal static string FormatMoney(decimal amount, string currency, decimal? target = null)
+    {
+        var culture = CultureInfo.GetCultureInfo("ru-RU");
+        var text = amount.ToString("#,0.##", culture);
+        if (target is { } goal) text += " / " + goal.ToString("#,0.##", culture);
+        return text + " " + CurrencySuffix(currency);
+    }
+    private static string GoalSummary(VotingRound round)
+    {
+        var goals = new List<string>(2);
+        if (round.MoneyGoal) goals.Add(FormatMoney(round.Target, round.Currency));
+        if (round.TimeGoal)
+        {
+            var minutes = round.DurationSeconds / 60;
+            var seconds = round.DurationSeconds % 60;
+            goals.Add(seconds == 0 ? $"{minutes} мин" : $"{minutes}:{seconds:00}");
+        }
+        return string.Join(round.Condition == VotingCondition.All ? " и " : " или ", goals);
+    }
     internal static string CompactConditions(VotingRound round, DateTimeOffset now)
     {
         var conditions = new List<string>(2);
@@ -929,14 +1037,5 @@ public sealed class VotingWindow : Window
         }
         return string.Join(round.Condition == VotingCondition.All ? " И " : " ИЛИ ", conditions);
     }
-    public static string RemainingText(VotingRound round)
-    {
-        if (!round.TimeGoal || round.Phase is VotingPhase.Ready or VotingPhase.Failed or VotingPhase.Drawn) return string.Empty;
-        var at = round.ClosedAt ?? (round.Phase == VotingPhase.Paused ? round.PausedAt ?? DateTimeOffset.UtcNow : DateTimeOffset.UtcNow);
-        var seconds = round.Deadline is { } deadline ? Math.Max(0, (int)Math.Ceiling((deadline - at).TotalSeconds)) : round.DurationSeconds;
-        return "Осталось " + (seconds / 60).ToString("00") + ":" + (seconds % 60).ToString("00");
-    }
-    public static double Progress(VotingRound round) => round.Phase is VotingPhase.Ready or VotingPhase.Drawn ? 100
-        : round.MoneyGoal ? Math.Clamp((double)(round.Total / Math.Max(1, round.Target) * 100), 0, 100)
-        : round.Deadline is { } deadline ? Math.Clamp(100 - (deadline - (round.PausedAt ?? DateTimeOffset.UtcNow)).TotalSeconds / Math.Max(1, round.DurationSeconds) * 100, 0, 100) : 0;
+    public static string RemainingText(VotingRound round) => VotingProgressDisplay.Remaining(round, DateTimeOffset.UtcNow);
 }

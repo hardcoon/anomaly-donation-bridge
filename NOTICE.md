@@ -2,6 +2,10 @@
 
 Copyright (c) 2026 Hardcoon. All rights reserved.
 
+The YouTube chat reader includes an adapted Google protocol definition and
+the gRPC/Protocol Buffers client libraries. Their separate license terms and
+attributions are included in `_internal/licenses/youtube/`.
+
 Anomaly Donation Bridge is distributed only under the terms in `LICENSE`.
 Resale and paid distribution are prohibited without prior written permission
 from Hardcoon.

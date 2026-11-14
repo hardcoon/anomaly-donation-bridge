@@ -82,7 +82,7 @@ internal static class VotingUiChecks
         var empty = await runtime.CreateProfileAsync("Без голосований", copyVotings: false);
         await Wait(() => Field<string>(window, "_profileId") == empty.Id);
         Check(Find<Button>(Field<StackPanel>(window, "_sidebar")).All(button => button.Tag is null), "Empty profile still shows old votes");
-        Invoke(Find<Button>(root).First(button => Equals(button.Content, "+ Добавить")));
+        Invoke(Find<Button>(root).First(button => Equals(button.Content, "Добавить голосование")));
         await Wait(() => runtime.Voting.CollectionsFor(empty.Id).Count == 1 && !Field<bool>(window, "_busy"));
         Check(runtime.Voting.CollectionsFor(empty.Id).Single().ProfileId == empty.Id, "Add vote from empty profile wrote into an old profile");
         await runtime.SwitchProfileAsync(source);
@@ -123,13 +123,30 @@ internal static class VotingUiChecks
         draft.Options = [new VotingOption { Command = "!помощь", Preset = new ActionDefinition { HandlerId = "add_radiation", DisplayName = "Помощь игроку" } },
             new VotingOption { Command = "!мимо", Preset = new ActionDefinition { HandlerId = "add_radiation", DisplayName = "Ничего страшного, повезёт в следующий раз" } }];
         await runtime.Voting.SaveSettingsAsync(draft);
-        await runtime.Voting.AddCollectionAsync(sourceCollectionId: draft.CollectionId, profileId: runtime.Settings.ActiveProfileId);
+        var otherId = await runtime.Voting.AddCollectionAsync(sourceCollectionId: draft.CollectionId, profileId: runtime.Settings.ActiveProfileId);
+        var other = runtime.Voting.SnapshotFor(otherId);
+        other.Title = "Дать аптечку или нет?";
+        other.DurationSeconds = 180;
+        var aid = new ActionDefinition { HandlerId = "add_radiation", DisplayName = "Выдать аптечку" };
+        var message = new ActionDefinition { HandlerId = "add_radiation", DisplayName = "Отправить сообщение в КПК" };
+        other.Options = [new VotingOption { Command = "да", Preset = aid }, new VotingOption { Command = "нет", Preset = message }];
+        await runtime.Voting.SaveSettingsAsync(other);
+        await runtime.Voting.SetCollectionActiveAsync(otherId, true, runtime.Settings.ActiveProfileId);
+        await runtime.Voting.RecordAsync(new DonationEvent { Id = "preview-aid", Amount = 42, Message = "да",
+            Currency = "RUB", CreatedAt = DateTimeOffset.UtcNow }, runtime.Settings.ActiveProfileId);
+        await runtime.Voting.RecordAsync(new DonationEvent { Id = "preview-message", Amount = 18, Message = "нет",
+            Currency = "RUB", CreatedAt = DateTimeOffset.UtcNow }, runtime.Settings.ActiveProfileId);
         await runtime.Voting.SetCollectionActiveAsync(draft.CollectionId, true, runtime.Settings.ActiveProfileId);
         using var controller = new VotingObsController(runtime);
         var window = new VotingWindow(runtime, controller); var root = (FrameworkElement)window.Content;
         try
         {
             ThemeManager.Apply(false); Layout(root, 1310, 860);
+            Check(Field<TextBlock>(window, "_title").Text == draft.Title, "Editor does not open on the selected vote");
+            Invoke(Field<Button>(window, "_generalButton"));
+            await Wait(() => Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
+            Check(Field<TextBlock>(window, "_playerName").Text == draft.Title, "Live vote disappeared in general settings");
+            Layout(root, 1310, 860);
             Check(Find<Button>(Field<FrameworkElement>(window, "_generalPanel")).Contains(Field<Button>(window, "_obs")), "OBS is not in general settings");
             Save(root, Path.Combine(output, "voting-panel-general.png"));
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
@@ -137,12 +154,25 @@ internal static class VotingUiChecks
             var dots = Find<TextBlock>(Field<StackPanel>(window, "_sidebar")).Where(label => label.Text == "●").ToList();
             Check(dots.Count == 1 && ((SolidColorBrush)dots[0].Foreground).Color == ((SolidColorBrush)window.FindResource("GoodBrush")).Color,
                 "Inactive sidebar dots must be absent and only the active green one must remain");
-            var add = Find<Button>(root).Single(button => Equals(button.Content, "+ Добавить"));
-            Check(Equals(add.ToolTip, "Добавить голосование"), "Short add label lost its purpose tooltip");
+            Check(Find<TextBlock>(Field<StackPanel>(window, "_sidebar")).Count(label => label.Text == "В эфире") == 1,
+                "The live vote needs a labeled sidebar mark");
+            var add = Find<Button>(root).Single(button => Equals(button.Content, "Добавить голосование"));
+            Check(Equals(add.ToolTip, "Добавить голосование") && !ButtonVisual.GetShowLabel(add), "Plus button lost its purpose tooltip");
+            var reset = Field<Button>(window, "_reset");
+            Check(Equals(reset.Content, "Сбросить") && ButtonVisual.GetGlyph(reset).Length > 0, "Reset must use a short caption and an icon");
             var delete = Field<Button>(window, "_delete");
             Check(Equals(delete.Content, "\uE74D") && delete.FontFamily.Source == "Segoe MDL2 Assets" &&
                 ((SolidColorBrush)delete.Foreground).Color == ((SolidColorBrush)window.FindResource("BadBrush")).Color &&
                 System.Windows.Automation.AutomationProperties.GetName(delete) == "Удалить это голосование", "Delete must be an accessible red trash icon");
+            Invoke(Find<Button>(root).First(button => Equals(button.Tag, otherId)));
+            await Wait(() => Field<string>(window, "_selectedId") == otherId && !Field<bool>(window, "_busy"));
+            Layout(root, 1114, 706);
+            CheckLayout(window, root);
+            CheckDockLaunch(window, root, "Продолжить");
+            Check(window.Rows.Select(row => row.Percentage).SequenceEqual([70d, 30d]), "Compact command shares do not reflect this vote's amounts");
+            Save(root, Path.Combine(output, "voting-live-and-selected.png"));
+            Invoke(Field<Button>(window, "_playerTitle"));
+            await Wait(() => Field<string>(window, "_selectedId") == draft.CollectionId && !Field<bool>(window, "_busy"));
             var beforeToggle = await File.ReadAllTextAsync(Path.Combine(paths.RootDirectory, "voting.json"));
             Invoke(Field<Button>(window, "_panelToggle"));
             await Wait(() => runtime.UiPreferences.VotingSettingsPanelCollapsed);
@@ -152,29 +182,56 @@ internal static class VotingUiChecks
             var commands = Field<Grid>(window, "_commandsPanel"); var summary = Field<TextBlock>(window, "_compactSummary");
             var commandsAt = commands.TranslatePoint(new Point(), root); var summaryAt = summary.TranslatePoint(new Point(), root);
             Check(Field<FrameworkElement>(window, "_settingsCard").Visibility == Visibility.Collapsed &&
-                Field<ColumnDefinition>(window, "_settingsColumn").ActualWidth == 0 && Field<ColumnDefinition>(window, "_settingsGap").ActualWidth == 0 &&
-                commandsAt.X + commands.ActualWidth <= root.ActualWidth + 1 && Math.Abs(commands.ActualWidth - (root.ActualWidth - commandsAt.X)) < 1,
+                Field<ColumnDefinition>(window, "_settingsColumn").ActualWidth == 0 &&
+                Math.Abs(commandsAt.X + commands.ActualWidth + commands.Margin.Right - root.ActualWidth) < 1,
                 "Collapsed settings reserve space or clip commands");
             Check(summary.Visibility == Visibility.Visible && summaryAt.Y + summary.ActualHeight <= commandsAt.Y && summary.Text.EndsWith(" (таймер)") &&
                 !summary.Text.Contains("рублей"), "Compact conditions must appear above commands without disabled amount");
             var spin = Field<Button>(window, "_spin");
-            Check(ReferenceEquals(spin.Parent, Field<StackPanel>(window, "_compactActions")) && spin.Visibility == Visibility.Visible &&
+            Check(ReferenceEquals(spin.Parent, Field<StackPanel>(window, "_playerActions")) && spin.Visibility == Visibility.Visible &&
                 spin.TranslatePoint(new Point(spin.ActualWidth, spin.ActualHeight), root).X <= root.ActualWidth + 1 &&
                 spin.TranslatePoint(new Point(spin.ActualWidth, spin.ActualHeight), root).Y <= root.ActualHeight + 1, "Compact mode hides/clips the spin control");
+            Check(Field<TextBlock>(window, "_total").Text.Length == 0 && Field<TextBlock>(window, "_remaining").Text.StartsWith("Осталось "),
+                "A timer-only round must show its timer without a money goal in the player");
             Save(root, Path.Combine(output, "voting-panel-compact-minimum.png"));
-            Invoke(Field<Button>(window, "_collectionToggle"));
+            Invoke(Find<Button>(root).First(button => Equals(button.Tag, otherId)));
+            await Wait(() => Field<string>(window, "_selectedId") == otherId && !Field<bool>(window, "_busy"));
+            Check(Field<TextBlock>(window, "_playerName").Text == draft.Title && runtime.Voting.SnapshotFor(draft.CollectionId).IsActive,
+                "Browsing a different vote switched the broadcast");
+            var playerToggle = Field<Button>(window, "_playerToggle");
+            Invoke(playerToggle);
             await Wait(() => !runtime.Voting.SnapshotFor(draft.CollectionId).IsActive && !Field<bool>(window, "_busy"));
-            Check(Field<TextBlock>(window, "_statusDot").Visibility == Visibility.Collapsed, "Paused heading keeps an inactive dot");
+            var paused = runtime.Voting.SnapshotFor(draft.CollectionId);
+            Check(paused.Phase == VotingPhase.Paused && Field<string>(window, "_selectedId") == otherId &&
+                Field<TextBlock>(window, "_playerState").Text == "На паузе", "Player pause changed the editor or dropped its resume state");
+            var remaining = Field<TextBlock>(window, "_remaining").Text;
+            await Task.Delay(1100);
+            Check(Field<TextBlock>(window, "_remaining").Text == remaining, "Paused player countdown keeps running");
+            Invoke(playerToggle);
+            await Wait(() => runtime.Voting.SnapshotFor(draft.CollectionId).Phase == VotingPhase.Collecting && !Field<bool>(window, "_busy"));
+            Check(runtime.Voting.SnapshotFor(draft.CollectionId).Id == paused.Id && Field<string>(window, "_selectedId") == otherId,
+                "Resume restarted the round or moved the editor");
+            Invoke(Field<Button>(window, "_playerTitle"));
+            await Wait(() => Field<string>(window, "_selectedId") == draft.CollectionId && !Field<bool>(window, "_busy"));
             Invoke(Field<Button>(window, "_panelToggle"));
             await Wait(() => !runtime.UiPreferences.VotingSettingsPanelCollapsed);
             Layout(root, 1310, 860); CheckLayout(window, root);
-            Check(ReferenceEquals(spin.Parent, Field<StackPanel>(window, "_settingsActions")) && summary.Visibility == Visibility.Collapsed, "Expanded panel did not restore its controls");
+            Check(ReferenceEquals(spin.Parent, Field<StackPanel>(window, "_playerActions")) && summary.Visibility == Visibility.Visible,
+                "Opening settings displaced the broadcast controls or removed the selected vote summary");
             Save(root, Path.Combine(output, "voting-panel-expanded.png"));
+            Invoke(playerToggle);
+            await Wait(() => !runtime.Voting.SnapshotFor(draft.CollectionId).IsActive && !Field<bool>(window, "_busy"));
+            Check(Field<TextBlock>(window, "_statusDot").Visibility == Visibility.Collapsed, "Paused heading keeps an inactive dot");
             Field<CheckBox>(window, "_money").IsChecked = true;
             Field<TextBox>(window, "_target").Text = "2500";
+            Layout(root, 1073, 832);
+            CheckLayout(window, root);
+            CheckDockLaunch(window, root, "Продолжить");
+            Check(playerToggle.Visibility == Visibility.Collapsed, "The paused vote has two resume buttons");
+            Save(root, Path.Combine(output, "voting-dock-resume-and-conditions.png"));
             Invoke(Field<Button>(window, "_panelToggle"));
             await Wait(() => runtime.UiPreferences.VotingSettingsPanelCollapsed && !Field<bool>(window, "_dirty"));
-            Check(runtime.Voting.SnapshotFor(draft.CollectionId).Target == 2500 && summary.Text.StartsWith("0/2500 рублей ИЛИ "), "Collapsing panel lost the pending settings edit");
+            Check(runtime.Voting.SnapshotFor(draft.CollectionId).Target == 2500 && summary.Text.Contains("0/2500 рублей ИЛИ "), "Collapsing panel lost the pending settings edit");
             ThemeManager.Apply(true); Layout(root, 1000, 700); Save(root, Path.Combine(output, "voting-panel-compact-light.png"));
             window.Close(); await Wait(() => Field<bool>(window, "_closed"));
             window = new VotingWindow(runtime, controller); root = (FrameworkElement)window.Content;
@@ -187,6 +244,40 @@ internal static class VotingUiChecks
             await Wait(() => Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
             Check(Field<Grid>(window, "_headerActions").Visibility == Visibility.Collapsed && Field<TextBlock>(window, "_compactSummary").Visibility == Visibility.Collapsed &&
                 Field<FrameworkElement>(window, "_generalPanel").Visibility == Visibility.Visible, "General settings show per-vote compact controls");
+
+            Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
+            await Wait(() => !Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
+            var menu = OpenCollectionMenu(root, otherId);
+            var menuItems = menu.Items.Cast<MenuItem>().ToArray();
+            Check(menuItems.Select(item => item.Header).SequenceEqual(new[] { "Продолжить", "Переименовать", "Сбросить", "Удалить" }) &&
+                menuItems[3].Style == window.FindResource("DangerMenuItemStyle") &&
+                ((SolidColorBrush)menuItems[3].Foreground).Color == ((SolidColorBrush)window.FindResource("BadBrush")).Color,
+                "Right-click commands or destructive menu styling are wrong");
+            Check(Field<string>(window, "_selectedId") == draft.CollectionId, "Opening another vote's context menu switched the editor");
+            var otherRoundId = runtime.Voting.SnapshotFor(otherId).Id;
+            menuItems[0].RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Wait(() => runtime.Voting.SnapshotFor(otherId).IsActive && !Field<bool>(window, "_busy"));
+            Check(Field<string>(window, "_selectedId") == draft.CollectionId &&
+                Field<TextBlock>(window, "_playerName").Text == other.Title &&
+                runtime.Voting.SnapshotFor(otherId).Id == otherRoundId, "Context-menu resume misrouted or reset the round");
+            menu = OpenCollectionMenu(root, otherId);
+            var pause = (MenuItem)menu.Items[0];
+            Check(Equals(pause.Header, "Пауза"), "Collecting vote does not offer pause in its context menu");
+            pause.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            await Wait(() => !runtime.Voting.SnapshotFor(otherId).IsActive && !Field<bool>(window, "_busy"));
+            Check(runtime.Voting.SnapshotFor(otherId) is { Phase: VotingPhase.Paused, Total: 60 } &&
+                Field<string>(window, "_selectedId") == draft.CollectionId, "Context-menu pause changed selection or vote totals");
+
+            // The ID-scoped operations behind the confirmations must also handle non-selected rows.
+            Field<TextBox>(window, "_minutes").Text = "2";
+            await window.ResetCollectionAsync(otherId);
+            Check(runtime.Voting.SnapshotFor(otherId).Total == 0 && runtime.Voting.SnapshotFor(draft.CollectionId).Target == 2500 &&
+                Field<bool>(window, "_dirty") && Field<string>(window, "_selectedId") == draft.CollectionId, "Reset touched the wrong vote or reloaded its draft");
+            await window.DeleteCollectionAsync(otherId);
+            Check(runtime.Voting.Collections.Single().CollectionId == draft.CollectionId &&
+                Field<bool>(window, "_dirty") && Field<string>(window, "_selectedId") == draft.CollectionId, "Delete changed the selected vote or discarded its edits");
+            await window.FlushPendingChangesAsync();
+            Check(runtime.Voting.SnapshotFor(draft.CollectionId).DurationSeconds == 120, "Open editor lost unsaved inputs during operations on a different row");
         }
         finally { window.Close(); ThemeManager.Apply(false); }
     }
@@ -232,6 +323,8 @@ internal static class VotingUiChecks
         {
             Check(capture.Wheel.Round is null && ((FrameworkElement)capture.Content).Visibility == Visibility.Hidden,
                 "OBS shows a selected draft when no vote is active");
+            Invoke(Field<Button>(window, "_generalButton"));
+            await Wait(() => Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
             foreach (var light in new[] { false, true })
             {
                 ThemeManager.Apply(light); Layout(root, 1300, 690); Save(root, Path.Combine(output, light ? "voting-general-light.png" : "voting-general-dark.png"));
@@ -305,7 +398,12 @@ internal static class VotingUiChecks
             Check(!runtime.Voting.Automation.Enabled && (await new JsonVotingStore(paths).LoadAsync()).Automation.GameHudFormat == VotingHudFormat.Amount,
                 "Global game-HUD controls must autosave without enabling a vote or starting effects");
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
-            await Wait(() => Field<FrameworkElement>(window, "_collectionPanel").Visibility == Visibility.Visible);
+            await Wait(() => Field<FrameworkElement>(window, "_collectionPanel").Visibility == Visibility.Visible && !Field<bool>(window, "_busy"));
+            Layout(root, 1073, 832);
+            CheckDockLaunch(window, root, "Запустить");
+            Check(Equals(((MenuItem)OpenCollectionMenu(root, draft.CollectionId).Items[0]).Header, "Запустить"),
+                "Inactive draft does not offer start in its context menu");
+            Save(root, Path.Combine(output, "voting-dock-start.png"));
             Invoke(Field<Button>(window, "_collectionToggle"));
             await Wait(() => runtime.Voting.Snapshot.Phase == VotingPhase.Collecting && !Field<bool>(window, "_busy"));
             await Wait(() => capture.Wheel.Round?.Id == runtime.Voting.Snapshot.Id);
@@ -314,10 +412,13 @@ internal static class VotingUiChecks
             CheckLayout(window, root);
             Check(Find<TextBox>(root).Count() >= 6, "Editable command/settings inputs missing");
             Check(window.Rows.All(row => row.CanEdit), "Live collection editing is disabled");
+            Invoke(Field<Button>(window, "_testPanelToggle"));
             Field<TextBox>(window, "_testAmount").Text = "200"; Field<TextBox>(window, "_testMessage").Text = "!долг";
             Invoke(Field<Button>(window, "_test")); await Wait(() => runtime.Voting.Snapshot.Total == 200);
             Check(!File.Exists(paths.PendingQueueFile), "Test contribution unexpectedly enqueued a normal price effect");
-            await Wait(() => !Field<bool>(window, "_busy")); Invoke(Field<Button>(window, "_collectionToggle"));
+            await Wait(() => !Field<bool>(window, "_busy"));
+            Invoke(Field<Button>(window, "_testPanelToggle"));
+            Invoke(Field<Button>(window, "_playerToggle"));
             await Wait(() => !runtime.Voting.Snapshot.IsActive && !Field<bool>(window, "_busy"));
             await Wait(() => capture.Wheel.Round is null);
             CheckCaptureIdentity();
@@ -334,25 +435,40 @@ internal static class VotingUiChecks
             Check(runtime.Voting.Snapshot.Total == 200 && runtime.Voting.Snapshot.Options[0].Preset!.DisplayName == "Изменённый шаблон", "Live UI save lost balance or binding change");
             Invoke(Field<Button>(window, "_add")); await Wait(() => window.Rows.Count == 4); Layout(root, 1300, 690);
             var picker = Find<Button>(root).Single(button => button.Content is TextBlock block && block.Text == "Выбрать из активных");
-            Check(((SolidColorBrush)picker.Foreground).Color == ((SolidColorBrush)window.FindResource("AccentBrush")).Color && picker.MinHeight == 20,
-                "Unbound preset picker lacks accent or consistent compact spacing");
-            Check(picker.BorderThickness.Left==1 && ((SolidColorBrush)picker.Background).Color.A>0 && picker.Padding.Left==7 && picker.ActualHeight<=22,
-                "Choose-from-active must look like a compact bordered button, not bare text or an oversized control");
-            var optionCards = Find<Border>(root).Where(border=>border.DataContext is VotingOptionRow && border.MinHeight==78).ToList();
-            Check(optionCards.Count==4 && optionCards.All(card=>Math.Abs(card.ActualHeight-78)<1),
-                "Showing the unbound picker button must not change command-card heights");
+            Check(((SolidColorBrush)picker.Foreground).Color == ((SolidColorBrush)window.FindResource("AccentForegroundBrush")).Color &&
+                picker.BorderThickness.Left == 1 && Math.Abs(picker.ActualHeight - 31) < 1,
+                "Choose-from-active should be a compact, accented drop-down control");
             Save(root, Path.Combine(output, "voting-unbound-picker.png"));
-            window.Rows.Last().Bind(first); Layout(root,1300,690);
-            Check(picker.BorderThickness.Left==0 && window.Rows.Last().Model.Amount==0 && optionCards.All(card=>Math.Abs(card.ActualHeight-78)<1),
-                "Selecting a preset must update picker appearance without changing the row layout or funds");
+            picker.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var pickerMenu = picker.ContextMenu ?? throw new InvalidOperationException("Template picker did not create a menu");
+            var replacementPreset = (MenuItem)pickerMenu.Items[0];
+            Check(Equals(replacementPreset.Header, first.DisplayName), "The drop-down did not list the active template");
+            replacementPreset.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            pickerMenu.IsOpen = false;
+            Check(window.Rows.Last().Model.Preset?.DisplayName == first.DisplayName, "Choosing a template did not bind the command");
+            var optionCards = Find<Border>(root).Where(border => Equals(border.Tag, "VotingCommandRow")).ToList();
+            Check(optionCards.Count == 4 && optionCards.All(card => Math.Abs(card.ActualHeight - 54) < 1 &&
+                Find<ProgressBar>(card).Single().Height == 2), "Commands must stay in compact rows with a thin share indicator");
             window.Rows.Remove(window.Rows.Last());
             Layout(root, 1300, 690); Save(root, Path.Combine(output, "voting-collection-live.png"));
+            Invoke(Field<Button>(window, "_testPanelToggle"));
             Field<TextBox>(window, "_testAmount").Text = "800"; Field<TextBox>(window, "_testMessage").Text = "!свобода";
             Invoke(Field<Button>(window, "_test")); await Wait(() => runtime.Voting.Snapshot.Phase == VotingPhase.Ready);
             Check(Field<Button>(window, "_spin").IsEnabled, "Ready round does not enable manual spin");
             var manualEffect = runtime.Voting.Automation; manualEffect.AutomaticWinnerEffect = false;
             await runtime.Voting.SaveAutomationAsync(manualEffect);
-            var selected = await runtime.BeginVotingDrawAsync();
+            var otherPage = await runtime.Voting.AddCollectionAsync(sourceCollectionId: draft.CollectionId, profileId: "test-profile");
+            await Wait(() => Find<Button>(Field<StackPanel>(window, "_sidebar")).Any(button => Equals(button.Tag, otherPage)));
+            Invoke(Find<Button>(root).First(button => Equals(button.Tag, otherPage)));
+            await Wait(() => Field<string>(window, "_selectedId") == otherPage && !Field<bool>(window, "_busy"));
+            Invoke(Field<Button>(window, "_spin"));
+            await Wait(() => runtime.Voting.SnapshotFor(draft.CollectionId).Phase == VotingPhase.Drawn && !Field<bool>(window, "_busy"));
+            Check(runtime.Voting.SnapshotFor(otherPage).Phase == VotingPhase.Draft &&
+                Field<string>(window, "_selectedId") == otherPage, "Player spin must apply to the broadcast and keep the page being edited");
+            var selected = runtime.Voting.SnapshotFor(draft.CollectionId);
+            Invoke(Field<Button>(window, "_playerTitle"));
+            await Wait(() => Field<string>(window, "_selectedId") == draft.CollectionId && !Field<bool>(window, "_busy"));
+            await runtime.DeleteVotingAsync(otherPage);
             obs.Update(selected, false); var obsRoot = (FrameworkElement)obs.Content; Layout(obsRoot, 784, 460);
             Save(obsRoot, Path.Combine(output, "voting-obs-alpha.png"));
             Check(obs.AllowsTransparency && obs.WindowStyle == WindowStyle.None && ((SolidColorBrush)obs.Background).Color.A == 1,
@@ -506,7 +622,7 @@ internal static class VotingUiChecks
             await runtime.Voting.RecordAsync(new DonationEvent { Id = "reset-winner", Amount = 667, Message = "!третье", CreatedAt = DateTimeOffset.UtcNow }, "test-profile");
             var resetWinner = await runtime.BeginVotingDrawAsync(collectionId: thirdCollection);
             var queuedBeforeReset = (await new JsonPendingDispatchStore(paths).LoadAsync()).Count;
-            await window.ResetSelectedAsync(); await runtime.FinishVotingDrawAsync();
+            await window.ResetCollectionAsync(thirdCollection); await runtime.FinishVotingDrawAsync();
             await Wait(() => capture.Wheel.Round is { Total: 0, Winner: null } current && current.Id != resetWinner.Id);
             Check(!capture.Wheel.HasAnimatedProperties, "Previous round animation survived a progress reset");
             CheckCaptureIdentity();
@@ -518,15 +634,15 @@ internal static class VotingUiChecks
             Layout(root, 1300, 690); CheckLayout(window, root); Save(root, Path.Combine(output, "voting-after-reset.png"));
             Check(Field<Button>(window, "_delete").Visibility == Visibility.Visible && VotingWindow.DeleteConfirmation(runtime.Voting.SnapshotFor(thirdCollection)).Contains("Другие голосования"),
                 "Delete vote control or scoped confirmation missing");
-            await window.DeleteSelectedAsync();
+            await window.DeleteCollectionAsync(thirdCollection);
             await Wait(() => capture.Wheel.Round is null);
             CheckCaptureIdentity();
             Check(runtime.Voting.Collections.Count == 2 && !runtime.Voting.Automation.Enabled, "Deleting the active vote did not stop collection");
-            while (runtime.Voting.Collections.Count > 0) await window.DeleteSelectedAsync();
+            foreach (var remaining in runtime.Voting.Collections) await window.DeleteCollectionAsync(remaining.CollectionId);
             Check(Field<FrameworkElement>(window, "_generalPanel").Visibility == Visibility.Visible && Field<Button>(window, "_obs").IsEnabled,
                 "The universal OBS window must remain available even without configured votes");
             Layout(root, 1300, 690); Save(root, Path.Combine(output, "voting-empty.png"));
-            Invoke(Find<Button>(root).First(button => Equals(button.Content, "+ Добавить")));
+            Invoke(Find<Button>(root).First(button => Equals(button.Content, "Добавить голосование")));
             await Wait(() => runtime.Voting.Collections.Count == 1 && !Field<bool>(window, "_busy"));
             Check(!runtime.Voting.Collections[0].IsActive && runtime.Voting.Collections[0].Target == 1000 &&
                 runtime.Voting.Collections[0].MoneyGoal && !runtime.Voting.Collections[0].TimeGoal, "New default must be 1000 RUB with money ON and time OFF");
@@ -656,7 +772,7 @@ internal static class VotingUiChecks
         target.Text = "3600";
         Field<CheckBox>(window, "_time").IsChecked = true;
         Field<TextBox>(window, "_minutes").Text = "10";
-        Invoke(Find<Button>(root).First(button => Equals(button.Content, "+ Добавить")));
+        Invoke(Find<Button>(root).First(button => Equals(button.Content, "Добавить голосование")));
         await Wait(() => runtime.Voting.Collections.Count == 2 && !Field<bool>(window, "_busy"));
         var created = runtime.Voting.Collections.Single(round => round.CollectionId != id);
         Check(created.Target == 3600 && created.MoneyGoal && created.TimeGoal && created.DurationSeconds == 600 && !created.IsActive && created.Options.Count == 0,
@@ -680,7 +796,7 @@ internal static class VotingUiChecks
             "Existing votes must keep donation-only defaults");
         chat.IsChecked = true; donation.IsChecked = false; weight.Text = "2,5"; change.IsChecked = true;
         await Wait(() => runtime.Voting.SnapshotFor(id) is { AcceptDonationVotes: false, AcceptYouTubeVotes: true, YouTubeVoteWeight: 2.5m, AllowYouTubeVoteChange: true } && !Field<bool>(window, "_dirty"));
-        Check(weight.IsEnabled && change.IsEnabled && Field<TextBlock>(window, "_youTubeChangeLabel").Text == "Да", "Chat controls or yes/no label failed");
+        Check(weight.IsEnabled && change.IsEnabled && change.IsChecked == true, "Chat controls or vote-change preference failed");
         weight.Text = "0";
         await Wait(() => Field<TextBlock>(window, "_autosaveStatus").Text.Contains("Пока не сохранено"));
         Check(runtime.Voting.SnapshotFor(id).YouTubeVoteWeight == 2.5m, "Invalid weight overwrote valid state");
@@ -735,35 +851,70 @@ internal static class VotingUiChecks
         var commandsAt = commands.TranslatePoint(new Point(), root); var settingsAt = settings.TranslatePoint(new Point(), root);
         Check(commandsAt.X + commands.ActualWidth < settingsAt.X && settingsAt.X + settings.ActualWidth <= root.ActualWidth,
             "Commands must be in center, settings on right, without overlap/clipping");
-        var target = Field<TextBox>(window, "_target"); var minutes = Field<TextBox>(window, "_minutes"); var condition = Field<Button>(window, "_condition");
-        Check(Math.Abs(target.TranslatePoint(new Point(), root).Y - minutes.TranslatePoint(new Point(), root).Y) < 1 &&
-            target.ActualHeight == 36 && minutes.ActualHeight == 36 && condition.ActualHeight == 36, "Goal fields and condition button are misaligned");
-        var spin = Field<Button>(window, "_spin");
-        Check(spin.TranslatePoint(new Point(), root).X >= settingsAt.X, "Winner/spin button is outside the right settings column");
+        var target = Field<TextBox>(window, "_target");
+        var minutes = Field<TextBox>(window, "_minutes");
+        var targetAt = target.TranslatePoint(new Point(), root);
+        var minutesAt = minutes.TranslatePoint(new Point(), root);
+        Check(Math.Abs(targetAt.X - minutesAt.X) < 1 && targetAt.Y + target.ActualHeight < minutesAt.Y &&
+            target.ActualHeight == 31 && minutes.ActualHeight == 31, "Goal inputs must align to the right of their separate controls");
+        var condition = Field<StackPanel>(window, "_conditionRow");
+        var hasBothGoals = Field<CheckBox>(window, "_money").IsChecked == true && Field<CheckBox>(window, "_time").IsChecked == true;
+        Check(condition.Visibility == (hasBothGoals ? Visibility.Visible : Visibility.Collapsed), "Condition picker must require both goals");
+        if (hasBothGoals)
+        {
+            var conditionAt = condition.TranslatePoint(new Point(), root);
+            Check(targetAt.Y + target.ActualHeight <= conditionAt.Y && conditionAt.Y + condition.ActualHeight <= minutesAt.Y,
+                "AND/OR condition belongs between the amount and time inputs");
+        }
+        var player = Field<Border>(window, "_player");
+        var playerAt = player.TranslatePoint(new Point(), root);
+        Check(playerAt.Y >= commandsAt.Y + commands.ActualHeight && Math.Abs(player.ActualWidth - root.ActualWidth) < 1 &&
+            ReferenceEquals(Field<Button>(window, "_spin").Parent, Field<StackPanel>(window, "_playerActions")),
+            "The broadcast player must be below both panes");
         var previousRight = -1d;
-        foreach (var name in new[] { "_reset", "_delete", "_panelToggle" })
+        foreach (var name in new[] { "_panelToggle", "_reset", "_delete" })
         {
             var button = Field<Button>(window, name); var at = button.TranslatePoint(new Point(), root);
             Check(at.X >= previousRight && at.Y < settingsAt.Y && at.X + button.ActualWidth <= root.ActualWidth + 1,
-                "Header order must be reset, delete, panel toggle without overlap or clipping");
+                "Settings, reset and delete must be permanently accessible in the header");
             previousRight = at.X + button.ActualWidth;
         }
         var title = Field<TextBlock>(window, "_title");
-        Check(title.TranslatePoint(new Point(title.ActualWidth, 0), root).X <= Field<Button>(window, "_reset").TranslatePoint(new Point(), root).X,
+        Check(title.TranslatePoint(new Point(title.ActualWidth, 0), root).X <= Field<Button>(window, "_panelToggle").TranslatePoint(new Point(), root).X,
             "Title overlaps the header actions");
         var card = Field<FrameworkElement>(window, "_settingsCard"); var cardAt = card.TranslatePoint(new Point(), root);
-        Check(Math.Abs(previousRight - cardAt.X - card.ActualWidth) < 1, "Header actions are not aligned to the right edge of the settings card");
+        Check(Math.Abs(cardAt.X + card.ActualWidth - previousRight - 16) < 1, "Header actions are not aligned inside the right window edge");
         Check(Find<Button>(Field<FrameworkElement>(window, "_generalPanel")).Contains(Field<Button>(window, "_obs")) &&
             !Find<Button>(Field<Grid>(window, "_headerActions")).Contains(Field<Button>(window, "_obs")), "OBS must appear only in general settings");
-        Check(Field<Button>(window, "_collectionToggle").TranslatePoint(new Point(), root).X < Field<Button>(window, "_rename").TranslatePoint(new Point(), root).X &&
-            Field<Button>(window, "_rename").TranslatePoint(new Point(), root).X < Field<TextBlock>(window, "_title").TranslatePoint(new Point(), root).X,
-            "Heading order must be status, edit, title");
-        foreach (var input in Find<TextBox>(root).Where(input => input.ActualHeight == 36 && input.Text.Length > 0))
+        Check(title.TranslatePoint(new Point(), root).X < Field<Button>(window, "_rename").TranslatePoint(new Point(), root).X &&
+            Field<TextBlock>(window, "_collectionToggleLabel").TranslatePoint(new Point(), root).Y > title.TranslatePoint(new Point(), root).Y,
+            "Heading must keep rename next to its title and status underneath");
+        foreach (var input in Find<TextBox>(root).Where(input => input.ActualHeight == 31 && input.Text.Length > 0))
         {
             var textRect = input.GetRectFromCharacterIndex(0);
             Check(textRect.IsEmpty || textRect.Top >= 0 && textRect.Bottom <= input.ActualHeight - 1, "Text is clipped vertically inside a voting field");
         }
     }
+    private static void CheckDockLaunch(VotingWindow window, FrameworkElement root, string label)
+    {
+        var start = Field<Button>(window, "_collectionToggle");
+        var dock = Field<Border>(window, "_player");
+        var at = start.TranslatePoint(new Point(), root);
+        Check(Equals(start.Content, label) && start.Visibility == Visibility.Visible && start.IsEnabled &&
+            ReferenceEquals(start.Parent, Field<StackPanel>(window, "_playerActions")) &&
+            at.Y >= dock.TranslatePoint(new Point(), root).Y &&
+            at.X + start.ActualWidth <= root.ActualWidth && at.Y + start.ActualHeight <= root.ActualHeight,
+            "The selected vote's run/resume button must be visible in the lower dock");
+    }
+
+    private static ContextMenu OpenCollectionMenu(FrameworkElement root, string collectionId)
+    {
+        var row = Find<Button>(root).Single(button => Equals(button.Tag, collectionId));
+        var menu = row.ContextMenu ?? throw new InvalidOperationException("Voting list row lacks a context menu");
+        menu.RaiseEvent(new RoutedEventArgs(ContextMenu.OpenedEvent));
+        return menu;
+    }
+
     private static void CheckObsPresentation(string output)
     {
         var now = DateTimeOffset.UtcNow;
