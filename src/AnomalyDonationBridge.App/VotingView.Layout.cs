@@ -120,19 +120,16 @@ public sealed partial class VotingView
 
     private FrameworkElement BuildHeader()
     {
+        ButtonVisual.SetGlyph(_collectionToggle, "\uE768");
+        _collectionToggle.SetResourceReference(StyleProperty, "PrimaryButtonStyle");
         SetDisclosureIcon(_panelToggle, "\uE9E9");
         ButtonVisual.SetGlyph(_reset, "\uE7A7");
         _reset.ToolTip = "Сбросить прогресс этого голосования";
         _delete.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
         _delete.SetResourceReference(StyleProperty, "DangerButtonStyle");
         _delete.SetResourceReference(ForegroundProperty, "BadBrush");
-        foreach (var button in new[] { _panelToggle, _reset, _delete })
-        {
-            var column = _headerActions.ColumnDefinitions.Count;
-            _headerActions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            Grid.SetColumn(button, column);
+        foreach (var button in new[] { _collectionToggle, _panelToggle, _reset, _delete })
             _headerActions.Children.Add(button);
-        }
 
         _rename.Content = "\uE70F";
         _rename.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
@@ -390,8 +387,6 @@ public sealed partial class VotingView
         ButtonVisual.SetGlyph(_spin, "\uE768");
         _playerToggle.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
         _playerToggle.SetResourceReference(StyleProperty, "AccentOutlineButtonStyle");
-        ButtonVisual.SetGlyph(_collectionToggle, "\uE768");
-        _collectionToggle.SetResourceReference(StyleProperty, "PrimaryButtonStyle");
         var nextIcon = new System.Windows.Shapes.Path
         {
             Data = Geometry.Parse("M 1,1 L 10,7 L 1,13 Z M 11,1 H 13 V 13 H 11 Z"),
@@ -404,7 +399,7 @@ public sealed partial class VotingView
         ToolTipService.SetShowOnDisabled(_playerNext, true);
 
         _playerActions.VerticalAlignment = VerticalAlignment.Center;
-        foreach (var action in new[] { _spin, _playerToggle, _collectionToggle, _playerNext })
+        foreach (var action in new[] { _spin, _playerToggle, _playerNext })
         {
             action.Margin = new Thickness(6, 0, 0, 0);
             _playerActions.Children.Add(action);
@@ -428,9 +423,7 @@ public sealed partial class VotingView
         Grid.SetColumnSpan(_playerProgress, narrow ? 3 : 1);
         _playerProgress.Margin = narrow ? new Thickness(0, 4, 0, 0) : new Thickness(15, 0, 15, 0);
         _spin.MinWidth = iconOnly ? 36 : 90;
-        _collectionToggle.MinWidth = iconOnly ? 36 : 0;
         ButtonVisual.SetShowLabel(_spin, !iconOnly);
-        ButtonVisual.SetShowLabel(_collectionToggle, !iconOnly);
     }
 
     private static FrameworkElement PlayerMetric(TextBlock text, string iconData)

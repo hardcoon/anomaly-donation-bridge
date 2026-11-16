@@ -700,41 +700,84 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         { round.DeliveryCancelled = true; round.DeliveryNote = note; }
     }
 
+    public (bool HasNext, string? Title) PreviewNextSequenceCollection(string profileId, string? currentCollectionId)
+    {
+        var document = Volatile.Read(ref _document);
+        var next = SequenceCandidates(document, profileId, currentCollectionId, skipCurrent: true).FirstOrDefault();
+        return (next is not null, document.Automation.Order == VotingSequenceOrder.InOrder ? next?.Title : null);
+    }
+
+    public Task AdvanceSequenceAsync(string profileId, string? currentCollectionId, CancellationToken token = default) =>
+        MutateAsync(document =>
+        {
+            // An automatic transition may have already advanced the round visible when Next was pressed.
+            var active = AllCollections(document).FirstOrDefault(round => round.IsActive);
+            if (active is not null && active.CollectionId != currentCollectionId) return false;
+            var target = PickSequenceCollection(document, profileId, currentCollectionId, skipCurrent: true);
+            if (target is null) return false;
+            ActivateSequenceCollection(document, target, profileId, _now(), "Следующее голосование начато из очереди.");
+            return true;
+        }, token);
+
     public Task StartNextCollectionAsync(string profileId, CancellationToken token = default)
     {
         var snapshot = Volatile.Read(ref _document);
-        // Most timer ticks cannot advance anything. Do not clone the entire
-        // saved history merely to discover that a live round is still running.
-        if (!snapshot.Automation.Enabled || !snapshot.Automation.AutoNextCollection ||
-            !AllCollections(snapshot).Any(round => round.IsActive && !round.SuccessorStarted && round.ProfileId == profileId &&
-                (round.Phase == VotingPhase.Failed || round.Phase == VotingPhase.Drawn &&
-                    (!round.GamePresentationRequired || round.GamePresentationCompleted) &&
-                    (round.DrawnAt is null || _now() >= round.DrawnAt.Value.AddSeconds(7)))))
-            return Task.CompletedTask;
+        // Most timer ticks cannot advance a round. Avoid cloning its entire history in that case.
+        if (AutomaticPredecessor(snapshot, profileId, _now()) is null) return Task.CompletedTask;
         return MutateAsync(document =>
         {
-        var now = _now();
-        if (!document.Automation.Enabled || !document.Automation.AutoNextCollection) return false;
-        var previous = AllCollections(document).FirstOrDefault(round => round.IsActive && !round.SuccessorStarted && round.ProfileId == profileId &&
-            (round.Phase == VotingPhase.Failed || round.Phase == VotingPhase.Drawn &&
+            var now = _now();
+            var previous = AutomaticPredecessor(document, profileId, now);
+            if (previous is null) return false;
+            var target = PickSequenceCollection(document, profileId, previous.CollectionId, skipCurrent: false);
+            if (target is null) return false;
+            previous.SuccessorStarted = true;
+            ActivateSequenceCollection(document, target, profileId, now, "Следующее голосование начато автоматически.");
+            return true;
+        }, token);
+    }
+
+    private static VotingRound? AutomaticPredecessor(VotingDocument document, string profileId, DateTimeOffset now)
+    {
+        if (!document.Automation.Enabled || !document.Automation.AutoNextCollection) return null;
+        return AllCollections(document).FirstOrDefault(round => round.IsActive && !round.SuccessorStarted &&
+            round.ProfileId == profileId && (round.Phase == VotingPhase.Failed || round.Phase == VotingPhase.Drawn &&
                 (!round.GamePresentationRequired || round.GamePresentationCompleted) &&
                 (round.DrawnAt is null || now >= round.DrawnAt.Value.AddSeconds(7))));
-        if (previous is null) return false;
-        // Leave the winner on screen briefly; the deadline survives a restart.
-        if (previous.Phase == VotingPhase.Drawn && previous.DrawnAt is { } drawnAt && now < drawnAt.AddSeconds(7)) return false;
-        var candidates = AllCollections(document).Where(round => round.UseInSequence && (round.ProfileId.Length == 0 || round.ProfileId == profileId) && VotingRules.CanStart(round))
-            .OrderBy(round => document.CollectionOrder.IndexOf(round.CollectionId)).ToList();
-        if (candidates.Count == 0) return false;
-        var currentIndex = document.CollectionOrder.IndexOf(previous.CollectionId);
-        var available = candidates.Where(round => document.CollectionOrder.IndexOf(round.CollectionId) > currentIndex)
-            .Concat(candidates.Where(round => document.CollectionOrder.IndexOf(round.CollectionId) <= currentIndex)).ToList();
-        if (available.Count == 0) return false;
-        var target = document.Automation.Order == VotingSequenceOrder.Random ? available[(int)_random(available.Count)] : available[0];
-        VotingRules.Validate(target);
-        previous.SuccessorStarted = true;
-        if (target.Phase is VotingPhase.Draft or VotingPhase.Paused)
-        { ActivateOnly(document, target, profileId, now); target.Notice = "Следующее голосование начато автоматически."; return true; }
-        if (target.Phase == VotingPhase.Ready) { ActivateOnly(document, target, profileId, now); return true; }
+    }
+
+    private static IEnumerable<VotingRound> SequenceCandidates(VotingDocument document, string profileId,
+        string? currentCollectionId, bool skipCurrent)
+    {
+        if (document.ActiveProfileId.Length > 0 && document.ActiveProfileId != profileId) return [];
+        var currentIndex = document.CollectionOrder.IndexOf(currentCollectionId ?? string.Empty);
+        return AllCollections(document)
+            .Where(round => round.UseInSequence && (!skipCurrent || round.CollectionId != currentCollectionId) &&
+                (round.ProfileId.Length == 0 || round.ProfileId == profileId))
+            .OrderBy(round =>
+            {
+                var index = document.CollectionOrder.IndexOf(round.CollectionId);
+                return index > currentIndex ? index : index + document.CollectionOrder.Count;
+            })
+            .Where(VotingRules.CanStart);
+    }
+
+    private VotingRound? PickSequenceCollection(VotingDocument document, string profileId, string? currentCollectionId, bool skipCurrent)
+    {
+        var candidates = SequenceCandidates(document, profileId, currentCollectionId, skipCurrent);
+        if (document.Automation.Order == VotingSequenceOrder.InOrder) return candidates.FirstOrDefault();
+        var available = candidates.ToList();
+        return available.Count == 0 ? null : available[(int)_random(available.Count)];
+    }
+
+    private static void ActivateSequenceCollection(VotingDocument document, VotingRound target, string profileId, DateTimeOffset now, string notice)
+    {
+        if (target.Phase is VotingPhase.Draft or VotingPhase.Paused or VotingPhase.Ready)
+        {
+            ActivateOnly(document, target, profileId, now);
+            if (target.Phase == VotingPhase.Collecting) target.Notice = notice;
+            return;
+        }
         document.PreviousRounds.Add(target.Clone());
         var next = target.Clone(); next.Id = Guid.NewGuid().ToString("N");
         next.YouTubeParticipants.Clear(); next.SeenYouTubeMessageIds.Clear();
@@ -744,12 +787,10 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         next.DrawnAt = next.ClosedAt = next.PausedAt = null;
         next.Deadline = next.TimeGoal ? now.AddSeconds(next.DurationSeconds) : null;
         next.Intervals = [new VotingInterval { Start = now }]; next.Phase = VotingPhase.Collecting;
-        next.Notice = "Следующее голосование начато автоматически.";
+        next.Notice = notice;
         if (target == document.Current) document.Current = next;
         else document.OtherCollections[document.OtherCollections.IndexOf(target)] = next;
         ActivateOnly(document, next, profileId, now);
-        return true;
-        }, token);
     }
 
     private static void Resume(VotingRound round, string profileId, DateTimeOffset now)

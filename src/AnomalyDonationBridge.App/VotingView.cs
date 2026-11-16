@@ -88,9 +88,9 @@ public sealed partial class VotingView : UserControl, IDisposable
     private FrameworkElement _testFields = null!;
     private ColumnDefinition _settingsColumn = null!;
     private bool _settingsCollapsed;
-    private readonly Grid _headerActions = new() { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly WrapPanel _headerActions = new() { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
     private Border _settingsCard = null!;
-    private readonly Button _collectionToggle = new() { Height = 36, Margin = new Thickness(7, 0, 0, 0) };
+    private readonly Button _collectionToggle = new() { Height = 34 };
     private readonly TextBlock _collectionToggleLabel = new() { VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
     private readonly TextBlock _statusDot = new() { Text = "●", FontSize = 12, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _generalButton = new() { Content = "Общие настройки" };
@@ -205,8 +205,14 @@ public sealed partial class VotingView : UserControl, IDisposable
         };
         _playerNext.Click += async (_, _) =>
         {
-            if (_playerNext.CommandParameter is string id)
-                await RunAsync(() => ChangeCollectionActivityAsync(id, activate: true, confirmSwitch: false));
+            var profileId = _profileId;
+            var currentId = _playerCollectionId;
+            await RunAsync(async () =>
+            {
+                await FlushPendingChangesAsync();
+                if (profileId == _runtime.Settings.ActiveProfileId && !_runtime.VotingIsSpinning)
+                    await _runtime.Voting.AdvanceSequenceAsync(profileId, currentId);
+            });
         };
         _playerTitle.Click += async (_, _) =>
         {
@@ -301,7 +307,7 @@ public sealed partial class VotingView : UserControl, IDisposable
         };
         panel.Children.Add(Heading("Порядок запуска голосований")); _order.Margin = new Thickness(0, 10, 0, 16); panel.Children.Add(_order);
         panel.Children.Add(Heading("Голосования в автоматической очереди"));
-        panel.Children.Add(new TextBlock { Text = "Галочки выбирают участников очереди, но не включают их. Одновременно работает только одно голосование. Для изменения порядка потяните за значок ⠿ или название строки.",
+        panel.Children.Add(new TextBlock { Text = "Отметьте голосования для автозапуска и кнопки «Следующее» в плеере. Чтобы изменить порядок, перетащите строку за значок ⠿ или название.",
             TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 8, 0, 12) });
         panel.Children.Add(_sequence);
         var saving = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, Margin = new Thickness(0, 14, 0, 0) };
@@ -812,7 +818,7 @@ public sealed partial class VotingView : UserControl, IDisposable
     private bool CanChangeActivity(VotingRound round) => !_runtime.VotingIsSpinning ||
         round is { IsActive: true, Phase: VotingPhase.Collecting };
 
-    private async Task ChangeCollectionActivityAsync(string collectionId, bool activate, bool confirmSwitch = true)
+    private async Task ChangeCollectionActivityAsync(string collectionId, bool activate)
     {
         if (activate && IsEditingCollection(collectionId)) await SaveSettingsAsync();
         if (FindCollection(collectionId) is not { } target || target.ProfileId != _runtime.Settings.ActiveProfileId ||
@@ -821,7 +827,7 @@ public sealed partial class VotingView : UserControl, IDisposable
         if (activate)
         {
             if (target.Phase is VotingPhase.Draft or VotingPhase.Paused) VotingRules.Validate(target);
-            if (confirmSwitch && ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
+            if (ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
                     round is { IsActive: true, Phase: VotingPhase.Collecting }) is { } active &&
                 !VotingConfirmationWindow.Confirm(HostWindow, "Переключить голосование?",
                     $"«{active.Title}» встанет на паузу. Прогресс и оставшееся время сохранятся.", ActivityCaption(target)))
@@ -872,10 +878,14 @@ public sealed partial class VotingView : UserControl, IDisposable
             _pausedPlayerId = null;
         var round = active ?? rounds.FirstOrDefault(item => item.CollectionId == _pausedPlayerId);
         _playerCollectionId = round?.CollectionId;
-        var next = FindNextCollection(rounds, _playerCollectionId ?? _selectedId);
-        _playerNext.CommandParameter = next?.CollectionId;
-        _playerNext.IsEnabled = canUse && !_runtime.VotingIsSpinning && next is not null;
-        _playerNext.ToolTip = next is null ? "Нет другого готового голосования" : $"Следующее голосование · {next.Title}";
+        var next = _runtime.Voting.PreviewNextSequenceCollection(_profileId, _playerCollectionId);
+        _playerNext.IsEnabled = canUse && !_runtime.VotingIsSpinning && next.HasNext;
+        _playerNext.ToolTip = next switch
+        {
+            (true, { } title) => $"Следующее голосование · {title}",
+            (true, null) => "Случайное голосование из автоматической очереди",
+            _ => "Нет следующего настроенного голосования в автоматической очереди"
+        };
 
         var hasRound = round is not null ? Visibility.Visible : Visibility.Collapsed;
         _playerTitle.Visibility = _playerProgress.Visibility = hasRound;
@@ -916,15 +926,6 @@ public sealed partial class VotingView : UserControl, IDisposable
         System.Windows.Automation.AutomationProperties.SetName(_playerToggle, (string)_playerToggle.ToolTip);
         _playerToggle.IsEnabled = canUse && CanChangeActivity(round);
         UpdateSpinButton(_spin, round, pending.GetValueOrDefault(round.CollectionId), canUse && round.IsActive);
-    }
-
-    private static VotingRound? FindNextCollection(IReadOnlyList<VotingRound> rounds, string currentId)
-    {
-        var afterCurrent = rounds.SkipWhile(round => round.CollectionId != currentId).Skip(1);
-        var beforeCurrent = rounds.TakeWhile(round => round.CollectionId != currentId);
-        return afterCurrent.Concat(beforeCurrent).FirstOrDefault(round =>
-            !round.IsActive && round.Phase is (VotingPhase.Draft or VotingPhase.Paused or VotingPhase.Ready) &&
-            VotingRules.CanStart(round));
     }
 
     private void UpdateSpinButton(Button button, VotingRound round, VotingRound? pending, bool canUse)
@@ -969,7 +970,7 @@ public sealed partial class VotingView : UserControl, IDisposable
 
         var canEdit = canUse && round.CanEdit;
         _reset.IsEnabled = _delete.IsEnabled = _rename.IsEnabled = canUse;
-        var activityCaption = ActivityCaption(round);
+        var activityCaption = round.Phase == VotingPhase.Paused ? "Продолжить" : "Старт";
         _collectionToggle.Content = activityCaption;
         _collectionToggle.ToolTip = $"{activityCaption} «{round.Title}»";
         System.Windows.Automation.AutomationProperties.SetName(_collectionToggle, (string)_collectionToggle.ToolTip);

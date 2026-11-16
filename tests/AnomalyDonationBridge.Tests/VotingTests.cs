@@ -27,6 +27,7 @@ internal static class VotingTests
         await LiveEditingAsync();
         await TimerEditingAsync();
         await MultipleCollectionsAsync();
+        await ManualSequenceAsync();
         await LegacyVotingMigrationAsync();
         await GamePresentationAsync();
     }
@@ -352,6 +353,69 @@ internal static class VotingTests
             "Inheritance must copy every side setting from the selected page, without commands or activation");
     }
 
+    private static async Task ManualSequenceAsync()
+    {
+        const string profile = "profile";
+        var f = await Fixture.CreateAsync(VotingCondition.Any, maximum => maximum - 1);
+        await f.Engine.EnterProfileAsync(profile);
+        var firstId = f.Engine.Snapshot.CollectionId;
+        var completedId = await f.Engine.AddCollectionAsync();
+        var freshId = await f.Engine.AddCollectionAsync();
+        var excludedId = await f.Engine.AddCollectionAsync();
+        var incompleteId = await f.Engine.AddCollectionAsync();
+        var foreignId = await f.Engine.AddCollectionAsync(profileId: "other");
+        var draft = Draft(VotingCondition.Any);
+        foreach (var (id, title) in new[] { (freshId, "Новый раунд"), (completedId, "Завершённое"), (excludedId, "Вне очереди"), (foreignId, "Другой профиль") })
+        {
+            draft.Title = title;
+            await ConfigureAsync(f.Engine, draft, id);
+        }
+
+        await f.Engine.SetCollectionActiveAsync(completedId, true, profile);
+        await f.Add("completed-winner", 1000, "!a");
+        var winner = await f.Engine.ChooseWinnerAsync(collectionId: completedId);
+        await f.Engine.SetCollectionActiveAsync(firstId, true, profile);
+        await f.Add("first-progress", 170, "!a");
+        var first = f.Engine.SnapshotFor(firstId);
+        var order = new[] { firstId, excludedId, incompleteId, freshId, completedId };
+        await f.Engine.SetSequenceAsync(order, new HashSet<string> { firstId, incompleteId, freshId, completedId }, profileId: profile);
+        var automation = f.Engine.Automation;
+        automation.AutoNextCollection = false;
+        await f.Engine.SaveAutomationAsync(automation);
+
+        Check(f.Engine.PreviewNextSequenceCollection(profile, firstId) == (true, "Новый раунд") &&
+            !f.Engine.PreviewNextSequenceCollection("other", null).HasNext, "Next uses the configured queue of the current profile");
+        f.Now = f.Now.AddSeconds(3);
+        await f.Engine.AdvanceSequenceAsync(profile, firstId);
+        var paused = f.Engine.SnapshotFor(firstId);
+        Check(f.Engine.SnapshotFor(freshId) is { IsActive: true, Phase: VotingPhase.Collecting } &&
+            paused is { IsActive: false, Phase: VotingPhase.Paused, Total: 170 } && paused.Id == first.Id &&
+            paused.Deadline == first.Deadline && paused.PausedAt == f.Now,
+            "Manual Next skips unchecked and incomplete votes, starts a never-run round, and preserves the previous collection");
+        await f.Engine.AdvanceSequenceAsync(profile, firstId);
+        Check(f.Engine.SnapshotFor(freshId).IsActive, "A stale Next click must not skip another vote after a concurrent transition");
+
+        await f.Engine.AdvanceSequenceAsync(profile, freshId);
+        var restarted = f.Engine.SnapshotFor(completedId);
+        Check(restarted is { IsActive: true, Phase: VotingPhase.Collecting, Total: 0 } && restarted.Id != winner.Id &&
+            f.Engine.PendingWinners.Any(round => round.Id == winner.Id),
+            "Next starts a new round for completed votes and preserves the result awaiting delivery");
+        await f.Engine.AdvanceSequenceAsync(profile, completedId);
+        Check(f.Engine.SnapshotFor(firstId) is { IsActive: true, Phase: VotingPhase.Collecting, Total: 170 },
+            "Manual order wraps to the beginning and resumes a paused vote");
+
+        automation.Order = VotingSequenceOrder.Random;
+        await f.Engine.SaveAutomationAsync(automation);
+        Check(f.Engine.PreviewNextSequenceCollection(profile, firstId) == (true, null), "Random Next cannot promise a particular vote");
+        await f.Engine.AdvanceSequenceAsync(profile, firstId);
+        Check(f.Engine.SnapshotFor(completedId).IsActive, "Manual Next honors random queue order");
+        await f.Engine.SetSequenceAsync(order, new HashSet<string> { completedId }, profileId: profile);
+        Check(!f.Engine.PreviewNextSequenceCollection(profile, completedId).HasNext, "An active poll alone does not offer Next");
+        await f.Engine.SetCollectionActiveAsync(completedId, false, profile);
+        await f.Engine.AdvanceSequenceAsync(profile, null);
+        Check(f.Engine.SnapshotFor(completedId).IsActive, "Next can start the queue when nothing is in the player");
+    }
+
     private static async Task LegacyVotingMigrationAsync()
     {
         var store = new MemoryStore { Data = new VotingDocument { SchemaVersion = 1 } };
@@ -421,9 +485,9 @@ internal static class VotingTests
     {
         public DateTimeOffset Now = DateTimeOffset.Parse("2026-10-22T10:00:00Z");
         public MemoryStore Store = new(); public VotingCoordinator Engine = null!;
-        public static async Task<Fixture> CreateAsync(VotingCondition condition)
+        public static async Task<Fixture> CreateAsync(VotingCondition condition, Func<long, long>? randomBelow = null)
         {
-            var result = new Fixture(); result.Engine = new VotingCoordinator(result.Store, () => result.Now, _ => 0);
+            var result = new Fixture(); result.Engine = new VotingCoordinator(result.Store, () => result.Now, randomBelow ?? (_ => 0));
             await result.Engine.InitializeAsync(); await ConfigureAsync(result.Engine, Draft(condition)); await result.Engine.SetEnabledAsync(true, "profile"); return result;
         }
         public Task<string> Add(string id, decimal amount, string message, DateTimeOffset? at = null) => Engine.RecordAsync(new DonationEvent { Id = id, Amount = amount, Message = message, CreatedAt = at ?? Now }, "profile");

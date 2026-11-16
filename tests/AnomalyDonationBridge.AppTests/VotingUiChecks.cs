@@ -168,7 +168,7 @@ internal static class VotingUiChecks
             await Wait(() => Field<string>(window, "_selectedId") == otherId && !Field<bool>(window, "_busy"));
             Layout(root, 1114, 706);
             CheckLayout(window, root);
-            CheckDockLaunch(window, root, "Продолжить");
+            CheckHeaderLaunch(window, root, "Продолжить");
             Check(window.Rows.Select(row => row.Percentage).SequenceEqual([70d, 30d]), "Compact command shares do not reflect this vote's amounts");
             Save(root, Path.Combine(output, "voting-live-and-selected.png"));
             Invoke(Field<Button>(window, "_playerTitle"));
@@ -242,9 +242,11 @@ internal static class VotingUiChecks
             Field<TextBox>(window, "_target").Text = "2500";
             Layout(root, 1073, 832);
             CheckLayout(window, root);
-            CheckDockLaunch(window, root, "Продолжить");
+            CheckHeaderLaunch(window, root, "Продолжить");
             Check(playerToggle.Visibility == Visibility.Collapsed, "The paused vote has two resume buttons");
             Save(root, Path.Combine(output, "voting-dock-resume-and-conditions.png"));
+            Layout(root, 428, 740);
+            CheckHeaderLaunch(window, root, "Продолжить");
             Invoke(Field<Button>(window, "_panelToggle"));
             await Wait(() => runtime.UiPreferences.VotingSettingsPanelCollapsed && !Field<bool>(window, "_dirty"));
             Check(runtime.Voting.SnapshotFor(draft.CollectionId).Target == 2500 && summary.Text.Contains("0/2500 рублей ИЛИ "), "Collapsing panel lost the pending settings edit");
@@ -258,7 +260,7 @@ internal static class VotingUiChecks
                 runtime.Voting.SnapshotFor(draft.CollectionId).Phase == VotingPhase.Paused, "Reopening the window lost the compact preference or resumed voting");
             Invoke(Find<Button>(root).First(button => Equals(button.Content, "Общие настройки")));
             await Wait(() => Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
-            Check(Field<Grid>(window, "_headerActions").Visibility == Visibility.Collapsed && Field<TextBlock>(window, "_compactSummary").Visibility == Visibility.Collapsed &&
+            Check(Field<Panel>(window, "_headerActions").Visibility == Visibility.Collapsed && Field<TextBlock>(window, "_compactSummary").Visibility == Visibility.Collapsed &&
                 Field<FrameworkElement>(window, "_generalPanel").Visibility == Visibility.Visible, "General settings show per-vote compact controls");
 
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
@@ -418,10 +420,12 @@ internal static class VotingUiChecks
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
             await Wait(() => Field<FrameworkElement>(window, "_collectionPanel").Visibility == Visibility.Visible && !Field<bool>(window, "_busy"));
             Layout(root, 1073, 832);
-            CheckDockLaunch(window, root, "Запустить");
+            CheckHeaderLaunch(window, root, "Старт");
             Check(Equals(((MenuItem)OpenCollectionMenu(root, draft.CollectionId).Items[0]).Header, "Запустить"),
                 "Inactive draft does not offer start in its context menu");
-            Save(root, Path.Combine(output, "voting-dock-start.png"));
+            Save(root, Path.Combine(output, "voting-header-start.png"));
+            Layout(root, 428, 740);
+            CheckHeaderLaunch(window, root, "Старт");
             Invoke(Field<Button>(window, "_collectionToggle"));
             await Wait(() => runtime.Voting.Snapshot.Phase == VotingPhase.Collecting && !Field<bool>(window, "_busy"));
             await Wait(() => capture.Wheel.Round?.Id == runtime.Voting.Snapshot.Id);
@@ -906,7 +910,7 @@ internal static class VotingUiChecks
         var card = Field<FrameworkElement>(window, "_settingsCard"); var cardAt = card.TranslatePoint(new Point(), root);
         Check(Math.Abs(cardAt.X + card.ActualWidth - previousRight - 16) < 1, "Header actions are not aligned inside the right window edge");
         Check(Find<Button>(Field<FrameworkElement>(window, "_generalPanel")).Contains(Field<Button>(window, "_obs")) &&
-            !Find<Button>(Field<Grid>(window, "_headerActions")).Contains(Field<Button>(window, "_obs")), "OBS must appear only in general settings");
+            !Find<Button>(Field<Panel>(window, "_headerActions")).Contains(Field<Button>(window, "_obs")), "OBS must appear only in general settings");
         Check(title.TranslatePoint(new Point(), root).X < Field<Button>(window, "_rename").TranslatePoint(new Point(), root).X &&
             Field<TextBlock>(window, "_collectionToggleLabel").TranslatePoint(new Point(), root).Y > title.TranslatePoint(new Point(), root).Y,
             "Heading must keep rename next to its title and status underneath");
@@ -916,17 +920,25 @@ internal static class VotingUiChecks
             Check(textRect.IsEmpty || textRect.Top >= 0 && textRect.Bottom <= input.ActualHeight - 1, "Text is clipped vertically inside a voting field");
         }
     }
-    private static void CheckDockLaunch(VotingView window, FrameworkElement root, string label)
+    private static void CheckHeaderLaunch(VotingView window, FrameworkElement root, string label)
     {
         var start = Field<Button>(window, "_collectionToggle");
-        var dock = Field<Border>(window, "_player");
+        var settings = Field<Button>(window, "_panelToggle");
         var at = start.TranslatePoint(new Point(), root);
+        var settingsAt = settings.TranslatePoint(new Point(), root);
         Check(Equals(start.Content, label) && start.Visibility == Visibility.Visible && start.IsEnabled &&
-            ReferenceEquals(start.Parent, Field<StackPanel>(window, "_playerActions")) &&
-            at.Y >= dock.TranslatePoint(new Point(), root).Y &&
-            at.X + start.ActualWidth <= root.ActualWidth &&
-            at.Y + start.ActualHeight <= dock.TranslatePoint(new Point(0, dock.ActualHeight), root).Y,
-            "The selected vote's run/resume button must be visible in the top player.");
+            ReferenceEquals(start.Parent, Field<Panel>(window, "_headerActions")) &&
+            ButtonVisual.GetShowLabel(start) && start.ActualWidth > 0 && at.X >= 0 &&
+            at.X + start.ActualWidth <= settingsAt.X && Math.Abs(at.Y - settingsAt.Y) < 1 &&
+            settingsAt.X + settings.ActualWidth <= root.ActualWidth,
+            "The selected vote's start/resume button must fit directly to the left of Settings.");
+        foreach (var button in Field<Panel>(window, "_headerActions").Children.OfType<Button>())
+        {
+            var position = button.TranslatePoint(new Point(), root);
+            Check(position.X >= 0 && position.X + button.ActualWidth <= root.ActualWidth + 1 &&
+                button.ActualWidth + 1 >= button.DesiredSize.Width - button.Margin.Left - button.Margin.Right,
+                "The voting header clips a control when navigation narrows the editor.");
+        }
     }
 
     private static ContextMenu OpenCollectionMenu(FrameworkElement root, string collectionId)
