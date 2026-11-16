@@ -74,6 +74,10 @@ internal static class BrowserViewUiChecks
                         if (option.Columns == -1)
                         {
                             Check(cards.Length == 0, "Compact list still uses a grid.");
+                            Check(!Find<TemplateDescriptionTextBlock>(root).Any() &&
+                                Find<CheckBox>(root).All(box => !Equals(box.Content, "Описание") || box.Visibility == Visibility.Collapsed) &&
+                                model.ShowTemplateDescriptions,
+                                "The compact list must hide descriptions while preserving the grid preference.");
                             var list = (ItemsControl)window.FindName(section switch
                             { 0 => "ActiveActionsList", 1 => "UserPresetsList", _ => "PresetsList" });
                             Check(Find<Button>(list).Count(button => Equals(button.Content, "Настроить")) == presets.Length,
@@ -120,7 +124,28 @@ internal static class BrowserViewUiChecks
                     "Description toggle left selected settings visible on cards.");
                 Check(Find<ActionCardPanel>(root).Single().Children[0].DesiredSize.Height < initialHeight,
                     "Hiding descriptions left their empty space.");
-                if (section == 2) Save(root, Path.Combine(outputDirectory, "templates-no-description.png"));
+                if (section < 2)
+                {
+                    var card = (FrameworkElement)Find<ActionCardPanel>(root).Single().Children[0];
+                    var title = Find<TextBlock>(card).Single(text => text.FontSize == 16 &&
+                        text.DataContext is ActionViewModel action && text.Text == action.DisplayName);
+                    var price = Find<Button>(card).Single(button => Equals(button.Content, "+ Сумма"));
+                    var divider = (Border)VisualTreeHelper.GetParent(Find<CardToolbarPanel>(card).Single());
+                    var titleGap = price.TranslatePoint(new Point(), card).Y -
+                        title.TranslatePoint(new Point(0, title.ActualHeight), card).Y;
+                    var dividerGap = divider.TranslatePoint(new Point(), card).Y -
+                        price.TranslatePoint(new Point(0, price.ActualHeight), card).Y;
+                    Check(titleGap is >= 3 and <= 13 && dividerGap is >= 6 and <= 9,
+                        $"Price row gaps are too large or overlap: {titleGap}/{dividerGap} in section {section}.");
+                    Console.WriteLine($"PASS price-row spacing in section {section}: {titleGap:0.#} and {dividerGap:0.#} DIP, card {card.ActualHeight:0.#} DIP.");
+                }
+                var imageName = section switch
+                {
+                    0 => "active-no-description.png",
+                    1 => "user-templates-no-description.png",
+                    _ => "templates-no-description.png"
+                };
+                Save(root, Path.Combine(outputDirectory, imageName));
                 tabs.SelectedIndex = (section + 1) % browsers.Length;
                 Layout(root, 1388);
                 Check(Find<CheckBox>(root).Single(check => Equals(check.Content, "Описание")).IsChecked == false,
@@ -228,17 +253,18 @@ internal static class BrowserViewUiChecks
         var open = (Button)tabs.Template.FindName("TemplateSearchButton", tabs);
         var clear = (Button)tabs.Template.FindName("ClearTemplateSearchButton", tabs);
         var search = (Border)tabs.Template.FindName("TemplateSearchSurface", tabs);
-        var status = (Border)tabs.Template.FindName("QueueStatusSurface", tabs);
+        var status = (ContentPresenter)tabs.Template.FindName("QueueStatusSurface", tabs);
         var content = (ContentPresenter)tabs.Template.FindName("PART_SelectedContentHost", tabs);
         void Queue(string text) => typeof(MainViewModel).GetProperty(nameof(MainViewModel.QueueStatusText))!.SetValue(model, text);
         foreach (var width in new[] { 1000d, 1388d, 1868d })
         {
             tabs.SelectedIndex = 0; model.ClearTemplateSearch(); Queue(string.Empty); Layout(root, width);
             var initialTop = content.TranslatePoint(new Point(), root).Y;
-            Check(search.ActualWidth == 270 && input.ActualWidth > 150 && search.Visibility == Visibility.Visible,
+            var searchWidth = search.ActualWidth;
+            Check(searchWidth is >= 215 and <= 270 && input.ActualWidth > 150 && search.Visibility == Visibility.Visible,
                 "Search must initially be a visible text field, including with an empty query.");
             open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
-            Check(search.ActualWidth == 270, "Focusing search changed its width.");
+            Check(search.ActualWidth == searchWidth, "Focusing search changed its width.");
             var expandedX = search.TranslatePoint(new Point(), root).X;
             Check(content.TranslatePoint(new Point(), root).Y == initialTop, "Focusing search moved the lower toolbar.");
             var query = source[0].DisplayName.ToUpperInvariant();
@@ -250,22 +276,47 @@ internal static class BrowserViewUiChecks
                 Check(model.SelectedSectionIndex == section && browser.SearchText == query && model.TemplateSearchText == query &&
                     browser.VisibleActions.Cast<ActionViewModel>().All(action => action.DisplayName.Contains(query, StringComparison.CurrentCultureIgnoreCase)) &&
                     !browser.VisibleActions.IsEmpty, "Search query/filter lost when switching template sections.");
+                var categories = Find<ListBox>(root).Single(list => ReferenceEquals(list.ItemsSource, ActionBrowserViewModel.Categories));
+                Check(categories.Items.Count == 7 && search.TranslatePoint(new Point(0, search.ActualHeight), categories).Y <= 1,
+                    "The full category list must appear below search in every template section.");
+                var searchY = search.TranslatePoint(new Point(0, search.ActualHeight / 2), root).Y;
+                var view = Find<ComboBox>(root).Single(combo => AutomationProperties.GetName(combo) == "Вид шаблонов");
+                var description = Find<CheckBox>(root).Single(box => Equals(box.Content, "Описание"));
+                var toolbar = new List<FrameworkElement> { view, description };
+                if (section == 0)
+                    toolbar.AddRange(Find<Button>(root).Where(button => Equals(button.Content, "Экспорт для стрима…") || Equals(button.Content, "Сортировка ▾")));
+                Check(toolbar.Count == (section == 0 ? 4 : 2) && toolbar.All(control =>
+                    Math.Abs(control.TranslatePoint(new Point(0, control.ActualHeight / 2), root).Y - searchY) <= 2 &&
+                    control.TranslatePoint(new Point(), root).X >= search.TranslatePoint(new Point(search.ActualWidth, 0), root).X),
+                    $"Management controls and search must share one row above the categories, {width}/{section}, search {search.TranslatePoint(new Point(search.ActualWidth, search.ActualHeight / 2), root)}, " +
+                    string.Join(" / ", toolbar.Select(control => $"{control} at {control.TranslatePoint(new Point(0, control.ActualHeight / 2), root)}")));
             }
             tabs.SelectedIndex = 0; Layout(root, width);
             if (width == 1388) Save(root, Path.Combine(outputDirectory, "search-expanded.png"));
-            Queue("Следующий эффект через 00:12 · в очереди: 3"); Layout(root, width);
-            Check(search.Visibility == Visibility.Visible && search.ActualWidth == 270 && open.IsEnabled && model.TemplateSearchText == query,
+            const string nextEffect = "Следующий эффект через 00:12 «Добавить радиацию» · в очереди: 3";
+            Queue(nextEffect);
+            foreach (var section in new[] { 0, 1, 2, 3 })
+            {
+                tabs.SelectedIndex = section;
+                Layout(root, width);
+                Check(status.Visibility == Visibility.Visible && status.ActualWidth > 300 &&
+                    status.TranslatePoint(new Point(0, status.ActualHeight), root).Y <= content.TranslatePoint(new Point(), root).Y &&
+                    Find<TextBlock>(status).Any(text => text.Text == nextEffect),
+                    $"The queue strip is missing or overlaps content in section {section} at {width} DIP.");
+            }
+            tabs.SelectedIndex = 0; Layout(root, width);
+            Check(search.Visibility == Visibility.Visible && search.ActualWidth == searchWidth && open.IsEnabled && model.TemplateSearchText == query,
                 "Queue status closed or disabled the active search field.");
-            var searchRight = search.TranslatePoint(new Point(search.ActualWidth, 0), root).X;
-            var statusLeft = status.TranslatePoint(new Point(), root).X;
-            Check(searchRight < statusLeft && search.TranslatePoint(new Point(), root).X < expandedX - 100,
-                "Countdown overlapped the editable search field.");
+            Check(status.TranslatePoint(new Point(0, status.ActualHeight), root).Y <= search.TranslatePoint(new Point(), root).Y &&
+                Math.Abs(search.TranslatePoint(new Point(), root).X - expandedX) < 1,
+                "Queue strip must stay above the editable search without changing its width or alignment.");
             Check(content.TranslatePoint(new Point(), root).Y >= initialTop, "Countdown overlapped the lower toolbar.");
             CheckControlsInBounds(root);
             if (width == 1388) Save(root, Path.Combine(outputDirectory, "search-countdown.png"));
             Queue(string.Empty); Layout(root, width);
-            Check(search.Visibility == Visibility.Visible && open.IsEnabled && search.TranslatePoint(new Point(), root).X == expandedX,
-                "Countdown completion changed the active search state.");
+            Check(status.Visibility == Visibility.Collapsed &&
+                search.Visibility == Visibility.Visible && open.IsEnabled && search.TranslatePoint(new Point(), root).X == expandedX,
+                "Empty queue left a strip or changed the active search state.");
             open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
             Check(input.Text == query, "Search text disappeared after the countdown.");
             tabs.SelectedIndex = 3; Layout(root, width);
@@ -277,7 +328,7 @@ internal static class BrowserViewUiChecks
             Check(model.ActiveBrowser.VisibleActions.IsEmpty && Find<TextBlock>(root).Any(text => text.Visibility == Visibility.Visible && text.Text == "Ничего не найдено"),
                 "No-match search has no correct empty state.");
             clear.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
-            Check(model.TemplateSearchText.Length == 0 && search.Visibility == Visibility.Visible && search.ActualWidth == 270 && input.ActualWidth > 150 &&
+            Check(model.TemplateSearchText.Length == 0 && search.Visibility == Visibility.Visible && search.ActualWidth == searchWidth && input.ActualWidth > 150 &&
                 model.ActiveBrowser.VisibleActions.Cast<ActionViewModel>().SequenceEqual(source), "Clearing search hid the field or did not restore all original action instances.");
         }
         Console.WriteLine("PASS always-visible search in all three template sections, clear and queue countdown; no header/content overlap at minimum/wide sizes.");
@@ -378,16 +429,18 @@ internal static class BrowserViewUiChecks
                 if (ButtonVisual.GetGlyph(button).Length == 0) continue;
                 Check(!string.IsNullOrWhiteSpace(AutomationProperties.GetName(button)) && button.ToolTip is not null,
                     "Icon-only action lost its name/tooltip.");
-                var icon = Find<TextBlock>(button).Single(block => Equals(block.Tag, "ButtonIcon"));
+                var icon = Find<VectorIcon>(button).Single(element => Equals(element.Tag, "ButtonIcon"));
+                Check(VisualTreeHelper.GetDrawing(icon) is { Bounds.IsEmpty: false },
+                    $"The glyph for '{button.Content}' has no drawn vector outline.");
                 var label = Find<TextBlock>(button).Single(block => Equals(block.Tag, "ButtonLabel"));
                 if (Equals(button.Content, "+ Сумма")) Check(label.Text == "Сумма", "The amount action displays a duplicated plus sign.");
                 Check(icon.Foreground.ToString() == button.Foreground.ToString(), "Icon no longer follows the text/theme color.");
                 Check((label.Visibility == Visibility.Visible) == ButtonVisual.GetShowLabel(button), "Label state is stale after resizing.");
-                foreach (var text in new[] { icon, label }.Where(block => block.Visibility == Visibility.Visible))
+                foreach (var text in new FrameworkElement[] { icon, label }.Where(element => element.Visibility == Visibility.Visible))
                 {
                     var origin = text.TranslatePoint(new Point(), button);
                     Check(origin.X >= -1 && origin.X + text.ActualWidth <= button.ActualWidth + 1,
-                        $"Icon or label '{text.Text}' is clipped inside '{button.Content}': x={origin.X}, text width={text.ActualWidth}, button width={button.ActualWidth}, toolbar width={toolbar.ActualWidth}, labels={ButtonVisual.GetShowLabel(button)}, item={(button.DataContext as ActionViewModel)?.DisplayName}, rootY={toolbar.TranslatePoint(new Point(), root).Y}, label layout={text.IsMeasureValid}/{text.IsArrangeValid}, button layout={button.IsMeasureValid}/{button.IsArrangeValid}, toolbar layout={toolbar.IsMeasureValid}/{toolbar.IsArrangeValid}.");
+                        $"Element '{text.Tag}' is clipped inside '{button.Content}': x={origin.X}, text width={text.ActualWidth}, button width={button.ActualWidth}, toolbar width={toolbar.ActualWidth}, labels={ButtonVisual.GetShowLabel(button)}, item={(button.DataContext as ActionViewModel)?.DisplayName}, rootY={toolbar.TranslatePoint(new Point(), root).Y}, label layout={text.IsMeasureValid}/{text.IsArrangeValid}, button layout={button.IsMeasureValid}/{button.IsArrangeValid}, toolbar layout={toolbar.IsMeasureValid}/{toolbar.IsArrangeValid}.");
                 }
             }
         }

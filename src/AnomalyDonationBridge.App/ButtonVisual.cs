@@ -49,7 +49,8 @@ public static class ButtonVisual
     {
         var text = new FormattedText(GetLabel(button), CultureInfo.CurrentUICulture, button.FlowDirection,
             new Typeface(button.FontFamily, button.FontStyle, button.FontWeight, button.FontStretch),
-            button.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(button).PixelsPerDip)
+            button.FontSize, Brushes.Black, null, TextOptions.GetTextFormattingMode(button),
+            VisualTreeHelper.GetDpi(button).PixelsPerDip)
         { TextAlignment = TextAlignment.Left };
         // Measure independently of the currently hidden label, so growing the window restores it.
         return Math.Max(button.MinWidth, Math.Ceiling(text.WidthIncludingTrailingWhitespace) + 14 + 6 +

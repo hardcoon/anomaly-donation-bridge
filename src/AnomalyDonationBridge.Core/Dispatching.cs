@@ -179,7 +179,10 @@ public sealed record QueueTimingSnapshot(
     int WaitingCount,
     bool AwaitingResult,
     bool WaitingForGame,
-    int SecondsUntilNext);
+    int SecondsUntilNext)
+{
+    public string? NextActionName { get; init; }
+}
 
 public sealed record QueueCancellationSummary(
     IReadOnlyList<EventHistoryEntry> CancelledEntries,
@@ -323,27 +326,31 @@ public sealed class DonationDispatcher
         finally { _gate.Release(); }
     }
 
-    public async Task<QueueTimingSnapshot> GetTimingAsync(
-        bool gameConnected,
-        bool gameReady,
-        CancellationToken cancellationToken = default)
+    public Task<QueueTimingSnapshot> GetTimingAsync(
+        bool gameConnected, bool gameReady, CancellationToken cancellationToken = default) =>
+        GetTimingAsync(gameConnected && gameReady, null, cancellationToken);
+
+    public Task<QueueTimingSnapshot> GetTimingAsync(
+        IGameCommandTransport transport, CancellationToken cancellationToken = default) =>
+        GetTimingAsync(transport.IsConnected && transport.IsGameReady, transport.CanAttempt, cancellationToken);
+
+    private async Task<QueueTimingSnapshot> GetTimingAsync(
+        bool gameReady, Func<GameCommand, bool>? canAttempt, CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_sentCommands.Count > 0)
-                return new QueueTimingSnapshot(_queue.Count, true, false, 0);
-            if (!_queue.TryPeek(out var pending))
-                return new QueueTimingSnapshot(0, false, false, 0);
-            if (!gameConnected || !gameReady)
-                return new QueueTimingSnapshot(_queue.Count, false, true, 0);
+            var awaitingResult = _sentCommands.Count > 0;
+            if (!_queue.TryPeek(out var head))
+                return new QueueTimingSnapshot(0, awaitingResult, false, 0);
+
             var now = _utcNow();
-            // A cooling-down action no longer blocks unrelated actions behind
-            // it.  Show the earliest runnable queue item in the shared timer.
             var next = DateTimeOffset.MaxValue;
+            PendingDispatch? nextEffect = null;
             foreach (var candidate in _queue)
             {
                 if (!candidate.ImmediateRequested && HasEarlierSequenceStep(candidate)) continue;
+                if (gameReady && canAttempt?.Invoke(candidate.Command) == false) continue;
                 var candidateNext = Max(now, DispatchCooldownEnd(candidate));
                 if (!candidate.ImmediateRequested && _lastActionExecution.TryGetValue(candidate.Match.Action.Id, out var lastAction) &&
                     !IsOwnPreparationReservation(candidate, lastAction))
@@ -354,18 +361,26 @@ public sealed class DonationDispatcher
                     !IsOwnPreparationReservation(candidate, lastSource))
                     candidateNext = Max(candidateNext, lastSource + TimeSpan.FromSeconds(
                         Math.Clamp(source.CooldownSeconds, 0, 86_400)));
-                next = Min(next, candidateNext);
+                if (nextEffect is null || candidateNext < next ||
+                    (candidateNext == next && candidate.ImmediateRequested && !nextEffect.ImmediateRequested))
+                {
+                    next = candidateNext;
+                    nextEffect = candidate;
+                }
             }
-            var seconds = next == DateTimeOffset.MaxValue
-                ? 0
-                : Math.Max(0, (int)Math.Ceiling((next - now).TotalSeconds));
-            return new QueueTimingSnapshot(_queue.Count, false, false, seconds);
+
+            var waitingForGame = !awaitingResult && (!gameReady || nextEffect is null);
+            var seconds = awaitingResult || waitingForGame ? 0 : (int)Math.Ceiling((next - now).TotalSeconds);
+            var queued = nextEffect ?? head;
+            return new QueueTimingSnapshot(_queue.Count, awaitingResult, waitingForGame, seconds)
+            {
+                NextActionName = NormalizeDisplayText(queued.Command.ActionName, queued.Match.Action.DisplayName, 160)
+            };
         }
         finally { _gate.Release(); }
     }
 
     private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) => left >= right ? left : right;
-    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) => left <= right ? left : right;
 
     public async Task<DispatchState> EnqueueAsync(
         DonationEvent donation,

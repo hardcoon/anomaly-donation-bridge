@@ -173,6 +173,11 @@ public partial class App : Application
         {
             _globalHotkeys?.Dispose();
             _globalHotkeys = null;
+            if (exitCode == 0 && MainWindow is MainWindow window)
+            {
+                try { await window.FlushEditorWritesAsync(); }
+                catch (Exception exception) { TryWriteFatalLog("Saving editor changes", exception); }
+            }
             if (_runtime is not null)
             {
                 var runtime = _runtime;

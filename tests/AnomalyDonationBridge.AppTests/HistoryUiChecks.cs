@@ -73,6 +73,15 @@ internal static class HistoryUiChecks
                 Check(!items[0].Command.CanExecute(null) && items[1].Command.CanExecute(null) && items[4].Command.CanExecute(null),
                     "Waiting selection has incorrect menu enablement.");
                 foreach (var item in items.TakeLast(2)) Check(ReferenceEquals(item.Style, app.FindResource("DangerMenuItemStyle")), "Queue deletion is not styled red.");
+                var visibleButtons = VisibleButtons(root).ToArray();
+                var toolbar = items.Where(item => window.IsCompactLayout ||
+                        !ReferenceEquals(item.Command, model.RemoveSelectedQueuedCommand))
+                    .Select(item => visibleButtons.Single(button => ReferenceEquals(button.Command, item.Command))).ToArray();
+                var centers = toolbar.Select(button => button.TranslatePoint(new Point(0, button.ActualHeight / 2), root).Y).ToArray();
+                Check(centers.Max() - centers.Min() <= 2, $"History actions wrapped at {size.Width}×{size.Height}.");
+                if (!window.IsCompactLayout)
+                    Check(visibleButtons.Any(button => ReferenceEquals(button.Command, model.RemoveQueuedCommand)),
+                        "Wide history lost the per-row remove action.");
                 AssertButtonBounds(root);
                 Save(root, Path.Combine(output, $"history-{size.Width}-{(light ? "light" : "dark")}.png"));
                 // Render the actual styled menu independently; opening a popup
@@ -114,15 +123,21 @@ internal static class HistoryUiChecks
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
         { var child = VisualTreeHelper.GetChild(root, i); if (child is T match) yield return match; foreach (var item in Find<T>(child)) yield return item; }
     }
-    private static void AssertButtonBounds(FrameworkElement root)
+    private static IEnumerable<Button> VisibleButtons(FrameworkElement root)
     {
         foreach (var button in Find<Button>(root))
         {
-            if (button.ActualWidth < 1) continue;
+            if (button.ActualWidth < 1 || button.ActualHeight < 1) continue;
             var visible = true;
             for (DependencyObject? p = button; p is not null && p != root; p = VisualTreeHelper.GetParent(p))
                 if (p is UIElement { Visibility: not Visibility.Visible }) { visible = false; break; }
-            if (!visible) continue;
+            if (visible) yield return button;
+        }
+    }
+    private static void AssertButtonBounds(FrameworkElement root)
+    {
+        foreach (var button in VisibleButtons(root))
+        {
             var rect = button.TransformToAncestor(root).TransformBounds(new Rect(button.RenderSize));
             Check(rect.Left >= -1 && rect.Right <= root.ActualWidth + 1, "History toolbar button clips: " + AutomationProperties.GetName(button) + button.Content);
         }

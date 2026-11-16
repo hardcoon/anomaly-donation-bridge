@@ -8,18 +8,24 @@
         <local:InverseBooleanConverter x:Key="InverseBooleanConverter" />
         <local:FriendlyValueConverter x:Key="FriendlyValueConverter" />
         <local:MinimumThumbViewportConverter x:Key="MinimumThumbViewportConverter" MinimumThumbLength="64" />
+        <DataTemplate x:Key="VectorSymbolContentTemplate">
+            <local:VectorIcon Glyph="{Binding}"
+                              Width="{Binding FontSize, RelativeSource={RelativeSource AncestorType=Button}}"
+                              Height="{Binding Width, RelativeSource={RelativeSource Self}}"
+                              VerticalAlignment="Center" IsHitTestVisible="False" />
+        </DataTemplate>
         <DataTemplate x:Key="IconButtonContentTemplate">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsHitTestVisible="False">
-                <TextBlock Tag="ButtonIcon" Text="{Binding Path=(local:ButtonVisual.Glyph), RelativeSource={RelativeSource AncestorType=Button}}"
-                           FontFamily="Segoe MDL2 Assets" FontSize="14" Width="14" VerticalAlignment="Center" />
+                <local:VectorIcon Tag="ButtonIcon" Glyph="{Binding Path=(local:ButtonVisual.Glyph), RelativeSource={RelativeSource AncestorType=Button}}"
+                                  Width="14" Height="14" VerticalAlignment="Center" />
                 <TextBlock Tag="ButtonLabel" Text="{Binding Path=(local:ButtonVisual.Label), RelativeSource={RelativeSource AncestorType=Button}}"
                            Margin="6,0,0,0" VerticalAlignment="Center" />
             </StackPanel>
         </DataTemplate>
         <DataTemplate x:Key="IconOnlyButtonContentTemplate">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsHitTestVisible="False">
-                <TextBlock Tag="ButtonIcon" Text="{Binding Path=(local:ButtonVisual.Glyph), RelativeSource={RelativeSource AncestorType=Button}}"
-                           FontFamily="Segoe MDL2 Assets" FontSize="14" Width="14" VerticalAlignment="Center" />
+                <local:VectorIcon Tag="ButtonIcon" Glyph="{Binding Path=(local:ButtonVisual.Glyph), RelativeSource={RelativeSource AncestorType=Button}}"
+                           Width="14" Height="14" VerticalAlignment="Center" />
                 <TextBlock Tag="ButtonLabel" Text="{Binding Path=(local:ButtonVisual.Label), RelativeSource={RelativeSource AncestorType=Button}}"
                            Visibility="Collapsed" />
             </StackPanel>
@@ -30,6 +36,8 @@
         <SolidColorBrush x:Key="BackgroundBrush" Color="{DynamicResource BackgroundColor}" />
         <Color x:Key="SurfaceColor">#222523</Color>
         <SolidColorBrush x:Key="SurfaceBrush" Color="{DynamicResource SurfaceColor}" />
+        <Color x:Key="SidebarColor">#222523</Color>
+        <SolidColorBrush x:Key="SidebarBrush" Color="{DynamicResource SidebarColor}" />
         <Color x:Key="PanelColor">#2A2D2B</Color>
         <SolidColorBrush x:Key="PanelBrush" Color="{DynamicResource PanelColor}" />
         <Color x:Key="PanelAltColor">#343931</Color>
@@ -146,6 +154,28 @@
         <Color x:Key="WarningTextColor">#E0CAA0</Color>
         <SolidColorBrush x:Key="WarningTextBrush" Color="{DynamicResource WarningTextColor}" />
 
+        <Style x:Key="StatusCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource StatusCardBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="MinHeight" Value="66" />
+        </Style>
+
+        <DataTemplate x:Key="QueueStatusTemplate">
+            <Border Background="{DynamicResource TriggerChipBrush}" BorderBrush="{DynamicResource WarningBorderBrush}"
+                    BorderThickness="2,1,1,1" CornerRadius="3" Padding="8,5" Margin="0,0,0,5"
+                    ToolTip="{Binding QueueStatusText}">
+                <DockPanel TextElement.Foreground="{DynamicResource AccentForegroundBrush}">
+                    <local:VectorIcon DockPanel.Dock="Left" Glyph="&#xE916;"
+                               Width="13" Height="13" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <TextBlock Text="{Binding QueueStatusText}" FontSize="12" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" />
+                </DockPanel>
+            </Border>
+        </DataTemplate>
+
         <Style TargetType="Window">
             <Setter Property="Icon" Value="/AnomalyDonationBridge;component/Assets/AnomalyDonationBridge.ico" />
             <Setter Property="Background" Value="{DynamicResource BackgroundBrush}" />
@@ -153,10 +183,6 @@
             <Setter Property="FontFamily" Value="Segoe UI" />
             <Setter Property="FontSize" Value="13" />
             <Setter Property="UseLayoutRounding" Value="True" />
-            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
-        </Style>
-
-        <Style TargetType="TextBlock">
             <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
         </Style>
 
@@ -578,12 +604,15 @@
                             <Border x:Name="InteractionOverlay"
                                     Background="White" Opacity="0"
                                     CornerRadius="3" IsHitTestVisible="False" />
-                            <ContentPresenter HorizontalAlignment="Center"
+                            <ContentPresenter x:Name="ButtonContent" HorizontalAlignment="Center"
                                               VerticalAlignment="Center"
                                               Margin="{TemplateBinding Padding}"
                                               RecognizesAccessKey="True" />
                         </Grid>
                         <ControlTemplate.Triggers>
+                            <Trigger Property="local:ButtonVisual.ShowLabel" Value="False">
+                                <Setter TargetName="ButtonContent" Property="Margin" Value="3,5" />
+                            </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="InteractionOverlay" Property="Opacity" Value="0.06" />
                                 <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{DynamicResource ControlHoverBorderBrush}" />
@@ -892,6 +921,99 @@
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SidebarSurfaceStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SidebarBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="5" />
+            <Setter Property="Padding" Value="5" />
+        </Style>
+
+        <Style x:Key="MainSidebarSurfaceStyle" TargetType="Border" BasedOn="{StaticResource SidebarSurfaceStyle}">
+            <Setter Property="Width" Value="192" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSidebarExpanded, RelativeSource={RelativeSource AncestorType=Window}}" Value="False">
+                    <Setter Property="Width" Value="48" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SidebarToggleButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="32" />
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,0,0,8" />
+            <Setter Property="HorizontalAlignment" Value="Right" />
+            <Setter Property="Content" Value="Свернуть боковую панель" />
+            <Setter Property="ToolTip" Value="{Binding Content, RelativeSource={RelativeSource Self}}" />
+            <Setter Property="AutomationProperties.Name" Value="{Binding Content, RelativeSource={RelativeSource Self}}" />
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate>
+                        <Grid Width="16" Height="16" IsHitTestVisible="False">
+                            <Rectangle Width="13" Height="11" RadiusX="1.4" RadiusY="1.4"
+                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.2" />
+                            <Path Data="M 5.5,3 L 5.5,13"
+                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.15" />
+                            <Path x:Name="Direction" Data="M 11,5.8 L 8.7,8 L 11,10.2"
+                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                  StrokeThickness="1.2" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                        </Grid>
+                        <DataTemplate.Triggers>
+                            <DataTrigger Binding="{Binding IsSidebarExpanded, RelativeSource={RelativeSource AncestorType=Window}}" Value="False">
+                                <Setter TargetName="Direction" Property="Data" Value="M 8.7,5.8 L 11,8 L 8.7,10.2" />
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
+                    </DataTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSidebarExpanded, RelativeSource={RelativeSource AncestorType=Window}}" Value="False">
+                    <Setter Property="HorizontalAlignment" Value="Center" />
+                    <Setter Property="Content" Value="Развернуть боковую панель" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SidebarTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="Margin" Value="0,1" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Grid Background="{TemplateBinding Background}">
+                            <Border x:Name="SelectionEdge" Width="2" HorizontalAlignment="Left" Background="Transparent"
+                                    CornerRadius="1" Margin="0,3" IsHitTestVisible="False" />
+                            <Border x:Name="FocusEdge" BorderBrush="Transparent" BorderThickness="1" CornerRadius="3">
+                                <ContentPresenter ContentSource="Header" Margin="{TemplateBinding Padding}"
+                                                  VerticalAlignment="Center" HorizontalAlignment="Stretch" RecognizesAccessKey="True" />
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource TabHoverBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource TriggerChipBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                                <Setter TargetName="SelectionEdge" Property="Background" Value="{DynamicResource AccentBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="FocusEdge" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

@@ -70,6 +70,7 @@ internal static class CompactWindowUiChecks
             var compact = (CompactMainView)window.FindName("CompactShell");
             var wide = (FrameworkElement)window.FindName("WideShell");
             var preferences = new[] { model.ActiveBrowser.SelectedView, model.UserPresetBrowser.SelectedView, model.PresetBrowser.SelectedView };
+            CheckDefaultTemplateGrid(window, model, outputDirectory);
             foreach (var light in new[] { false, true })
             {
                 ThemeManager.Apply(light, "yellow");
@@ -166,7 +167,18 @@ internal static class CompactWindowUiChecks
                 Bounds(root);
                 if(section==0)Save(root,Path.Combine(outputDirectory,"compact-640-search-open.png"));
             }
-            model.SelectedSectionIndex=0;SetPresentation(model,nameof(MainViewModel.QueueStatusText),"Следующий эффект через 00:12 · в очереди: 999");Layout(window,new Size(640,520));
+            const string nextEffect = "Следующий эффект через 00:12 «Добавить радиацию» · в очереди: 3";
+            SetPresentation(model, nameof(MainViewModel.QueueStatusText), nextEffect);
+            var queueStrip = (ContentPresenter)compact.FindName("QueueStatusSurface");
+            foreach (var section in new[] { 0, 1, 2, 3 })
+            {
+                model.SelectedSectionIndex = section;
+                Layout(window, new Size(640, 520));
+                Check(queueStrip.Visibility == Visibility.Visible && queueStrip.ActualWidth > 300 &&
+                    Find<TextBlock>(queueStrip).Any(text => text.Text == nextEffect),
+                    "Compact mode lost the next queue effect in section " + section);
+            }
+            model.SelectedSectionIndex=0;Layout(window,new Size(640,520));
             Check(model.ShowTemplateSearch&&model.TemplateSearchText=="гОд-МоД","Queue status hid the search.");
             var liveSearch=(TextBox)compact.FindName("SmallSearchInput");
             liveSearch.SetCurrentValue(TextBox.TextProperty,"нет такого шаблона 89133");Layout(window,new Size(640,520));
@@ -174,6 +186,7 @@ internal static class CompactWindowUiChecks
             liveSearch.SetCurrentValue(TextBox.TextProperty,"гОд-МоД");Layout(window,new Size(640,520));
             Bounds(root);Save(root,Path.Combine(outputDirectory,"compact-640-queue.png"));
             SetPresentation(model,nameof(MainViewModel.QueueStatusText),string.Empty);
+            Check(queueStrip.Visibility == Visibility.Collapsed, "An empty queue left the compact strip visible.");
             ((Button)compact.FindName("SmallClearSearchButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Layout(window,new Size(640,520));
             Check(model.TemplateSearchText.Length==0 && liveSearch.ActualWidth>100,"Clearing compact search must keep the input visible.");
             model.SelectedSectionIndex=2;Layout(window,new Size(640,520));
@@ -207,17 +220,216 @@ internal static class CompactWindowUiChecks
             expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(!group.IsExpanded,"Group did not collapse.");
             expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(group.IsExpanded,"Group did not expand.");
             Bounds(root);Save(root,Path.Combine(outputDirectory,"compact-640-expanded-group.png"));
-            model.ShowTemplateDescriptions=true;Layout(window,new Size(640,520));Bounds(root);
-            Save(root,Path.Combine(outputDirectory,"compact-640-description.png"));
+            model.ShowTemplateDescriptions = true;
+            foreach (var section in new[] { 0, 1, 2 })
+            {
+                model.SelectedSectionIndex = section;
+                Layout(window, new Size(640, 520));
+                Bounds(root);
+                Check(!Find<TemplateDescriptionTextBlock>(compact).Any() &&
+                    !Find<Button>(compact).Any(button => Equals(button.Content, "Вид") && Displayed(button, root)) &&
+                    model.ShowTemplateDescriptions,
+                    "Compact mode shows a view toggle or descriptions, or changed the saved preference.");
+            }
             model.SelectedSectionIndex=3;Layout(window,new Size(640,520));Bounds(root);Save(root,Path.Combine(outputDirectory,"compact-640-history.png"));
             model.SelectedHistory=model.History[1];Layout(window,new Size(1440,860));
             Check(ReferenceEquals(model.SelectedHistory,model.History[1]),"History selection changed across layouts.");
+            CheckSidebar(window, compact, model, runtime, outputDirectory);
             Pump();Check(string.IsNullOrWhiteSpace(errors.ToString()),"WPF binding errors: "+errors);
             window.Close();application.Shutdown();
-            Console.WriteLine("PASS sidebar window: two-row categories with search/queue, category clicks, right-click menus in all list/grid views and compact groups, text-edit menu preserved, three prices, group toggle, voting submenus, red delete items, dark/light themes, 640x520 and DPI 150%. No IPC/accounts started.");
+            Console.WriteLine("PASS sidebar window: collapsing navigation, categories below search, queue, category clicks, right-click menus in all list/grid views and compact groups, text-edit menu preserved, three prices, group toggle, voting submenus, red delete items, dark/light themes, 640x520 and DPI 150%. No IPC/accounts started.");
             return 0;
         }
         catch(Exception error){Console.Error.WriteLine(error);return 1;}
+    }
+
+    private static void CheckDefaultTemplateGrid(MainWindow window, MainViewModel model, string output)
+    {
+        const double defaultWidth = 1488;
+        var workAreaWidth = InterfaceScaling.GetWorkArea(window).Width;
+        Check(Math.Abs(window.Width - Math.Min(defaultWidth, workAreaWidth)) < 1,
+            "Startup does not use the default template width within the monitor work area.");
+        var savedView = model.PresetBrowser.SelectedView;
+        model.PresetBrowser.SelectedView = ActionBrowserViewModel.ViewOptions.Single(option => option.Columns == 0);
+        model.SelectedSectionIndex = 2;
+        var root = (FrameworkElement)window.Content;
+        var presetsList = (ItemsControl)window.FindName("PresetsList");
+        foreach (var (width, expectedColumns) in new[] { (defaultWidth, 3), (1366d, 2) })
+        {
+            Layout(window, new Size(width, 860));
+            var panel = Find<ActionCardPanel>(presetsList).Single();
+            var columns = panel.Children.Cast<UIElement>().Take(expectedColumns + 1)
+                .Select(card => Math.Round(card.TranslatePoint(new Point(), panel).X)).Distinct().Count();
+            var buttons = Find<Button>(panel).Where(button => Displayed(button, root) &&
+                button.Content is "Настроить" or "Тест" or "В пользовательские").ToArray();
+            Check(columns == expectedColumns && buttons.Length >= expectedColumns * 3 &&
+                buttons.All(ButtonVisual.GetShowLabel),
+                $"Automatic template grid at {width} DIP has {columns} columns or hides button captions.");
+            if (width == defaultWidth) Save(root, Path.Combine(output, "default-template-grid.png"));
+        }
+        model.PresetBrowser.SelectedView = savedView;
+        model.SelectedSectionIndex = 0;
+    }
+
+    private static void CheckSidebar(MainWindow window, CompactMainView compact, MainViewModel model,
+        BridgeRuntime runtime, string output)
+    {
+        var profileId = runtime.Settings.ActiveProfileId;
+        var round = runtime.Voting.Snapshot;
+        round.Title = "БТР или аптечка?";
+        round.MoneyGoal = round.TimeGoal = true;
+        round.Target = 1000;
+        round.DurationSeconds = 90;
+        round.Options =
+        [
+            new VotingOption { Command = "бтр", Preset = model.Presets[0].Model.Clone() },
+            new VotingOption { Command = "аптечка", Preset = model.Presets[1].Model.Clone() }
+        ];
+        runtime.Voting.SaveSettingsAsync(round).GetAwaiter().GetResult();
+        var nextId = runtime.Voting.AddCollectionAsync(sourceCollectionId: round.CollectionId, profileId: profileId)
+            .GetAwaiter().GetResult();
+        var next = runtime.Voting.SnapshotFor(nextId);
+        next.Title = "Следующее голосование";
+        next.Options = round.Options.Select(option => option.Clone()).ToList();
+        runtime.Voting.SaveSettingsAsync(next).GetAwaiter().GetResult();
+        runtime.Voting.SetCollectionActiveAsync(round.CollectionId, true, profileId).GetAwaiter().GetResult();
+        const string queueText = "Ждём готовность игры · в очереди: 1 · следующий эффект «Временно изменить параметры героя»";
+        SetPresentation(model, nameof(MainViewModel.QueueStatusText), queueText);
+
+        var root = (FrameworkElement)window.Content;
+        var initialWindowCount = Application.Current.Windows.Count;
+        model.SelectedSectionIndex = 0;
+        var wideSize = new Size(1200, 820);
+        Layout(window, wideSize);
+        var tabControl = (TabControl)window.FindName("MainSections");
+        var rail = (Border)tabControl.Template.FindName("SidebarSurface", tabControl);
+        var voting = (TabItem)window.FindName("VotingNavigationTab");
+        var settings = (TabItem)window.FindName("SettingsNavigationTab");
+        var status = (Grid)tabControl.Template.FindName("SectionStatusPanel", tabControl);
+        var queue = (ContentPresenter)tabControl.Template.FindName("QueueStatusSurface", tabControl);
+        var widePlayer = (ContentControl)tabControl.Template.FindName("WideVotingPlayerHost", tabControl);
+        var statusTop = status.TranslatePoint(new Point(), root).Y;
+        var statusSize = status.RenderSize;
+        var queueTop = queue.TranslatePoint(new Point(), root).Y;
+        Check(statusSize.Height >= 66 && widePlayer.Visibility == Visibility.Collapsed,
+            "The main sections must show connection and donation status.");
+        Check(voting.TranslatePoint(new Point(0, voting.ActualHeight), rail).Y <= settings.TranslatePoint(new Point(), rail).Y,
+            "Voting must be above Settings in the wide sidebar.");
+        Check(rail.TranslatePoint(new Point(), root).X <= 8 &&
+            rail.TranslatePoint(new Point(0, rail.ActualHeight), root).Y >= root.ActualHeight - 5,
+            "The sidebar leaves extra outer space along the left or bottom.");
+
+        tabControl.SelectedItem = voting;
+        Layout(window, wideSize);
+        var voteView = (VotingView)((ContentControl)window.FindName("WideVotingHost")).Content;
+        Check(voting.IsSelected && Displayed(voteView, root) && Application.Current.Windows.Count == initialWindowCount,
+            "Voting must be displayed by the selected tab without a new window.");
+        Check(status.Visibility == Visibility.Collapsed && ReferenceEquals(widePlayer.Content, voteView.Player) &&
+            Displayed(voteView.Player, root) && Math.Abs(widePlayer.ActualWidth - statusSize.Width) < 1 &&
+            Math.Abs(widePlayer.ActualHeight - statusSize.Height) < 1 &&
+            Math.Abs(widePlayer.TranslatePoint(new Point(), root).Y - statusTop) < 1 &&
+            Math.Abs(queue.TranslatePoint(new Point(), root).Y - queueTop) < 1 &&
+            !Find<Border>(voteView).Any(border => Equals(border.Tag, "VotingPlayer")) &&
+            Find<ProgressBar>(voteView.Player).Single().Foreground ==
+                (Brush)Application.Current.FindResource("AccentBrush"),
+            "Voting must replace the whole status band with the live player and preserve the queue strip position.");
+        Check(Find<Button>(voteView.Player).Single(button =>
+            AutomationProperties.GetName(button) == "Следующее голосование").IsEnabled,
+            "The hosted player cannot switch to another configured voting round.");
+        Save(root, Path.Combine(output, "wide-voting-tab.png"));
+        tabControl.SelectedItem = settings;
+        Layout(window, wideSize);
+        var settingsView = (SettingsView)((ContentControl)window.FindName("WideSettingsHost")).Content;
+        var draft = (SettingsViewModel)settingsView.DataContext;
+        var storedEditor = draft.EditorPath;
+        draft.EditorPath = "unsaved editor draft";
+        Check(settings.IsSelected && Displayed(settingsView, root) && Application.Current.Windows.Count == initialWindowCount,
+            "Settings must be displayed by the selected tab without a new window.");
+        Check(status.Visibility == Visibility.Collapsed && widePlayer.Visibility == Visibility.Collapsed &&
+            queue.Visibility == Visibility.Visible && Math.Abs(queue.TranslatePoint(new Point(), root).Y - statusTop) < 1,
+            "Settings must keep the queue strip and release the space used by the status cards.");
+        Save(root, Path.Combine(output, "wide-settings-tab.png"));
+
+        var toggle = (Button)tabControl.Template.FindName("SidebarToggleButton", tabControl);
+        var expandedArrow = Find<System.Windows.Shapes.Path>(toggle).Single(path => path.Name == "Direction").Data.ToString();
+        Check(toggle.ActualWidth == 34 && toggle.ActualHeight == 32 &&
+            toggle.TranslatePoint(new Point(toggle.ActualWidth, 0), rail).X >= rail.ActualWidth - 8 &&
+            Equals(toggle.ToolTip, "Свернуть боковую панель"), "The collapse control is not in the upper-right of the wide sidebar.");
+        toggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Layout(window, wideSize);
+        Check(Equals(toggle.ToolTip, "Развернуть боковую панель") &&
+            Find<System.Windows.Shapes.Path>(toggle).Single(path => path.Name == "Direction").Data.ToString() != expandedArrow,
+            "Collapsing the sidebar did not flip the direction icon and tooltip.");
+        Check(rail.ActualWidth == 48 && settings.IsSelected, "Collapsing the navigation changed the selected settings tab.");
+        var smallSize = new Size(640, 520);
+        Layout(window, smallSize);
+        rail = (Border)compact.FindName("SidebarSurface");
+        var smallVoting = (ToggleButton)compact.FindName("VotingNavigationTab");
+        var smallSettings = (ToggleButton)compact.FindName("SettingsNavigationTab");
+        Check(smallVoting.TranslatePoint(new Point(0, smallVoting.ActualHeight), rail).Y <= smallSettings.TranslatePoint(new Point(), rail).Y,
+            "Voting must be above Settings in the compact sidebar.");
+        Check(smallSettings.IsChecked == true && ReferenceEquals(compact.SettingsHost.Content, settingsView) &&
+            draft.EditorPath == "unsaved editor draft" && Displayed(settingsView, root),
+            "Resizing detached Settings, lost the draft or selected another tab.");
+        var compactStatus = (Grid)compact.FindName("SectionStatusPanel");
+        var compactQueue = (ContentPresenter)compact.FindName("QueueStatusSurface");
+        Check(compactStatus.Visibility == Visibility.Collapsed && compact.VotingPlayerHost.Visibility == Visibility.Collapsed &&
+            Displayed(compactQueue, root), "Compact Settings still show connection cards or lost the shared queue strip.");
+        Save(root, Path.Combine(output, "compact-settings-tab.png"));
+        var settingsTabs = (TabControl)settingsView.FindName("SettingsTabs");
+        foreach (var tab in settingsTabs.Items.OfType<TabItem>())
+        {
+            settingsTabs.SelectedItem = tab;
+            Layout(window, smallSize);
+            Check(tab.IsSelected && Displayed(tab, root), "Compact Settings lost the section " + tab.Header);
+            try { Bounds(root); }
+            catch (InvalidOperationException error) { throw new InvalidOperationException($"{tab.Header}: {error.Message}", error); }
+        }
+        smallVoting.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Layout(window, smallSize);
+        Check(smallVoting.IsChecked == true && ReferenceEquals(compact.VotingHost.Content, voteView) && Displayed(voteView, root),
+            "Compact Voting did not select the existing editor.");
+        Check(compactStatus.Visibility == Visibility.Collapsed && widePlayer.Content is null &&
+            ReferenceEquals(compact.VotingPlayerHost.Content, voteView.Player) && Displayed(voteView.Player, root) &&
+            Displayed(compactQueue, root) &&
+            voteView.Player.TranslatePoint(new Point(0, voteView.Player.ActualHeight), root).Y <= compactQueue.TranslatePoint(new Point(), root).Y &&
+            compactQueue.TranslatePoint(new Point(0, compactQueue.ActualHeight), root).Y <= voteView.TranslatePoint(new Point(), root).Y,
+            "Compact Voting lost the player or changed the order of the player, queue and editor.");
+        Save(root, Path.Combine(output, "compact-voting-tab.png"));
+        smallSettings.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Layout(window, smallSize);
+        Find<Button>(settingsView).Single(button => Equals(button.Content, "Закрыть")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Layout(window, smallSize);
+        Check(model.SelectedSectionIndex == MainViewModel.VotingSectionIndex && compact.SettingsHost.Content is null,
+            "Closing Settings must return to the preceding tab.");
+        model.OpenSettingsAsync().GetAwaiter().GetResult();
+        Layout(window, smallSize);
+        Check(compact.SettingsHost.Content is SettingsView { DataContext: SettingsViewModel reopened } && reopened.EditorPath == storedEditor,
+            "Reopening Settings did not discard the unsaved draft.");
+
+        model.SelectedSectionIndex = 0;
+        ((Button)compact.FindName("SidebarToggleButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Layout(window, smallSize);
+        Check(rail.ActualWidth == 192, "The compact sidebar could not be expanded.");
+        CheckCategoryRows(compact);
+        Bounds(root);
+        foreach (var section in new[] { MainViewModel.VotingSectionIndex, MainViewModel.SettingsSectionIndex })
+        {
+            model.SelectedSectionIndex = section;
+            Layout(window, smallSize);
+            try { Bounds(root); }
+            catch (InvalidOperationException error) { throw new InvalidOperationException($"Expanded rail section {section}: {error.Message}", error); }
+        }
+        model.SelectedSectionIndex = MainViewModel.VotingSectionIndex;
+        Layout(window, wideSize);
+        Check(compact.VotingPlayerHost.Content is null && ReferenceEquals(widePlayer.Content, voteView.Player) &&
+            Displayed(voteView.Player, root), "Resizing back detached or duplicated the player.");
+        SetPresentation(model, nameof(MainViewModel.QueueStatusText), string.Empty);
+        model.SelectedSectionIndex = 0;
+        Layout(window, wideSize);
+        Check(window.IsSidebarExpanded && model.SelectedSectionIndex == 0 &&
+            status.Visibility == Visibility.Visible && widePlayer.Visibility == Visibility.Collapsed,
+            "The manual choice or status cards were lost on resize.");
     }
 
     private static void CheckActionMenus(CompactMainView compact,MainViewModel model,Application app,IReadOnlyList<VotingRound> rounds,string output,bool light)
@@ -317,13 +529,12 @@ internal static class CompactWindowUiChecks
         var tabs=(ListBox)compact.FindName("CompactCategories");
         var items=Enumerable.Range(0,tabs.Items.Count).Select(index=>(ListBoxItem)tabs.ItemContainerGenerator.ContainerFromIndex(index)).ToArray();
         Check(items.Length==7,"Compact category tabs are missing.");
-        var rows=items.GroupBy(item=>Math.Round(item.TranslatePoint(new Point(),tabs).Y)).OrderBy(row=>row.Key).Select(row=>row.Count()).ToArray();
-        Check(rows.SequenceEqual(new[]{4,3}),"Compact categories are not laid out in two rows (4 + 3): "+string.Join(",",rows));
         Check(items.All(item=>item.TranslatePoint(new Point(item.ActualWidth,0),tabs).X<=tabs.ActualWidth+1),"Compact category text overflows the tabs.");
-        var secondRow=items.Where(item=>Math.Round(item.TranslatePoint(new Point(),tabs).Y)==items.Max(item=>Math.Round(item.TranslatePoint(new Point(),tabs).Y))).ToArray();
-        var search=(Border)compact.FindName("CompactSearch");var origin=search.TranslatePoint(new Point(),tabs);
-        Check(origin.Y>=secondRow[0].TranslatePoint(new Point(),tabs).Y-1&&origin.Y+search.ActualHeight<=tabs.ActualHeight+1,"Compact search is not aligned with the second category row.");
-        Check(origin.X>=secondRow.Max(item=>item.TranslatePoint(new Point(item.ActualWidth,0),tabs).X)+6,"Expanded search overlaps category tabs.");
+        var search=(Border)compact.FindName("CompactSearch");
+        Check(search.TranslatePoint(new Point(0,search.ActualHeight),tabs).Y<=1,
+            "Compact categories are not below the search field.");
+        Check(Math.Abs(search.TranslatePoint(new Point(),tabs).X)<=1,
+            "Compact search and categories are not aligned.");
     }
     private static IEnumerable<MenuItem> MenuTree(ItemCollection items)
     {

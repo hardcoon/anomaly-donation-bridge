@@ -65,7 +65,7 @@ internal static class SafeZoneUiChecks
                         if (state is "selected" or "selected-disabled") viewModel.SafeZone.SelectedRule = viewModel.SafeZone.Rules[1];
                         if (state is "all" or "all-disabled") viewModel.SafeZone.SelectedRule = viewModel.SafeZone.Rules[0];
                         if (state == "adding") viewModel.SafeZone.BeginAddLocationCommand.Execute(null);
-                        var window = new SettingsWindow(viewModel);
+                        var window = new SettingsView(viewModel);
                         var root = (FrameworkElement)window.Content; root.Margin = new Thickness(0);
                         var tabs = Find<TabControl>(root).Single();
                         var safeTab = tabs.Items.OfType<TabItem>().Single(tab=>Equals(tab.Header,"Безопасная зона"));
@@ -95,11 +95,10 @@ internal static class SafeZoneUiChecks
                                 Check(button.Command is not null && button.CommandParameter==card.DataContext,"Rule action lost its command or location.");
                             }
                         }
-                        if(width>=1080)
-                        {
-                            var ys=tabs.Items.OfType<TabItem>().Select(tab=>Bounds(tab,root).Y).ToList();
-                            Check(ys.Max()-ys.Min()<1,"Default settings tabs wrap to a second row.");
-                        }
+                        var tabsBounds = tabs.Items.OfType<TabItem>().Select(tab => Bounds(tab, root)).ToArray();
+                        Check(tabsBounds.All(bounds => Math.Abs(bounds.X - tabsBounds[0].X) < 1) &&
+                            tabsBounds.Zip(tabsBounds.Skip(1)).All(pair => pair.First.Bottom <= pair.Second.Top),
+                            "Settings categories do not fit in one vertical sidebar.");
                         if(state=="selected")
                         {
                             var rule=viewModel.SafeZone.SelectedRule!;
@@ -148,7 +147,7 @@ internal static class SafeZoneUiChecks
                             Check(viewModel.SafeZone.Rules.Count==3 && !viewModel.SafeZone.IsAddingLocation && viewModel.SafeZone.SelectedRule is {IsExpanded:true},
                                 "Adding a location failed to close the picker and open its editor.");
                         }
-                        window.Close();
+                        window.Dispose();
                     }
                 }
                 Check(trace.ToString().Length==0,"Safe-zone WPF binding errors: "+trace);
@@ -164,7 +163,7 @@ internal static class SafeZoneUiChecks
         catch(Exception error){Console.Error.WriteLine(error);return 1;}
     }
     private static void Check(bool condition,string reason){if(!condition)throw new InvalidOperationException(reason);}
-    private static void CheckThemedControls(FrameworkElement pane,Window window,Application app,FrameworkElement root,int width)
+    private static void CheckThemedControls(FrameworkElement pane,FrameworkElement window,Application app,FrameworkElement root,int width)
     {
         foreach(var radio in Find<RadioButton>(pane))
         {

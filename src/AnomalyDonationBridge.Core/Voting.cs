@@ -216,6 +216,9 @@ public static class VotingRules
             throw new InvalidOperationException("Выберите корректный шаблон для каждой включённой команды.");
     }
 
+    public static bool CanStart(VotingRound round)
+    { try { Validate(round); return true; } catch (InvalidOperationException) { return false; } }
+
     public static long RandomBelow(long maximum)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximum);
@@ -410,7 +413,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         }
         else if (round.Phase == VotingPhase.Collecting) Evaluate(round, now);
         if (round.Phase == VotingPhase.Collecting && (!round.IsActive || !document.Automation.Enabled)) Pause(round, now);
-        if (round.IsActive && document.Automation.Enabled && (round.Phase is VotingPhase.Draft or VotingPhase.Paused) && CanStart(round))
+        if (round.IsActive && document.Automation.Enabled && (round.Phase is VotingPhase.Draft or VotingPhase.Paused) && VotingRules.CanStart(round))
             Resume(round, round.ProfileId, now);
         return true;
     }, token);
@@ -513,7 +516,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             document.Automation.Enabled = false;
         }
         else if ((AllCollections(document).FirstOrDefault(round => round.IsActive) ??
-            AllCollections(document).FirstOrDefault(round => (round.ProfileId.Length == 0 || round.ProfileId == profileId) && CanStart(round))) is { } target)
+            AllCollections(document).FirstOrDefault(round => (round.ProfileId.Length == 0 || round.ProfileId == profileId) && VotingRules.CanStart(round))) is { } target)
             ActivateOnly(document, target, profileId, now);
         return true;
     }, token);
@@ -526,7 +529,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         { round.IsActive = round == target; if (!round.IsActive) Pause(round, now); }
         document.Automation.Enabled = true;
         if (target.ProfileId.Length == 0) target.ProfileId = profileId;
-        if ((target.Phase is VotingPhase.Draft or VotingPhase.Paused) && CanStart(target)) Resume(target, profileId, now);
+        if ((target.Phase is VotingPhase.Draft or VotingPhase.Paused) && VotingRules.CanStart(target)) Resume(target, profileId, now);
     }
 
     public async Task<string> RecordAsync(DonationEvent donation, string profileId, CancellationToken token = default)
@@ -719,7 +722,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         if (previous is null) return false;
         // Leave the winner on screen briefly; the deadline survives a restart.
         if (previous.Phase == VotingPhase.Drawn && previous.DrawnAt is { } drawnAt && now < drawnAt.AddSeconds(7)) return false;
-        var candidates = AllCollections(document).Where(round => round.UseInSequence && (round.ProfileId.Length == 0 || round.ProfileId == profileId) && CanStart(round))
+        var candidates = AllCollections(document).Where(round => round.UseInSequence && (round.ProfileId.Length == 0 || round.ProfileId == profileId) && VotingRules.CanStart(round))
             .OrderBy(round => document.CollectionOrder.IndexOf(round.CollectionId)).ToList();
         if (candidates.Count == 0) return false;
         var currentIndex = document.CollectionOrder.IndexOf(previous.CollectionId);
@@ -761,9 +764,6 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         round.Intervals.Add(new VotingInterval { Start = now });
         round.Notice = "Голосование идёт.";
     }
-
-    private static bool CanStart(VotingRound round)
-    { try { VotingRules.Validate(round); return true; } catch (InvalidOperationException) { return false; } }
 
     private static void FreezeResult(VotingRound round)
     {

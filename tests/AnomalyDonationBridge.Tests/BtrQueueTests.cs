@@ -23,12 +23,18 @@ internal static class BtrQueueTests
             Reason = BtrPassengerCommands.WaitingReason });
         pipe.Passenger = true;
         await dispatcher.RequestImmediateAsync([id]);
+        var next = await dispatcher.GetTimingAsync(pipe);
+        Check(!next.WaitingForGame && next.NextActionName == "Squads",
+            "Queue status did not skip the effect blocked by the passenger restriction.");
         await dispatcher.DrainAsync(pipe, policy);
         Check(pipe.Commands.Count == 2 && pipe.Commands.Last().DonationId == "allowed",
             "Passenger deferral consumed the global cooldown or blocked the permitted command.");
         await dispatcher.CompleteAsync(new() { CommandId = pipe.Commands.Last().CommandId,
             Status = GameResultStatus.Executed });
 
+        var blocked = await dispatcher.GetTimingAsync(pipe);
+        Check(blocked.WaitingForGame && blocked.NextActionName == "Money",
+            "A blocked effect must remain visible as waiting for the game.");
         now += TimeSpan.FromSeconds(61);
         await dispatcher.DrainAsync(pipe, policy);
         Check(pipe.Commands.Count == 2, "Immediate mode bypassed the passenger restriction.");

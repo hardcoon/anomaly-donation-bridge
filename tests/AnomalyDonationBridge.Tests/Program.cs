@@ -1324,9 +1324,15 @@ internal static class Program
         var readyDonation = Donation(2m);
         await dispatcher.EnqueueAsync(coolingDonation, actions, policy);
         await dispatcher.EnqueueAsync(readyDonation, actions, policy);
+        var next = await dispatcher.GetTimingAsync(transport);
+        Equal(actions[1].DisplayName, next.NextActionName, "queue label follows the action that can run first");
+        Equal(0, next.SecondsUntilNext, "queue label and timer refer to the same action");
         await dispatcher.DrainAsync(transport, policy);
         Equal(readyDonation.Id, transport.Commands[1].DonationId,
             "cooling-down head moves aside for an unrelated action");
+        var awaiting = await dispatcher.GetTimingAsync(transport);
+        True(awaiting.AwaitingResult, "queue label holds while the game acknowledges the sent effect");
+        Equal(actions[0].DisplayName, awaiting.NextActionName, "in-flight effect is not shown as the next effect");
         await dispatcher.CompleteAsync(new GameExecutionResult
         {
             CommandId = transport.Commands[1].CommandId,

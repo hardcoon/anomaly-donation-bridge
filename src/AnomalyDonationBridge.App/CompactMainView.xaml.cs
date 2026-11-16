@@ -32,8 +32,13 @@ public partial class CompactMainView : UserControl
     public IEnumerable? VisibleItems => (IEnumerable?)GetValue(VisibleItemsProperty);
     public bool IsHistorySection => (bool)GetValue(IsHistorySectionProperty);
     public bool IsActiveSection => (bool)GetValue(IsActiveSectionProperty);
-    public bool IsSidebarExpanded => (bool)GetValue(IsSidebarExpandedProperty);
+    public bool IsSidebarExpanded
+    {
+        get => (bool)GetValue(IsSidebarExpandedProperty);
+        set => SetValue(IsSidebarExpandedProperty, value);
+    }
     internal MainWindow? OwnerWindow { get; set; }
+    internal Button ThemeTrigger => CompactThemeButton;
     private MainViewModel? _model;
     private ContextMenu? _openMenu;
 
@@ -54,13 +59,12 @@ public partial class CompactMainView : UserControl
         SizeChanged += (_, _) =>
         {
             BrandName.Text = ActualWidth >= 720 ? "ANOMALY DONATION BRIDGE" : "ADB";
-            UpdateSidebar();
         };
         IsVisibleChanged += (_, _) => { if (!IsVisible) CloseTransientViews(); };
     }
 
     internal void SetApplicationLogo(ImageSource logo) => SmallLogo.Source = logo;
-    private void UpdateSidebar() => SetValue(IsSidebarExpandedProperty, ActualWidth >= 760);
+    private void ToggleSidebar_Click(object sender, RoutedEventArgs e) => OwnerWindow?.ToggleSidebar();
     internal void FocusSearch()
     {
         UpdateLayout();
@@ -82,21 +86,23 @@ public partial class CompactMainView : UserControl
     {
         if (_model is null) return;
         var section = _model.SelectedSectionIndex;
+        if (!_model.ShowSectionStatus) StatusPopup.IsOpen = false;
         var browser = section switch { 1 => _model.UserPresetBrowser, 2 => _model.PresetBrowser, _ => _model.ActiveBrowser };
         SetValue(SelectedBrowserProperty, browser);
-        SetValue(VisibleItemsProperty, section == 3 ? Array.Empty<object>() :
+        SetValue(VisibleItemsProperty, section >= 3 ? Array.Empty<object>() :
             section == 0 ? browser.VisibleEntries : browser.VisibleActions);
         SetValue(IsHistorySectionProperty, section == 3);
         SetValue(IsActiveSectionProperty, section == 0);
-        var tabs = new[] { ActiveTab, UserTab, TemplatesTab, HistoryTab };
+        var tabs = new[] { ActiveTab, UserTab, TemplatesTab, HistoryTab, SettingsNavigationTab, VotingNavigationTab };
         for (var index = 0; index < tabs.Length; index++) tabs[index].IsChecked = index == section;
         ActionScroll.ScrollToTop();
     }
 
     private void Section_Click(object sender, RoutedEventArgs e)
     {
-        if (_model is not null && sender is FrameworkElement { Tag: string text } && int.TryParse(text, out var section))
-            _model.SelectedSectionIndex = section;
+        if (_model is null || sender is not FrameworkElement tab) return;
+        if (tab.Tag is int index) _model.SelectedSectionIndex = index;
+        else if (tab.Tag is string text && int.TryParse(text, out var section)) _model.SelectedSectionIndex = section;
         UpdateSection();
     }
 
@@ -110,8 +116,6 @@ public partial class CompactMainView : UserControl
     private void ConfigureAction_Click(object sender, RoutedEventArgs e) => OwnerWindow?.ConfigureCompactAction(sender, e);
     private void Theme_Click(object sender, RoutedEventArgs e) => OwnerWindow?.OpenCompactTheme(sender, e);
     private void Profiles_Click(object sender, RoutedEventArgs e) => OwnerWindow?.OpenCompactProfiles(sender, e);
-    private void Settings_Click(object sender, RoutedEventArgs e) => OwnerWindow?.OpenCompactSettings(sender, e);
-    private void Voting_Click(object sender, RoutedEventArgs e) => OwnerWindow?.OpenCompactVoting(sender, e);
     private void StrictSequence_Click(object sender, RoutedEventArgs e) => OwnerWindow?.SetCompactStrictSequence(sender, e);
     private void GroupDelay_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e) => OwnerWindow?.SaveCompactGroupDelay(sender, e);
     private void GroupDelay_KeyDown(object sender, KeyEventArgs e) => OwnerWindow?.HandleCompactGroupDelayKey(sender, e);
@@ -165,16 +169,6 @@ public partial class CompactMainView : UserControl
         var item = CommandItem(label, command, parameter);
         item.SetResourceReference(StyleProperty, "DangerMenuItemStyle");
         return item;
-    }
-
-    private void ViewMenu_Click(object sender, RoutedEventArgs e)
-    {
-        if (_model is null || sender is not Button button) return;
-        var menu = new ContextMenu();
-        var description = new MenuItem { Header = "Описание и параметры", IsCheckable = true, IsChecked = _model.ShowTemplateDescriptions };
-        description.Click += (_, _) => _model.ShowTemplateDescriptions = description.IsChecked;
-        menu.Items.Add(description);
-        ShowMenu(button, menu);
     }
 
     private void ListMenu_Click(object sender, RoutedEventArgs e)

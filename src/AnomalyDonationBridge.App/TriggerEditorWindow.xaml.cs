@@ -26,7 +26,7 @@ public partial class TriggerEditorWindow : Window
     private async void CurrencySettings_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new CurrencyCalculationSettingsWindow(_viewModel.CalculationCurrencies) { Owner = this };
-        if (dialog.ShowDialog() == true)
+        if (AppDialogs.ShowModal(dialog) == true)
             await _viewModel.SetCalculationCurrenciesAsync(dialog.SelectedCurrencies);
     }
 

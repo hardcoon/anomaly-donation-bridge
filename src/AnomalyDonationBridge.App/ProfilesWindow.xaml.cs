@@ -47,7 +47,7 @@ public partial class ProfilesWindow : Window
             "Название нового профиля",
             "Новый профиль",
             showCopyUserPresets: true, showCopyVotings: true) { Owner = this };
-        if (dialog.ShowDialog() != true) return;
+        if (AppDialogs.ShowModal(dialog) != true) return;
         await RunAsync(async () =>
         {
             var profile = await _runtime.CreateProfileAsync(dialog.PresetName, dialog.CopyUserPresets, copyVotings: dialog.CopyVotings);
@@ -59,7 +59,7 @@ public partial class ProfilesWindow : Window
     {
         if (Selected is not { } selected) return;
         var dialog = new PresetNameWindow("Новое название профиля", selected.Name) { Owner = this };
-        if (dialog.ShowDialog() != true) return;
+        if (AppDialogs.ShowModal(dialog) != true) return;
         await RunAsync(async () =>
         {
             await _runtime.RenameProfileAsync(selected.Id, dialog.PresetName);

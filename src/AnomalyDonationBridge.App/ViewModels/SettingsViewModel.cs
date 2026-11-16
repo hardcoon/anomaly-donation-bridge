@@ -109,6 +109,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private EffectScriptInstallationStatus? _effectsStatus;
     private string _catalogExclusionSearch = string.Empty;
     private bool _showOnlyExcludedCatalogEntries = true;
+    private HashSet<(CatalogEntryKind Kind, string SectionId)> _savedExclusionSelection;
     private CatalogExclusionKindFilterOption _selectedCatalogExclusionKindFilter;
 
     public SettingsViewModel(BridgeRuntime runtime)
@@ -162,6 +163,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             settings.ActivePresetHotkeys.Select(binding => new ActivePresetHotkeyViewModel(binding, settings.Actions)));
         var saved = settings.CatalogExclusions.ToDictionary(
             entry => (entry.Kind, entry.SectionId), entry => entry);
+        _savedExclusionSelection = saved.Keys.ToHashSet();
         var rows = (runtime.CatalogState.Catalog?.Entries ?? [])
             .Select(entry => new CatalogExclusionRowViewModel(
                 entry, saved.ContainsKey((entry.Kind, entry.SectionId))))
@@ -465,22 +467,27 @@ public sealed partial class SettingsViewModel : ObservableObject
         _runtime.Settings.MinimizeToTrayOnClose = MinimizeToTrayOnClose;
         _runtime.Settings.RestartAfterCrash = RestartAfterCrash;
         _runtime.Settings.HideUnavailableCatalogSections = HideUnavailableCatalogSections;
-        _runtime.Settings.CatalogExclusions = CatalogEntries
-            .Where(row => row.IsExcluded)
-            .Select(row => new CatalogExclusion
+        var selection = CatalogEntries.Where(row => row.IsExcluded).ToDictionary(row => (row.Kind, row.SectionId));
+        var exclusions = _runtime.Settings.CatalogExclusions.ToDictionary(entry => (entry.Kind, entry.SectionId));
+        // History can add exclusions while the settings draft stays open in another tab.
+        foreach (var removed in _savedExclusionSelection.Except(selection.Keys)) exclusions.Remove(removed);
+        foreach (var added in selection.Keys.Except(_savedExclusionSelection))
+        {
+            var row = selection[added];
+            exclusions.TryAdd(added, new CatalogExclusion
             {
                 Kind = row.Kind,
                 SectionId = row.SectionId,
                 DisplayName = row.DisplayName,
                 Category = row.Category,
-                AddedAt = _runtime.Settings.CatalogExclusions.FirstOrDefault(existing =>
-                    existing.Kind == row.Kind &&
-                    string.Equals(existing.SectionId, row.SectionId, StringComparison.Ordinal))?.AddedAt
-                    ?? DateTimeOffset.UtcNow
-            }).ToList();
+                AddedAt = DateTimeOffset.UtcNow
+            });
+        }
+        _runtime.Settings.CatalogExclusions = exclusions.Values.ToList();
         ApplyHotkeySettings();
         var warnings = _runtime.RefreshActionManifest();
         await _runtime.SaveSettingsAsync();
+        _savedExclusionSelection = selection.Keys.ToHashSet();
         Status = warnings.Count == 0 ? "Настройки сохранены." : "Сохранено с предупреждением: " + string.Join("; ", warnings);
     }
 

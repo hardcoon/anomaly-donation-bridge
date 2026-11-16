@@ -948,6 +948,15 @@ internal static class FilePresetTests
                     "The unified operation did not install both core and all 70 effect scripts.");
                 Assert(!(await runtime.InspectBridgeAsync(unifiedGameRoot, string.Empty)).CanInstall,
                     "Header update button must be hidden for a verified current installation.");
+                await runtime.AddCatalogExclusionsAsync([new CatalogEntry
+                {
+                    Kind = CatalogEntryKind.Item, SectionId = "from_history", DisplayName = "Добавлено из истории"
+                }]);
+                settings.AddManualCatalogExclusion(CatalogEntryKind.Item, "from_settings", "Добавлено в настройках");
+                await settings.SaveAsync();
+                Assert(runtime.Settings.CatalogExclusions.Select(entry => entry.SectionId).ToHashSet()
+                    .SetEquals(["from_history", "from_settings"]),
+                    "Saving a settings draft dropped a catalog exclusion added after the draft was opened.");
                 var effectTarget = Path.Combine(unifiedGameRoot, "gamedata", "scripts", first);
                 File.Delete(effectTarget);
                 Assert((await runtime.InspectBridgeAsync(unifiedGameRoot, string.Empty)).CanInstall,

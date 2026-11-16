@@ -79,7 +79,7 @@ internal static class CrashRecoveryTests
             }
             finally { await runtime.DisposeAsync(); }
 
-            var xaml = XDocument.Load(Path.Combine(FindRoot(), "src/AnomalyDonationBridge.App/SettingsWindow.xaml"));
+            var xaml = XDocument.Load(Path.Combine(FindRoot(), "src/AnomalyDonationBridge.App/SettingsView.xaml"));
             var box = xaml.Descendants().Single(n => (string?)n.Attribute("Content") == "Принудительный перезапуск при вылете");
             Check(box.Attribute("IsChecked")!.Value.Contains("RestartAfterCrash"), "General settings checkbox is not wired.");
 

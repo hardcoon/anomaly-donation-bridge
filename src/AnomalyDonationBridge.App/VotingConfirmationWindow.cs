@@ -50,7 +50,18 @@ internal static class AppDialogs
             ?? (Application.Current?.MainWindow is { IsVisible: true } main ? main : null);
         if (owner is { IsVisible: true }) dialog.Owner = owner;
         else { dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen; dialog.ShowInTaskbar = true; }
-        return dialog.ShowDialog() == true;
+        return ShowModal(dialog) == true;
+    }
+
+    internal static bool? ShowModal(Window dialog)
+    {
+        for (var owner = dialog.Owner; owner is not null; owner = owner.Owner)
+        {
+            if (owner is not MainWindow main) continue;
+            InterfaceScaling.ApplyToDialog(dialog, main);
+            break;
+        }
+        return dialog.ShowDialog();
     }
 }
 
@@ -60,6 +71,6 @@ internal sealed class VotingConfirmationWindow : AppDialogWindow
     internal VotingConfirmationWindow(string title, string message, string confirmText)
         : base(title, message, confirmText, confirmation: true, destructive: true) { }
 
-    internal static bool Confirm(Window owner, string title, string message, string confirmText) =>
+    internal static bool Confirm(Window? owner, string title, string message, string confirmText) =>
         AppDialogs.Confirm(owner, title, message, confirmText);
 }

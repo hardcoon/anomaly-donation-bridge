@@ -167,7 +167,11 @@ public sealed class MainViewModel : ObservableObject
     }
     public bool HasTemplateSearchText => !string.IsNullOrWhiteSpace(TemplateSearchText);
     public bool HasQueueStatus => !string.IsNullOrWhiteSpace(QueueStatusText);
+    public const int SettingsSectionIndex = 4;
+    public const int VotingSectionIndex = 5;
     public bool ShowTemplateSearch => SelectedSectionIndex is >= 0 and < 3;
+    public bool ShowSectionStatus => SelectedSectionIndex is >= 0 and < SettingsSectionIndex;
+    public bool ShowVotingPlayer => SelectedSectionIndex == VotingSectionIndex;
     public int SelectedSectionIndex
     {
         get => _selectedSectionIndex;
@@ -175,6 +179,8 @@ public sealed class MainViewModel : ObservableObject
         {
             if (!SetProperty(ref _selectedSectionIndex, value)) return;
             RaisePropertyChanged(nameof(ShowTemplateSearch));
+            RaisePropertyChanged(nameof(ShowSectionStatus));
+            RaisePropertyChanged(nameof(ShowVotingPlayer));
             RaisePropertyChanged(nameof(TemplateSearchHint));
         }
     }
@@ -297,7 +303,17 @@ public sealed class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(HasQueueStatus));
         }
     }
-    public string DataDirectory => _runtime.DataDirectory;
+    private const int MinimumInterfaceScale = 80;
+    private const int MaximumInterfaceScale = 150;
+    private const int InterfaceScaleStep = 5;
+
+    public static IReadOnlyList<int> InterfaceScaleOptions { get; } =
+        Enumerable.Range(0, (MaximumInterfaceScale - MinimumInterfaceScale) / InterfaceScaleStep + 1)
+            .Select(step => MinimumInterfaceScale + step * InterfaceScaleStep).ToArray();
+
+    public int InterfaceScalePercent => NormalizeInterfaceScale(_runtime.UiPreferences.InterfaceScalePercent);
+    public double InterfaceScaleFactor => InterfaceScalePercent / 100d;
+
     public bool IsLightTheme => _runtime.UiPreferences.UseLightTheme ?? _runtime.Settings.UseLightTheme;
     public bool IsBlackTheme => !IsLightTheme;
     public string ThemeColor => ThemeManager.NormalizeColor(_runtime.UiPreferences.ThemeColor);
@@ -415,12 +431,7 @@ public sealed class MainViewModel : ObservableObject
         await RefreshBridgeUpdateAsync();
     }
 
-    public async Task OpenSettingsAsync()
-    {
-        if (ShowSettings is not null) await ShowSettings();
-        RefreshFromSettings();
-        await RefreshBridgeUpdateAsync();
-    }
+    public Task OpenSettingsAsync() => ShowSettings?.Invoke() ?? Task.CompletedTask;
 
     public async Task RefreshBridgeUpdateAsync()
     {
@@ -547,6 +558,7 @@ public sealed class MainViewModel : ObservableObject
         try { await _runtime.UpdateUiPreferencesAsync(current => preferences with
         {
             ThemeColor = current.ThemeColor,
+            InterfaceScalePercent = current.InterfaceScalePercent,
             UseLightTheme = current.UseLightTheme,
             AutomaticPriceCurrencies = current.AutomaticPriceCurrencies
         }); }
@@ -572,6 +584,24 @@ public sealed class MainViewModel : ObservableObject
         }
     }, source.HandlerId == ActorBoostRecovery.HandlerId ? () => _runtime.ResetActorBoostAsync() : null,
         link => _runtime.OpenTemplateSource(source.HandlerId, link), _runtime.Settings.Actions);
+
+    private static int NormalizeInterfaceScale(int percent) =>
+        InterfaceScaleStep * (int)Math.Round(Math.Clamp(percent, MinimumInterfaceScale, MaximumInterfaceScale) /
+            (double)InterfaceScaleStep);
+
+    public async Task SetInterfaceScaleAsync(int percent)
+    {
+        var scale = NormalizeInterfaceScale(percent);
+        try
+        {
+            await _runtime.UpdateUiPreferencesAsync(current => current with { InterfaceScalePercent = scale });
+        }
+        finally
+        {
+            RaisePropertyChanged(nameof(InterfaceScalePercent));
+            RaisePropertyChanged(nameof(InterfaceScaleFactor));
+        }
+    }
 
     public Task SetLightThemeAsync(bool useLightTheme) => ChangeThemeAsync(null, useLightTheme);
     public Task SetThemeColorAsync(string color) => ChangeThemeAsync(color, null);
@@ -685,7 +715,6 @@ public sealed class MainViewModel : ObservableObject
         RaisePropertyChanged(nameof(ProcessingStatus));
         RaisePropertyChanged(nameof(CanArm));
         RaisePropertyChanged(nameof(ArmHint));
-        RaisePropertyChanged(nameof(DataDirectory));
         RaiseThemeProperties();
         ExtensionStatus = _runtime.ExtensionStatus;
         if (SortActiveByPriceCommand is AsyncRelayCommand sortCommand) sortCommand.RaiseCanExecuteChanged();
@@ -1162,14 +1191,16 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             var state = await _runtime.GetQueueTimingAsync();
+            var next = string.IsNullOrWhiteSpace(state.NextActionName) ? string.Empty : $" «{state.NextActionName}»";
+            var count = $"в очереди: {state.WaitingCount}";
             QueueStatusText = state switch
             {
-                { AwaitingResult: true, WaitingCount: > 0 } => $"Выполняется эффект · ещё в очереди: {state.WaitingCount}",
+                { AwaitingResult: true, WaitingCount: > 0 } => $"Ждём подтверждение игры · {count} · следующий эффект{next}",
                 { AwaitingResult: true } => "Выполняется эффект · ждём подтверждение игры",
-                { WaitingForGame: true } => $"В очереди: {state.WaitingCount} · ждём готовность игры",
                 { WaitingCount: <= 0 } => string.Empty,
-                { SecondsUntilNext: > 0 } => $"Следующий эффект через {FormatCountdown(state.SecondsUntilNext)} · в очереди: {state.WaitingCount}",
-                _ => $"Следующий эффект готов к запуску · в очереди: {state.WaitingCount}"
+                { WaitingForGame: true } => $"Ждём готовность игры · {count} · следующий эффект{next}",
+                { SecondsUntilNext: > 0 } => $"Следующий эффект через {FormatCountdown(state.SecondsUntilNext)}{next} · {count}",
+                _ => $"Следующий эффект{next} готов к запуску · {count}"
             };
         }
         catch (OperationCanceledException) { }

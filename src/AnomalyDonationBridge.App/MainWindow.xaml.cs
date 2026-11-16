@@ -83,7 +83,6 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel;
     private readonly BridgeRuntime _runtime;
     private readonly VotingObsController _votingObs;
-    private VotingWindow? _votingWindow;
 
     public MainWindow(MainViewModel viewModel, BridgeRuntime runtime)
     {
@@ -97,20 +96,20 @@ public partial class MainWindow : Window
         _viewModel = viewModel;
         _runtime = runtime;
         _votingObs = new VotingObsController(runtime);
-        Closed += (_, _) => _votingObs.Dispose();
         DataContext = viewModel;
         viewModel.ShowTriggerEditor = ShowTriggerEditor;
         viewModel.PromptForPresetName = PromptForPresetName;
         viewModel.PromptForDonorLaunch = action =>
         {
             var dialog = new DonorLaunchWindow(action.DisplayName) { Owner = this };
-            return dialog.ShowDialog() == true ? dialog.Result : null;
+            return AppDialogs.ShowModal(dialog) == true ? dialog.Result : null;
         };
         viewModel.SelectActiveExportPath = SelectActiveExportPath;
         viewModel.ShowSettings = ShowSettingsAsync;
         viewModel.ShowPresetHotkeySettings = ShowPresetHotkeySettingsAsync;
         viewModel.SelectCatalogExclusions = SelectCatalogExclusions;
         InitializeResponsiveLayout();
+        InitializeSections();
     }
 
     private string? SelectActiveExportPath()
@@ -130,13 +129,13 @@ public partial class MainWindow : Window
     private string? PromptForPresetName(string title, string initialValue)
     {
         var dialog = new PresetNameWindow(title, initialValue) { Owner = this };
-        return dialog.ShowDialog() == true ? dialog.PresetName : null;
+        return AppDialogs.ShowModal(dialog) == true ? dialog.PresetName : null;
     }
 
     private IReadOnlyList<CatalogEntry>? SelectCatalogExclusions(IReadOnlyList<CatalogEntry> candidates)
     {
         var dialog = new CatalogExclusionPickerWindow(candidates) { Owner = this };
-        return dialog.ShowDialog() == true ? dialog.SelectedEntries : null;
+        return AppDialogs.ShowModal(dialog) == true ? dialog.SelectedEntries : null;
     }
 
     private TriggerEditorResult? ShowTriggerEditor(ActionViewModel action, TriggerRuleViewModel? existing)
@@ -148,7 +147,7 @@ public partial class MainWindow : Window
                 AutomaticPriceCurrencies = currencies.ToList()
             }));
         var dialog = new TriggerEditorWindow(viewModel) { Owner = this };
-        return dialog.ShowDialog() == true ? dialog.Result : null;
+        return AppDialogs.ShowModal(dialog) == true ? dialog.Result : null;
     }
 
     private void EditableTextBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
@@ -192,30 +191,22 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private async void Settings_Click(object sender, RoutedEventArgs e) => await _viewModel.OpenSettingsAsync();
-
     private async void Profiles_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            if (_votingWindow is not null) await _votingWindow.FlushPendingChangesAsync();
+            if (_votingView is not null) await _votingView.FlushPendingChangesAsync();
+            if (_settingsView is not null) await _settingsView.PendingApply;
+            var profileId = _runtime.Settings.ActiveProfileId;
             var dialog = new ProfilesWindow(_runtime) { Owner = this };
-            dialog.ShowDialog();
+            AppDialogs.ShowModal(dialog);
+            if (profileId != _runtime.Settings.ActiveProfileId)
+            {
+                DiscardSettingsView();
+                UpdateEmbeddedSection();
+            }
         }
         catch (Exception error) { AppDialogs.Info(this, "Профили", error.Message); }
-    }
-
-    private void Voting_Click(object sender, RoutedEventArgs e) => _ = ShowVotingAsync(null);
-
-    private async Task ShowVotingAsync(ActionDefinition? action, string? collectionId = null)
-    {
-        if (_votingWindow is null)
-        {
-            _votingWindow = new VotingWindow(_runtime, _votingObs) { Owner = this };
-            _votingWindow.Closed += (_, _) => _votingWindow = null;
-        }
-        _votingWindow.Show(); _votingWindow.Activate();
-        if (action is not null && collectionId is not null) await _votingWindow.AddTemplateAsync(action, collectionId);
     }
 
     private void VotingTargets_SubmenuOpened(object sender, RoutedEventArgs e)
@@ -252,7 +243,7 @@ public partial class MainWindow : Window
             Owner = this
         };
         // Modal ownership blocks outside clicks; only Cancel, Save or the window close button can dismiss it.
-        dialog.ShowDialog();
+        AppDialogs.ShowModal(dialog);
     }
 
     private void CategoryTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -260,7 +251,7 @@ public partial class MainWindow : Window
         if (sender is not ListBox { DataContext: ActionBrowserViewModel browser }) return;
         var list = ReferenceEquals(PresetsList?.ItemsSource, browser.VisibleActions) ? PresetsList :
             ReferenceEquals(UserPresetsList?.ItemsSource, browser.VisibleActions) ? UserPresetsList :
-            ReferenceEquals(ActiveActionsList?.ItemsSource, browser.VisibleActions) ? ActiveActionsList : null;
+            ReferenceEquals(ActiveActionsList?.ItemsSource, browser.VisibleEntries) ? ActiveActionsList : null;
         for (DependencyObject? parent = list; parent is not null; parent = VisualTreeHelper.GetParent(parent))
         {
             if (parent is not ScrollViewer scroll) continue;
@@ -297,6 +288,13 @@ public partial class MainWindow : Window
             await ApplyThemeChoiceAsync(() => _viewModel.SetLightThemeAsync(background == "white"));
     }
 
+    private async void ThemeScale_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_viewModel is not null && sender is ComboBox { SelectedItem: int scale } &&
+            scale != _viewModel.InterfaceScalePercent)
+            await ApplyThemeChoiceAsync(() => _viewModel.SetInterfaceScaleAsync(scale));
+    }
+
     private async Task ApplyThemeChoiceAsync(Func<Task> apply)
     {
         ThemeChoices.IsEnabled = false;
@@ -307,7 +305,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            ThemePopupError.Text = "Не удалось сохранить тему: " + exception.Message;
+            ThemePopupError.Text = "Не удалось сохранить оформление: " + exception.Message;
             ThemePopupError.Visibility = Visibility.Visible;
         }
         finally { ThemeChoices.IsEnabled = true; }
@@ -327,21 +325,5 @@ public partial class MainWindow : Window
             ThemePopup.PlacementTarget?.Focus();
             e.Handled = true;
         }
-    }
-
-    private async Task ShowSettingsAsync()
-    {
-        var dialog = new SettingsWindow(new SettingsViewModel(_runtime)) { Owner = this };
-        dialog.ShowDialog();
-        await Task.CompletedTask;
-    }
-
-    private async Task ShowPresetHotkeySettingsAsync(int presetNumber)
-    {
-        var settings = new SettingsViewModel(_runtime);
-        settings.AddActivePresetHotkey(presetNumber);
-        var dialog = new SettingsWindow(settings, openHotkeys: true) { Owner = this };
-        dialog.ShowDialog();
-        await Task.CompletedTask;
     }
 }

@@ -46,7 +46,7 @@ internal static class YouTubeChatUiChecks
                     Status="Нет доступа к чату. Проверьте ключ, включение YouTube Data API v3 и ограничения ключа в Google Cloud."};
                 typeof(BridgeRuntime).GetField("_youTubeIdle",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(runtime,snapshot);
                 var vm=new SettingsViewModel(runtime);
-                var window=new SettingsWindow(vm);
+                var window=new SettingsView(vm);
                 var root=(FrameworkElement)window.Content;
                 root.Margin=new Thickness(0);
                 var outer=(TabControl)window.FindName("SettingsTabs");
@@ -75,7 +75,7 @@ internal static class YouTubeChatUiChecks
                 var bitmap=new RenderTargetBitmap(width,740,96,96,PixelFormats.Pbgra32);bitmap.Render(root);
                 var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));
                 using(var file=File.Create(Path.Combine(output,$"youtube-{(light?"light":"dark")}-{width}-{state}.png")))encoder.Save(file);
-                window.Close();
+                window.Dispose();
             }
             listener.Flush();Check(trace.ToString().Length==0,"WPF binding errors: "+trace);
             Console.WriteLine("YouTube WPF: 20 detached layouts passed; no network or game commands.");

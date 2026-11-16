@@ -6,6 +6,7 @@ namespace AnomalyDonationBridge.Persistence;
 public sealed record UiPreferences
 {
     public string ThemeColor { get; init; } = "yellow";
+    public int InterfaceScalePercent { get; init; } = 100;
     // null preserves the existing settings.json light/dark choice until the
     // user explicitly chooses a background in the new presentation picker.
     public bool? UseLightTheme { get; init; }

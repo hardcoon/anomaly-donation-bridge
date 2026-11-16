@@ -5,16 +5,19 @@ using System.Windows.Media;
 
 namespace AnomalyDonationBridge.App;
 
-public sealed partial class VotingWindow
+public sealed partial class VotingView
 {
-    private UIElement Build()
+    private bool _narrow;
+    private ColumnDefinition _navigationColumn = null!, _playerMetricsColumn = null!;
+
+    private UIElement Build(bool hostPlayerSeparately)
     {
         var shell = new Grid();
         shell.SetResourceReference(Panel.BackgroundProperty, "BackgroundBrush");
-        shell.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(182) });
+        _navigationColumn = new ColumnDefinition { Width = new GridLength(182) };
+        shell.ColumnDefinitions.Add(_navigationColumn);
         shell.ColumnDefinitions.Add(new ColumnDefinition());
         shell.RowDefinitions.Add(new RowDefinition());
-        shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         shell.Children.Add(BuildNavigation());
 
@@ -50,10 +53,26 @@ public sealed partial class VotingWindow
         shell.Children.Add(feedback);
 
         BuildPlayer();
-        Grid.SetRow(_player, 2);
-        Grid.SetColumnSpan(_player, 2);
-        shell.Children.Add(_player);
-        return shell;
+        shell.SizeChanged += (_, e) => UpdateWidth(e.NewSize.Width);
+        if (hostPlayerSeparately) return shell;
+
+        DockPanel.SetDock(_player, Dock.Top);
+        _player.Margin = new Thickness(0, 0, 0, 8);
+        return new DockPanel { Children = { _player, shell } };
+    }
+
+    private void UpdateWidth(double width)
+    {
+        var narrow = width < 800;
+        _navigationColumn.Width = new GridLength(width < 515 ? 124 : narrow ? 148 : 182);
+        ButtonVisual.SetShowLabel(_generalButton, width >= 515);
+        if (_narrow == narrow) return;
+
+        _narrow = narrow;
+        DockPanel.SetDock(_headerActions, narrow ? Dock.Bottom : Dock.Right);
+        _headerActions.Margin = narrow ? new Thickness(0, 6, 0, 0) : new Thickness(10, 0, 0, 0);
+        _headerActions.HorizontalAlignment = narrow ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        ApplyPanelLayout();
     }
 
     private FrameworkElement BuildNavigation()
@@ -76,7 +95,8 @@ public sealed partial class VotingWindow
         var caption = new DockPanel { Margin = new Thickness(6, 0, 0, 9) };
         DockPanel.SetDock(add, Dock.Right);
         caption.Children.Add(add);
-        var listTitle = SecondaryText("Мои голосования");
+        var listTitle = SecondaryText("Голосования");
+        listTitle.TextTrimming = TextTrimming.CharacterEllipsis;
         listTitle.VerticalAlignment = VerticalAlignment.Center;
         caption.Children.Add(listTitle);
 
@@ -103,6 +123,7 @@ public sealed partial class VotingWindow
         SetDisclosureIcon(_panelToggle, "\uE9E9");
         ButtonVisual.SetGlyph(_reset, "\uE7A7");
         _reset.ToolTip = "Сбросить прогресс этого голосования";
+        _delete.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
         _delete.SetResourceReference(StyleProperty, "DangerButtonStyle");
         _delete.SetResourceReference(ForegroundProperty, "BadBrush");
         foreach (var button in new[] { _panelToggle, _reset, _delete })
@@ -114,7 +135,7 @@ public sealed partial class VotingWindow
         }
 
         _rename.Content = "\uE70F";
-        _rename.FontFamily = new FontFamily("Segoe MDL2 Assets");
+        _rename.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
         _rename.FontSize = 13;
         _rename.ToolTip = "Переименовать голосование";
         AutomationProperties.SetName(_rename, "Переименовать голосование");
@@ -312,23 +333,25 @@ public sealed partial class VotingWindow
     private void BuildPlayer()
     {
         _player.Tag = "VotingPlayer";
-        _player.BorderThickness = new Thickness(0, 1, 0, 0);
-        _player.Padding = new Thickness(14, 10, 14, 10);
-        _player.MinHeight = 70;
+        _player.Style = (Style)FindResource("StatusCardStyle");
         _player.SetResourceReference(Border.BackgroundProperty, "PanelBrush");
-        _player.SetResourceReference(Border.BorderBrushProperty, "BorderStrongBrush");
         AutomationProperties.SetName(_player, "Сейчас в эфире");
 
-        var layout = new Grid();
+        var layout = new Grid { VerticalAlignment = VerticalAlignment.Center };
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
-        layout.ColumnDefinitions.Add(new ColumnDefinition());
+        _playerMetricsColumn = new ColumnDefinition();
+        layout.ColumnDefinitions.Add(_playerMetricsColumn);
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _player.Child = layout;
 
         var identity = new DockPanel { LastChildFill = true, VerticalAlignment = VerticalAlignment.Center };
-        var icon = Card((UIElement)FindResource("VotingBroadcastIcon"), 7);
+        var icon = Card((UIElement)FindResource("VotingBroadcastIcon"), 0);
         icon.Width = icon.Height = 36;
-        icon.Margin = new Thickness(0, 0, 9, 0);
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        icon.Margin = new Thickness(0, 0, 10, 0);
+        DockPanel.SetDock(icon, Dock.Left);
         icon.SetResourceReference(Border.BackgroundProperty, "WarningPanelBrush");
         icon.SetResourceReference(Border.BorderBrushProperty, "WarningBorderBrush");
         identity.Children.Add(icon);
@@ -345,7 +368,7 @@ public sealed partial class VotingWindow
         identity.Children.Add(labels);
         layout.Children.Add(identity);
 
-        _progress.SetResourceReference(StyleProperty, "VotingTrackStyle");
+        _progress.Style = (Style)FindResource("VotingTrackStyle");
         _total.FontSize = _remaining.FontSize = 12;
         _amountMetric = PlayerMetric(_total, "M 2,4 A 5,2 0 0 0 12,4 A 5,2 0 0 0 2,4 Z M 2,4 L 2,10 A 5,2 0 0 0 12,10 L 12,4 M 2,7 A 5,2 0 0 0 12,7");
         _timeMetric = PlayerMetric(_remaining, "M 7,1 A 6,6 0 1 1 7,13 A 6,6 0 1 1 7,1 M 7,4 L 7,7 L 9.5,7");
@@ -355,7 +378,7 @@ public sealed partial class VotingWindow
         metrics.Children.Add(_timeMetric);
         metrics.Children.Add(_amountMetric);
         var progress = new StackPanel { Margin = new Thickness(15, 0, 15, 0), VerticalAlignment = VerticalAlignment.Center };
-        _progress.Margin = new Thickness(0, 6, 0, 0);
+        _progress.Margin = new Thickness(0, 4, 0, 0);
         progress.Children.Add(metrics);
         progress.Children.Add(_progress);
         _playerProgress = progress;
@@ -364,17 +387,50 @@ public sealed partial class VotingWindow
 
         _spin.Height = 36;
         _spin.Padding = new Thickness(8, 4, 8, 4);
-        _spin.Margin = new Thickness(0, 0, 6, 0);
         ButtonVisual.SetGlyph(_spin, "\uE768");
+        _playerToggle.SetResourceReference(ContentControl.ContentTemplateProperty, "VectorSymbolContentTemplate");
         _playerToggle.SetResourceReference(StyleProperty, "AccentOutlineButtonStyle");
         ButtonVisual.SetGlyph(_collectionToggle, "\uE768");
         _collectionToggle.SetResourceReference(StyleProperty, "PrimaryButtonStyle");
+        var nextIcon = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 1,1 L 10,7 L 1,13 Z M 11,1 H 13 V 13 H 11 Z"),
+            Width = 14, Height = 14, Stretch = Stretch.Uniform
+        };
+        nextIcon.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "AccentForegroundBrush");
+        _playerNext.Content = nextIcon;
+        _playerNext.SetResourceReference(StyleProperty, "AccentOutlineButtonStyle");
+        AutomationProperties.SetName(_playerNext, "Следующее голосование");
+        ToolTipService.SetShowOnDisabled(_playerNext, true);
+
         _playerActions.VerticalAlignment = VerticalAlignment.Center;
-        _playerActions.Children.Add(_spin);
-        _playerActions.Children.Add(_playerToggle);
-        _playerActions.Children.Add(_collectionToggle);
+        foreach (var action in new[] { _spin, _playerToggle, _collectionToggle, _playerNext })
+        {
+            action.Margin = new Thickness(6, 0, 0, 0);
+            _playerActions.Children.Add(action);
+        }
         Grid.SetColumn(_playerActions, 2);
         layout.Children.Add(_playerActions);
+        _player.SizeChanged += (_, e) =>
+        {
+            if (e.WidthChanged) UpdatePlayerLayout(e.NewSize.Width);
+        };
+    }
+
+    private void UpdatePlayerLayout(double width)
+    {
+        var narrow = width < 800;
+        var iconOnly = width < 550;
+        _player.Padding = narrow ? new Thickness(10, 5, 10, 5) : new Thickness(12, 8, 12, 8);
+        _playerMetricsColumn.Width = narrow ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        Grid.SetRow(_playerProgress, narrow ? 1 : 0);
+        Grid.SetColumn(_playerProgress, narrow ? 0 : 1);
+        Grid.SetColumnSpan(_playerProgress, narrow ? 3 : 1);
+        _playerProgress.Margin = narrow ? new Thickness(0, 4, 0, 0) : new Thickness(15, 0, 15, 0);
+        _spin.MinWidth = iconOnly ? 36 : 90;
+        _collectionToggle.MinWidth = iconOnly ? 36 : 0;
+        ButtonVisual.SetShowLabel(_spin, !iconOnly);
+        ButtonVisual.SetShowLabel(_collectionToggle, !iconOnly);
     }
 
     private static FrameworkElement PlayerMetric(TextBlock text, string iconData)

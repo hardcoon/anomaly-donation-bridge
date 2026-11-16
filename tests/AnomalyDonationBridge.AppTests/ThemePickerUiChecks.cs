@@ -35,7 +35,8 @@ internal static class ThemePickerUiChecks
             _ = task.ContinueWith(_ => app.Dispatcher.BeginInvoke((Action)(() => frame.Continue = false)));
             Dispatcher.PushFrame(frame);
             task.GetAwaiter().GetResult();
-            Console.WriteLine("PASS theme popup: all 8 palettes, native radio automation/bindings, legacy background, isolated persistence/reload, browser/color races, failure rollback, Escape and live popup resources.");
+            CheckPixelAlignedIcons();
+            Console.WriteLine("PASS theme popup: all 8 palettes, native radio automation/bindings, legacy background, 5% zoom steps in regular and compact layouts, isolated persistence/reload, browser/color races, failure rollback, Escape and live popup resources.");
             return 0;
         }
         catch (Exception exception) { Console.Error.WriteLine(exception); return 1; }
@@ -58,7 +59,12 @@ internal static class ThemePickerUiChecks
         runtime.Settings.ActiveProfileId = profile.Id;
         var model = new MainViewModel(runtime);
         foreach (var preset in DefaultActionCatalog.CreatePresets().Take(6))
+        {
             model.Presets.Add(new ActionViewModel(preset.Clone(), isPreset: true));
+            var userPreset = preset.CloneAsNewInstance();
+            userPreset.Triggers.Clear();
+            model.UserPresets.Add(new ActionViewModel(userPreset, isPreset: true, isUserPreset: true));
+        }
         Check(model.IsLightTheme && model.IsYellowTheme, "Legacy light/yellow choice was lost.");
         ThemeManager.Apply(model.IsLightTheme, model.ThemeColor);
         var errors = new StringWriter();
@@ -109,6 +115,70 @@ internal static class ThemePickerUiChecks
                 Save(surface, Path.Combine(output, color + (light ? "-white-popup.png" : "-black-popup.png")));
             }
 
+
+            var scalePicker = (ComboBox)window.FindName("ThemeScaleSelector");
+            var viewport = (FrameworkElement)window.FindName("InterfaceRoot");
+            Check(scalePicker.Items.Cast<int>().SequenceEqual(Enumerable.Range(16, 15).Select(value => value * 5)) &&
+                Equals(scalePicker.SelectedItem, 100), "Legacy preferences must start at 100% with five-point steps.");
+
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 110);
+            await WaitAsync(() => choices.IsEnabled && model.InterfaceScalePercent == 110);
+            Layout(root, 1388);
+            double MainScale() => (viewport.TranslatePoint(new Point(100, 0), root) -
+                viewport.TranslatePoint(new Point(), root)).X / 100;
+            Check(Math.Abs(MainScale() - 1.1) < 0.01, "The main layout did not scale to 110%.");
+            var popupScale = (surface.PointToScreen(new Point(100, 0)) - surface.PointToScreen(new Point())).X /
+                (100 * VisualTreeHelper.GetDpi(surface).DpiScaleX);
+            Check(Math.Abs(popupScale - 1.1) < 0.02, $"The theme popup did not scale to 110%: {popupScale:0.###}.");
+            tabs.SelectedIndex = 1;
+            model.ShowTemplateDescriptions = false;
+            Layout(root, 1388);
+            var caption = Find<TextBlock>(viewport).First(text => Equals(text.Tag, "ButtonLabel") &&
+                text.Text == "В активные" && text.Visibility == Visibility.Visible);
+            var captionMode = TextOptions.GetTextFormattingMode(caption);
+            var popupMode = TextOptions.GetTextFormattingMode(scalePicker);
+            Check(captionMode == TextFormattingMode.Ideal && popupMode == TextFormattingMode.Ideal &&
+                TextOptions.GetTextHintingMode(window) == TextHintingMode.Fixed &&
+                TextOptions.GetTextHintingMode(surface) == TextHintingMode.Fixed,
+                $"Incorrect scaled text rendering: window caption {captionMode}, popup selector {popupMode}.");
+            Save(root, Path.Combine(output, "interface-110.png"));
+            Save(surface, Path.Combine(output, "theme-scale.png"));
+            ThemeManager.Apply(false, "red");
+            Layout(root, 1388);
+            Save(root, Path.Combine(output, "cards-110-dark.png"));
+            ThemeManager.Apply(model.IsLightTheme, model.ThemeColor);
+            model.ShowTemplateDescriptions = true;
+            tabs.SelectedIndex = 2;
+
+            var dialog = new PresetNameWindow("Имя шаблона", "Новая жизнь") { Owner = window };
+            var dialogWidth = dialog.Width;
+            InterfaceScaling.ApplyToDialog(dialog, window);
+            Check(((FrameworkElement)dialog.Content).LayoutTransform is ScaleTransform { ScaleX: 1.1, ScaleY: 1.1 } &&
+                Math.Abs(dialog.Width - Math.Min(dialogWidth * 1.1, InterfaceScaling.GetWorkArea(window).Width)) < 1,
+                "A template dialog did not inherit the app zoom.");
+            Check(TextOptions.GetTextFormattingMode((FrameworkElement)dialog.Content) == TextFormattingMode.Ideal &&
+                TextOptions.GetTextHintingMode((FrameworkElement)dialog.Content) == TextHintingMode.Fixed,
+                "The scaled dialog reuses Display metrics.");
+            dialog.Close();
+
+            window.Width = 1150;
+            await WaitAsync(() => window.IsCompactLayout);
+            var compact = (CompactMainView)window.FindName("CompactShell");
+            Check(popup.IsOpen && ReferenceEquals(popup.PlacementTarget, compact.ThemeTrigger),
+                "The scale picker did not stay anchored as the interface switched to compact mode.");
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 150);
+            await WaitAsync(() => choices.IsEnabled && model.InterfaceScalePercent == 150);
+            Layout(root, 1150);
+            Check(window.IsCompactLayout && Math.Abs(MainScale() - 1.5) < 0.01, "150% did not keep responsive compact layout.");
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 80);
+            await WaitAsync(() => choices.IsEnabled && model.InterfaceScalePercent == 80 && !window.IsCompactLayout);
+            Check(popup.IsOpen && ReferenceEquals(popup.PlacementTarget, trigger) && Math.Abs(MainScale() - 0.8) < 0.01,
+                "Scaling down did not restore the regular layout and popup anchor.");
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 110);
+            await WaitAsync(() => choices.IsEnabled && model.InterfaceScalePercent == 110);
+            window.Width = 1440;
+            await WaitAsync(() => !window.IsCompactLayout);
+
             // Independent queued presentation updates may never undo each other.
             var colorSave = model.SetThemeColorAsync("blue");
             model.ShowTemplateDescriptions = false;
@@ -120,8 +190,8 @@ internal static class ThemePickerUiChecks
             Check(model.IsGreenTheme && model.IsBlackTheme, "Independent concurrent color/background requests were coupled.");
             var reloaded = await new JsonUiPreferencesStore(paths).LoadAsync();
             Check(reloaded.ThemeColor == "green" && reloaded.UseLightTheme == false &&
-                !reloaded.ShowTemplateDescriptions && reloaded.PresetColumns == 3,
-                "Reload lost theme or browser settings.");
+                !reloaded.ShowTemplateDescriptions && reloaded.PresetColumns == 3 && reloaded.InterfaceScalePercent == 110,
+                "Reload lost theme, scale, or browser settings.");
 
             // A blocked UI file must roll back resources and native radio state.
             var blockPath = Path.Combine(paths.RootDirectory, "ui-preferences.json.tmp");
@@ -132,11 +202,20 @@ internal static class ThemePickerUiChecks
             Check(model.IsGreenTheme && ThemeManager.ColorKey == "green" &&
                 ((RadioButton)window.FindName("ThemeGreenChoice")).IsChecked == true,
                 "Failed save did not restore the old palette/selection.");
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 115);
+            await WaitAsync(() => choices.IsEnabled && error.Visibility == Visibility.Visible);
+            Check(model.InterfaceScalePercent == 110 && Equals(scalePicker.SelectedItem, 110) &&
+                Math.Abs(MainScale() - 1.1) < 0.01, "Failed save did not restore the previous scale.");
             Directory.Delete(blockPath);
             Invoke(trigger);
             await WaitAsync(() => popup.IsOpen && error.Visibility == Visibility.Collapsed);
             Select((RadioButton)window.FindName("ThemeBlueChoice"));
             await WaitAsync(() => choices.IsEnabled && model.IsBlueTheme);
+            scalePicker.SetCurrentValue(Selector.SelectedItemProperty, 100);
+            await WaitAsync(() => choices.IsEnabled && model.InterfaceScalePercent == 100);
+            Check(TextOptions.GetTextFormattingMode(scalePicker) == TextFormattingMode.Display &&
+                TextOptions.GetTextFormattingMode(viewport) == TextFormattingMode.Display,
+                "The original text metrics were not restored at 100%.");
 
             var source = PresentationSource.FromVisual(surface) ?? throw new InvalidOperationException("Popup HWND missing.");
             surface.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Escape)
@@ -146,8 +225,8 @@ internal static class ThemePickerUiChecks
             var done = Find<Button>(surface).Single(button => Equals(button.Content, "Готово"));
             Invoke(done);await WaitAsync(() => !popup.IsOpen);
             var neighbors = Find<Button>(root)
-                .Where(button => Equals(button.Content, "Профили") || Equals(button.Content, "Настройки")).ToArray();
-            Check(neighbors.Length == 2 && neighbors.All(button => button.Padding == trigger.Padding),
+                .Where(button => ReferenceEquals(button.Parent, trigger.Parent) && !ReferenceEquals(button, trigger)).ToArray();
+            Check(neighbors.Length == 1 && Equals(neighbors[0].Content, "Профили") && neighbors[0].Padding == trigger.Padding,
                 "Header buttons have inconsistent padding.");
             foreach (var width in new[] { 1028d, 1388d, 1868d })
             {
@@ -171,6 +250,88 @@ internal static class ThemePickerUiChecks
             PresentationTraceSources.DataBindingSource.Listeners.Remove(listener);
             ThemeManager.Apply(false);
         }
+    }
+
+
+    private static void CheckPixelAlignedIcons()
+    {
+        foreach (var monitorScale in new[] { 1d, 1.25, 1.5, 2d })
+        foreach (var percent in MainViewModel.InterfaceScaleOptions)
+        {
+            var zoom = percent / 100d;
+            var plus = RasterizeIcon("\uE710", zoom, monitorScale);
+            var list = RasterizeIcon("\uE8FD", zoom, monitorScale);
+            var plusRows = GetInkBounds(plus);
+            Check(plusRows.Width == plusRows.Height && plusRows.Width >= 7,
+                $"Plus is stretched or missing at {percent}% zoom and {monitorScale:P0} DPI.");
+            for (var y = 0; y < plusRows.Height; y++)
+            for (var x = 0; x < plusRows.Width; x++)
+            {
+                bool At(int column, int row) => plus[plusRows.Y + row, plusRows.X + column];
+                Check(At(x, y) == At(y, x) && At(x, y) == At(plusRows.Width - 1 - x, y),
+                    $"Plus arms are asymmetric at {percent}% zoom and {monitorScale:P0} DPI (pixel {x}, {y}, bounds {plusRows}).");
+            }
+
+            var listBounds = GetInkBounds(list);
+            var rowRuns = new List<(bool Visible, int Height)>();
+            for (var y = listBounds.Y; y < listBounds.Y + listBounds.Height; y++)
+            {
+                var visible = list[y, listBounds.X + listBounds.Width - 1];
+                if (rowRuns.Count > 0 && rowRuns[^1].Visible == visible)
+                    rowRuns[^1] = (visible, rowRuns[^1].Height + 1);
+                else
+                    rowRuns.Add((visible, 1));
+            }
+            Check(rowRuns.Count == 5 && rowRuns[0] == rowRuns[2] && rowRuns[2] == rowRuns[4] &&
+                rowRuns[0].Visible && rowRuns[1] == rowRuns[3] && !rowRuns[1].Visible,
+                $"List lost a stroke or equal spacing at {percent}% zoom and {monitorScale:P0} DPI.");
+        }
+
+        Console.WriteLine("PASS pixel-symmetric plus and three equal list strokes at every zoom step, on 100–200% monitor DPI.");
+    }
+
+    private static bool[,] RasterizeIcon(string glyph, double zoom, double monitorScale)
+    {
+        var icon = new VectorIcon
+        {
+            Glyph = glyph, Foreground = Brushes.White, Width = 14, Height = 14,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+        };
+        var root = new Border { Background = Brushes.Black, Width = 36, Height = 36 };
+        root.Child = new Border { Child = icon, LayoutTransform = new ScaleTransform(zoom, zoom) };
+        VisualTreeHelper.SetRootDpi(root, new DpiScale(monitorScale, monitorScale));
+        root.SetValue(VectorIcon.LayoutScaleProperty, zoom);
+        root.Measure(new Size(36, 36));
+        root.Arrange(new Rect(0, 0, 36, 36));
+        root.UpdateLayout();
+        var size = (int)Math.Ceiling(36 * monitorScale);
+        var bmp = new RenderTargetBitmap(size, size, 96 * monitorScale, 96 * monitorScale, PixelFormats.Pbgra32);
+        bmp.Render(root);
+        var pixels = new byte[size * size * 4];
+        bmp.CopyPixels(pixels, size * 4, 0);
+        var result = new bool[size, size];
+        for (var y = 0; y < size; y++)
+        for (var x = 0; x < size; x++)
+            result[y, x] = pixels[(y * size + x) * 4] >= 235;
+        return result;
+    }
+
+    private static Int32Rect GetInkBounds(bool[,] pixels)
+    {
+        var left = pixels.GetLength(1);
+        var top = pixels.GetLength(0);
+        var right = -1;
+        var bottom = -1;
+        for (var y = 0; y < pixels.GetLength(0); y++)
+        for (var x = 0; x < pixels.GetLength(1); x++)
+        {
+            if (!pixels[y, x]) continue;
+            left = Math.Min(left, x);
+            right = Math.Max(right, x);
+            top = Math.Min(top, y);
+            bottom = Math.Max(bottom, y);
+        }
+        return right < 0 ? Int32Rect.Empty : new Int32Rect(left, top, right - left + 1, bottom - top + 1);
     }
 
     private static void Select(RadioButton button)
@@ -201,7 +362,8 @@ internal static class ThemePickerUiChecks
     }
     private static void Save(FrameworkElement root, string path)
     {
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(root.ActualWidth), (int)Math.Ceiling(root.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        var bounds = root.LayoutTransform.TransformBounds(new Rect(root.RenderSize));
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(bounds.Width), (int)Math.Ceiling(bounds.Height), 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(root);var encoder = new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(path);encoder.Save(output);
     }

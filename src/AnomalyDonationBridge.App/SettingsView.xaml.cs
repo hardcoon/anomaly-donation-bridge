@@ -11,35 +11,71 @@ using AnomalyDonationBridge.DonateX;
 
 namespace AnomalyDonationBridge.App;
 
-public partial class SettingsWindow : Window
+public partial class SettingsView : UserControl, IDisposable
 {
     private const string SupportCardNumber = "2200396126139183";
     private readonly GitHubReleaseUpdateChecker _updateChecker = new();
     private readonly SettingsViewModel _viewModel;
     private readonly System.Windows.Threading.DispatcherTimer _youTubeRefresh = new()
     { Interval = TimeSpan.FromMilliseconds(500) };
-    public SettingsWindow(SettingsViewModel viewModel, bool openHotkeys = false)
+    private static readonly DependencyPropertyKey IsCompactNavigationPropertyKey = DependencyProperty.RegisterReadOnly(
+        nameof(IsCompactNavigation), typeof(bool), typeof(SettingsView), new PropertyMetadata(false));
+    public static readonly DependencyProperty IsCompactNavigationProperty = IsCompactNavigationPropertyKey.DependencyProperty;
+    public bool IsCompactNavigation => (bool)GetValue(IsCompactNavigationProperty);
+
+    private bool _initialized, _disposed;
+    private Task? _pendingApply;
+    private Window? HostWindow => Window.GetWindow(this);
+    internal Task PendingApply => _pendingApply ?? Task.CompletedTask;
+    internal event EventHandler? CloseRequested;
+
+    public SettingsView(SettingsViewModel viewModel)
     {
         InitializeComponent();
-        DarkSystemFrame.Attach(this);
         _viewModel = viewModel;
         DataContext = viewModel;
         _youTubeRefresh.Tick += (_, _) => { if (YouTubeChatTab.IsSelected) _viewModel.RefreshYouTubeChat(); };
-        Closed += (_, _) => { _youTubeRefresh.Stop(); YouTubeKeyBox.Clear(); };
-        if (openHotkeys) SettingsTabs.SelectedIndex = 5;
+        IsVisibleChanged += (_, _) =>
+        {
+            if (IsVisible && !_disposed)
+            {
+                _viewModel.RefreshYouTubeChat();
+                _youTubeRefresh.Start();
+            }
+            else _youTubeRefresh.Stop();
+        };
         Loaded += async (_, _) =>
         {
-            _youTubeRefresh.Start();
+            if (_initialized || _disposed) return;
+            _initialized = true;
             await RunAsync(_viewModel.RefreshAddonStatusAsync, showDialog: false);
             await RunAsync(_viewModel.RefreshEffectsStatusAsync, showDialog: false);
         };
+    }
+
+    internal void EditPresetHotkey(int presetNumber)
+    {
+        _viewModel.AddActivePresetHotkey(presetNumber);
+        SettingsTabs.SelectedItem = HotkeySettingsTab;
+    }
+
+    private void Surface_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        SetValue(IsCompactNavigationPropertyKey, e.NewSize.Width < 800);
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _youTubeRefresh.Stop();
+        ClientSecretBox.Clear();
+        DonateXTokenBox.Clear();
+        YouTubeKeyBox.Clear();
     }
 
     private void BrowseGame_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFolderDialog { Title = "Выберите папку игры", Multiselect = false };
         if (Directory.Exists(_viewModel.GamePath)) dialog.InitialDirectory = _viewModel.GamePath;
-        if (dialog.ShowDialog(this) == true)
+        if (dialog.ShowDialog(HostWindow) == true)
         {
             _viewModel.GamePath = dialog.FolderName;
             _ = RunAsync(_viewModel.RefreshAddonStatusAsync, showDialog: false);
@@ -50,7 +86,7 @@ public partial class SettingsWindow : Window
     private void BrowseEditor_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Title = "Выберите редактор", Filter = "Программы (*.exe)|*.exe|Все файлы (*.*)|*.*" };
-        if (dialog.ShowDialog(this) == true) _viewModel.EditorPath = dialog.FileName;
+        if (dialog.ShowDialog(HostWindow) == true) _viewModel.EditorPath = dialog.FileName;
     }
 
     private void OpenDataDirectory_Click(object sender, RoutedEventArgs e)
@@ -67,7 +103,7 @@ public partial class SettingsWindow : Window
     {
         var dialog = new OpenFolderDialog { Title = "Выберите корень мода MO2 для эффектов", Multiselect = false };
         if (Directory.Exists(_viewModel.EffectMo2ModPath)) dialog.InitialDirectory = _viewModel.EffectMo2ModPath;
-        if (dialog.ShowDialog(this) == true)
+        if (dialog.ShowDialog(HostWindow) == true)
         {
             _viewModel.EffectMo2ModPath = dialog.FolderName;
             _ = RunAsync(_viewModel.RefreshEffectsStatusAsync, showDialog: false);
@@ -127,11 +163,11 @@ public partial class SettingsWindow : Window
             var result = await _updateChecker.CheckAsync();
             if (!result.IsUpdateAvailable)
             {
-                AppDialogs.Info(this, "Проверка обновлений", $"У вас установлена актуальная версия {result.CurrentVersion}.");
+                AppDialogs.Info(HostWindow, "Проверка обновлений", $"У вас установлена актуальная версия {result.CurrentVersion}.");
                 return;
             }
 
-            if (AppDialogs.Confirm(this, "Доступно обновление",
+            if (AppDialogs.Confirm(HostWindow, "Доступно обновление",
                 $"Доступна новая версия {result.LatestVersion}.\n" +
                 $"Установлена версия {result.CurrentVersion}.\n\n" +
                 "Открыть страницу релиза в браузере?",
@@ -142,7 +178,7 @@ public partial class SettingsWindow : Window
         }
         catch (Exception exception)
         {
-            AppDialogs.Info(this, "Проверка обновлений",
+            AppDialogs.Info(HostWindow, "Проверка обновлений",
                 "Не удалось проверить обновления. Проверьте подключение к интернету.\n\n" + exception.Message);
         }
         finally
@@ -191,8 +227,8 @@ public partial class SettingsWindow : Window
 
     private void AddManualExclusion_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new ManualCatalogExclusionWindow { Owner = this };
-        if (dialog.ShowDialog() != true) return;
+        var dialog = new ManualCatalogExclusionWindow { Owner = HostWindow };
+        if (AppDialogs.ShowModal(dialog) != true) return;
         try
         {
             _viewModel.AddManualCatalogExclusion(
@@ -201,7 +237,7 @@ public partial class SettingsWindow : Window
         catch (Exception exception)
         {
             _viewModel.Status = exception.Message;
-            AppDialogs.Info(this, "Anomaly Donation Bridge", exception.Message);
+            AppDialogs.Info(HostWindow, "Anomaly Donation Bridge", exception.Message);
         }
     }
 
@@ -213,7 +249,7 @@ public partial class SettingsWindow : Window
 
     private async void Forget_Click(object sender, RoutedEventArgs e)
     {
-        if (AppDialogs.Confirm(this, "Забыть подключение", "Удалить токены, Client ID и сохранённый Client Secret?", "Удалить"))
+        if (AppDialogs.Confirm(HostWindow, "Забыть подключение", "Удалить токены, Client ID и сохранённый Client Secret?", "Удалить"))
         {
             await RunAsync(() => _viewModel.DisconnectAsync(true));
             ClientSecretBox.Clear();
@@ -242,37 +278,42 @@ public partial class SettingsWindow : Window
 
     private async void ForgetYouTube_Click(object sender, RoutedEventArgs e)
     {
-        if (!AppDialogs.Confirm(this, "Удалить ключ YouTube", "Отключить чат YouTube и удалить сохранённый ключ API?", "Удалить")) return;
+        if (!AppDialogs.Confirm(HostWindow, "Удалить ключ YouTube", "Отключить чат YouTube и удалить сохранённый ключ API?", "Удалить")) return;
         if (await RunAsync(() => _viewModel.DisconnectYouTubeChatAsync(forgetKey: true))) YouTubeKeyBox.Clear();
     }
 
     private async void DisconnectDonateX_Click(object sender, RoutedEventArgs e)
     {
-        if (!AppDialogs.Confirm(this, "Отключить DonateX",
+        if (!AppDialogs.Confirm(HostWindow, "Отключить DonateX",
                 "Отключить DonateX и удалить сохранённый внешний токен?",
                 "Отключить")) return;
         await RunAsync(_viewModel.DisconnectDonateXAsync);
         DonateXTokenBox.Clear();
     }
 
-    private async void Save_Click(object sender, RoutedEventArgs e)
+    private async void Close_Click(object sender, RoutedEventArgs e)
     {
-        if (await RunAsync(_viewModel.SaveAsync)) DialogResult = true;
+        await PendingApply;
+        if (!_disposed) CloseRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    private async void InstallAddon_Click(object sender, RoutedEventArgs e)
-        => await RunAsync(_viewModel.InstallBridgeAsync);
+    private async void Save_Click(object sender, RoutedEventArgs e) => await ApplyAsync(_viewModel.SaveAsync);
+
+    private async void InstallAddon_Click(object sender, RoutedEventArgs e) => await ApplyAsync(_viewModel.InstallBridgeAsync);
+
+    private Task ApplyAsync(Func<Task> operation) =>
+        _pendingApply is { IsCompleted: false } ? _pendingApply : _pendingApply = RunAsync(operation);
 
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new SaveFileDialog { Title = "Экспорт правил", Filter = "JSON (*.json)|*.json", FileName = "AnomalyDonationBridge.rules.json" };
-        if (dialog.ShowDialog(this) == true) await RunAsync(() => _viewModel.ExportAsync(dialog.FileName));
+        if (dialog.ShowDialog(HostWindow) == true) await RunAsync(() => _viewModel.ExportAsync(dialog.FileName));
     }
 
     private async void Import_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Title = "Импорт правил", Filter = "JSON (*.json)|*.json" };
-        if (dialog.ShowDialog(this) == true) await RunAsync(() => _viewModel.ImportAsync(dialog.FileName));
+        if (dialog.ShowDialog(HostWindow) == true) await ApplyAsync(() => _viewModel.ImportAsync(dialog.FileName));
     }
 
     private async Task<bool> RunAsync(Func<Task> operation, bool showDialog = true)
@@ -281,9 +322,9 @@ public partial class SettingsWindow : Window
         catch (Exception exception)
         {
             _viewModel.Status = exception.Message;
-            if (showDialog)
+            if (showDialog && !_disposed)
             {
-                AppDialogs.Info(this, "Anomaly Donation Bridge", exception.Message);
+                AppDialogs.Info(HostWindow, "Anomaly Donation Bridge", exception.Message);
             }
             return false;
         }

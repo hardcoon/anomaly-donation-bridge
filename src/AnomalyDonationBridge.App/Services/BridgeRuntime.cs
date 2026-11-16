@@ -1529,7 +1529,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
     }
 
     public Task<QueueTimingSnapshot> GetQueueTimingAsync(CancellationToken cancellationToken = default) =>
-        _dispatcher.GetTimingAsync(_gameServer.IsConnected, _gameServer.IsGameReady, cancellationToken);
+        _dispatcher.GetTimingAsync(_gameServer, cancellationToken);
 
     private EffectExecutionOptions CurrentEffectExecutionOptions() => new()
     {

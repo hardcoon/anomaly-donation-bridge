@@ -9,6 +9,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         if (CrashWatchdog.TryRun(args, out var result)) return result;
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
         return RunApplication();
     }
 

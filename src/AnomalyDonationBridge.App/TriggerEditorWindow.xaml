@@ -1,6 +1,7 @@
 <Window x:Class="AnomalyDonationBridge.App.TriggerEditorWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:AnomalyDonationBridge.App"
         Title="Условие доната"
         Width="570" MinWidth="520" MinHeight="470" MaxHeight="760"
         SizeToContent="Height"
@@ -104,7 +105,7 @@
                                 MinHeight="40" Padding="0" IsEnabled="{Binding CanConfigureCurrencies}"
                                 ToolTip="Выбрать валюты для автоматического расчёта"
                                 AutomationProperties.Name="Валюты для автоматического расчёта">
-                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="17" />
+                            <local:VectorIcon Glyph="&#xE713;" Width="17" Height="17" />
                         </Button>
                     </Grid>
                     <TextBlock Text="Берётся актуальный официальный курс Банка России. При сохранении старые цены этого варианта будут удалены и рассчитаны заново."

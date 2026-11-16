@@ -490,14 +490,15 @@ internal static class PdaUiChecks
 
             CheckPriceEditor(outputDirectory);
 
-            var settingsWindow = new SettingsWindow(new SettingsViewModel(runtime));
+            using var settingsWindow = new SettingsView(new SettingsViewModel(runtime));
             var settingsRoot = (FrameworkElement)settingsWindow.Content;
             var settingsTabControl = Find<TabControl>(settingsRoot).First();
             var topSettingsTabs = settingsTabControl.Items.Cast<TabItem>().ToList();
             settingsTabControl.SelectedIndex = 0;
             Layout(settingsRoot, 940, 650);
-            Check(topSettingsTabs.Select(tab => Math.Round(tab.TranslatePoint(new Point(), settingsRoot).Y, 1)).Distinct().Count() == 1,
-                "The default settings width still wraps the final top-level tab onto a second row.");
+            Check(topSettingsTabs.Select(tab => Math.Round(tab.TranslatePoint(new Point(), settingsRoot).Y, 1)).Distinct().Count() == topSettingsTabs.Count &&
+                topSettingsTabs.Select(tab => Math.Round(tab.TranslatePoint(new Point(), settingsRoot).X, 1)).Distinct().Count() == 1,
+                "The top-level settings tabs are not a single vertical list.");
             CheckHorizontalBounds(settingsRoot);
             Save(settingsRoot, Path.Combine(outputDirectory, "pda-unified-install-settings.png"));
             settingsTabControl.SelectedIndex = 1;
@@ -509,7 +510,7 @@ internal static class PdaUiChecks
             var integrationTabControl = Find<TabControl>(settingsRoot)
                 .Single(control => !ReferenceEquals(control, settingsTabControl));
             Check(integrationTabControl.Items.Cast<TabItem>().Select(tab => tab.Header as string)
-                    .SequenceEqual(["DonationAlerts", "DonateX"]),
+                    .SequenceEqual(["DonationAlerts", "DonateX", "Чат YouTube"]),
                 "The integration tabs are missing DonationAlerts or DonateX.");
             integrationTabControl.SelectedIndex = 1;
             Layout(settingsRoot, 940, 650);
@@ -529,7 +530,7 @@ internal static class PdaUiChecks
             Layout(settingsRoot, 940, 650);
             var settingsTabs = topSettingsTabs;
             Check(settingsTabs.Select(tab => tab.Header as string).SequenceEqual(
-                    ["Игра и редактор", "Интеграция", "Исключения", "Очередь", "Общие настройки", "Горячие клавиши", "О программе"]) &&
+                    ["Игра и редактор", "Интеграция", "Исключения", "Очередь", "Общие настройки", "Горячие клавиши", "Безопасная зона", "О программе"]) &&
                 Find<TextBlock>(settingsRoot).Any(text => text.Text == "Скрывать недоступные секции") &&
                 Find<TextBlock>(settingsRoot).Any(text => text.Text == "Имя анонимного донатчика") &&
                 Find<TextBlock>(settingsRoot).Any(text => text.Text == "Работа в системном трее") &&
@@ -544,7 +545,7 @@ internal static class PdaUiChecks
                     Find<TextBlock>(settingsRoot).Any(text => text.Text == "Повторить последний донат"),
                 "The hotkey settings tab is incomplete.");
             Save(settingsRoot, Path.Combine(outputDirectory, "pda-hotkey-settings.png"));
-            settingsTabControl.SelectedIndex = 6;
+            settingsTabControl.SelectedIndex = 7;
             Layout(settingsRoot, 940, 650);
             Check(Find<TextBlock>(settingsRoot).Any(text => text.Text == "Поддержать автора") &&
                     Find<TextBlock>(settingsRoot).Any(text => text.Text == "2200 3961 2613 9183") &&
@@ -668,11 +669,11 @@ internal static class PdaUiChecks
 
     private static void CheckHorizontalBounds(FrameworkElement root)
     {
-        foreach (var button in Find<Button>(root).Where(button => button.ActualWidth > 0 && button.Visibility == Visibility.Visible))
+        foreach (var button in Find<Button>(root).Where(button => button.ActualWidth > 0 && IsEffectivelyVisible(button)))
         {
             var point = button.TranslatePoint(new Point(), root);
             Check(point.X >= -1 && point.X + button.ActualWidth <= root.ActualWidth + 1,
-                $"Button '{button.Content}' overflows horizontally: {point.X} + {button.ActualWidth} / {root.ActualWidth}.");
+                $"Button '{button.Content}' ({button.Name} / {System.Windows.Automation.AutomationProperties.GetName(button)}) overflows horizontally: {point.X} + {button.ActualWidth} / {root.ActualWidth}.");
         }
     }
 

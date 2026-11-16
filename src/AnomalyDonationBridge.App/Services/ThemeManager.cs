@@ -9,6 +9,7 @@ internal static class ThemeManager
     [
         new("BackgroundBrush", "#1C1E1D", "#F2F1EC"),
         new("SurfaceBrush", "#222523", "#FAFAF6"),
+        new("SidebarBrush", "#222523", "#EAECE5"),
         new("PanelBrush", "#2A2D2B", "#EAECE5"),
         new("PanelAltBrush", "#343931", "#E1E5DB"),
         new("InputBrush", "#1C1E1D", "#FFFFFF"),
@@ -70,8 +71,7 @@ internal static class ThemeManager
         new("WarningTextBrush", "#E0CAA0", "#735620")
     ];
 
-    // Yellow is the existing palette, byte-for-byte. New surfaces receive
-    // only a 25% tint, matching the approved muted preview.
+    // Keep the surface tints subtle while the controls use the selected accent.
     private static readonly IReadOnlyDictionary<string, ThemeTint[]> Tints =
         new Dictionary<string, ThemeTint[]>(StringComparer.Ordinal)
         {
@@ -148,6 +148,7 @@ internal static class ThemeManager
         {
             "BackgroundBrush" or "InputBrush" or "ScrollTrackBrush" or "ListWellBrush" => tint.Background,
             "SurfaceBrush" or "StatusCardBrush" or "ActionExpanderBrush" or "ActionExpanderOpenBrush" => tint.Surface,
+            "SidebarBrush" => light ? tint.Panel : tint.Surface,
             "PanelBrush" or "ComboSideBrush" or "ActionRowEvenBrush" or "ActionRowOddBrush" => tint.Panel,
             "PanelAltBrush" or "CountBadgeBrush" or "ControlHoverBrush" or "ComboItemHoverBrush" or
                 "TabHoverBrush" or "DataGridHoverBrush" or "ActionExpanderHoverBrush" => tint.Alternate,

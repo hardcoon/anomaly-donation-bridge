@@ -84,7 +84,6 @@ public static class SelfTestRunner
     public static async Task<int> RunUiSmokeAsync()
     {
         MainWindow? mainWindow = null;
-        SettingsWindow? settingsWindow = null;
         TriggerEditorWindow? triggerEditorWindow = null;
         string? directory = null;
         try
@@ -168,21 +167,17 @@ public static class SelfTestRunner
                 await runtime.DeleteActionInstanceAsync(firstAdded.Id);
                 await runtime.DeleteActionInstanceAsync(secondAdded.Id);
 
-                settingsWindow = new SettingsWindow(new SettingsViewModel(runtime))
-                {
-                    Owner = mainWindow,
-                    ShowActivated = false,
-                    WindowStartupLocation = WindowStartupLocation.Manual,
-                    Left = -32_000,
-                    Top = -32_000,
-                    Opacity = 0
-                };
-                settingsWindow.Show();
-                settingsWindow.UpdateLayout();
-                ValidateNativeSystemFrame(settingsWindow);
+                var windowCount = Application.Current.Windows.Count;
+                await viewModel.OpenSettingsAsync();
+                mainWindow.UpdateLayout();
                 await Dispatcher.Yield(DispatcherPriority.Loaded);
-                await Dispatcher.Yield(DispatcherPriority.Render);
-                ValidateWritableTargetBindings(settingsWindow);
+                var settingsView = EnumerateVisualTree(mainWindow).OfType<SettingsView>().Single();
+                ValidateWritableTargetBindings(settingsView);
+                viewModel.SelectedSectionIndex = MainViewModel.VotingSectionIndex;
+                mainWindow.UpdateLayout();
+                if (!EnumerateVisualTree(mainWindow).OfType<VotingView>().Any() ||
+                    Application.Current.Windows.Count != windowCount)
+                    throw new InvalidOperationException("Voting and Settings must be hosted in the main window.");
 
                 triggerEditorWindow = new TriggerEditorWindow(
                     new TriggerEditorViewModel(null, runtime.Settings.ObservedCurrencies))
@@ -204,7 +199,6 @@ public static class SelfTestRunner
 
                 await viewModel.SetLightThemeAsync(true);
                 mainWindow.UpdateLayout();
-                settingsWindow.UpdateLayout();
                 triggerEditorWindow.UpdateLayout();
                 await Dispatcher.Yield(DispatcherPriority.Render);
                 ValidateThemedControlTemplates(expectLight: true);
@@ -212,7 +206,6 @@ public static class SelfTestRunner
 
                 await viewModel.SetLightThemeAsync(false);
                 mainWindow.UpdateLayout();
-                settingsWindow.UpdateLayout();
                 triggerEditorWindow.UpdateLayout();
                 await Dispatcher.Yield(DispatcherPriority.Render);
                 ValidateThemedControlTemplates(expectLight: false);
@@ -226,7 +219,6 @@ public static class SelfTestRunner
             finally
             {
                 triggerEditorWindow?.Close();
-                settingsWindow?.Close();
                 mainWindow?.Close();
                 if (directory is not null && Directory.Exists(directory)) Directory.Delete(directory, true);
             }
@@ -414,15 +406,17 @@ public static class SelfTestRunner
         mainWindow.UpdateLayout();
         var tabs = EnumerateVisualTree(mainWindow).OfType<TabControl>().FirstOrDefault()
             ?? throw new InvalidOperationException("The main tab control is missing.");
-        if (tabs.Items.Count != 4)
+        if (tabs.Items.Count != 6)
         {
-            throw new InvalidOperationException("The main window must expose Active, User Presets, Presets and History tabs.");
+            throw new InvalidOperationException("The main window must expose the four template/history pages, Settings, and Voting.");
         }
         for (var index = 0; index < tabs.Items.Count; index++)
         {
             tabs.SelectedIndex = index;
             mainWindow.UpdateLayout();
         }
+        tabs.SelectedIndex = 3;
+        mainWindow.UpdateLayout();
         if (!EnumerateVisualTree(mainWindow).OfType<DataGrid>().Any())
         {
             throw new InvalidOperationException("The History tab has no event grid.");

@@ -34,13 +34,13 @@ public sealed class VotingOptionRow : ObservableObject
     public void Update(decimal amount, decimal total, string currency)
     {
         Model.Amount = amount;
-        ContributionText = VotingWindow.FormatMoney(amount, currency);
+        ContributionText = VotingView.FormatMoney(amount, currency);
         var percentage = Enabled && total > 0 ? Math.Clamp((double)(amount / total * 100), 0, 100) : 0;
         if (SetProperty(ref _percentage, percentage, nameof(Percentage))) RaisePropertyChanged(nameof(ShareText));
     }
 }
 
-public sealed partial class VotingWindow : Window
+public sealed partial class VotingView : UserControl, IDisposable
 {
     private readonly BridgeRuntime _runtime;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -79,7 +79,7 @@ public sealed partial class VotingWindow : Window
     private readonly Button _test = new() { Content = "Внести", Margin = new Thickness(8, 0, 0, 0) };
     private readonly Button _reset = new() { Content = "Сбросить", Height = 34, Margin = new Thickness(7, 0, 0, 0) };
     private readonly Button _rename = new() { Content = "✎" };
-    private readonly Button _delete = new() { Content = "\uE74D", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 16,
+    private readonly Button _delete = new() { Content = "\uE74D", FontSize = 16,
         Width = 34, Height = 34, Padding = new Thickness(0), Margin = new Thickness(7, 0, 0, 0), ToolTip = "Удалить это голосование" };
     private readonly Button _obs = new() { Content = "Вывести окно OBS", Height = 36 };
     private readonly Button _panelToggle = new() { Content = "Настройки", Height = 34, Margin = new Thickness(7, 0, 0, 0) };
@@ -98,7 +98,8 @@ public sealed partial class VotingWindow : Window
     private readonly TextBlock _playerState = new() { FontSize = 11 };
     private readonly TextBlock _playerName = new() { FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock _playerEmpty = new() { Text = "Нет активного голосования", TextTrimming = TextTrimming.CharacterEllipsis };
-    private readonly Button _playerToggle = new() { Width = 36, Height = 36, Padding = new Thickness(0), FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 15 };
+    private readonly Button _playerToggle = new() { Width = 36, Height = 36, Padding = new Thickness(0), FontSize = 15 };
+    private readonly Button _playerNext = new() { Width = 36, Height = 36, Padding = new Thickness(0) };
     private FrameworkElement _playerProgress = null!;
     private readonly Border _player = new();
     private readonly StackPanel _playerActions = new() { Orientation = Orientation.Horizontal };
@@ -131,10 +132,15 @@ public sealed partial class VotingWindow : Window
     internal const string ResetConfirmation = "Сбросить накопленные суммы этого голосования и отменить ожидающий эффект победителя?\n\nКоманды, выбранные шаблоны, настройки программы и оставшееся время не изменятся. Уже отправленные эффекты не отменяются.";
     internal static string DeleteConfirmation(VotingRound round) => "Удалить голосование «" + round.Title + "»?\n\nЕго команды, настройки и накопленные суммы будут удалены. Ожидающий эффект победителя будет отменён. Другие голосования и настройки программы не изменятся. Уже отправленные эффекты не отменяются.";
     private VotingCondition _conditionValue;
-    private bool _dirty, _loading, _busy, _closing;
+    private bool _dirty, _loading, _busy;
+    private Window? HostWindow => Window.GetWindow(this);
     internal ObservableCollection<VotingOptionRow> Rows => _rows;
+    internal Border Player => _player;
 
-    public VotingWindow(BridgeRuntime runtime, VotingObsController obs)
+    public VotingView(BridgeRuntime runtime, VotingObsController obs)
+        : this(runtime, obs, hostPlayerSeparately: false) { }
+
+    internal VotingView(BridgeRuntime runtime, VotingObsController obs, bool hostPlayerSeparately)
     {
         _runtime = runtime;
         _settingsCollapsed = runtime.UiPreferences.VotingSettingsPanelCollapsed;
@@ -145,13 +151,10 @@ public sealed partial class VotingWindow : Window
             ?? rounds.FirstOrDefault()?.CollectionId ?? string.Empty;
         _generalSelected = _selectedId.Length == 0;
         InitializeComponent();
-        Title = "Голосования — Anomaly Donation Bridge"; Width = 1130; Height = 745; MinWidth = 1030; MinHeight = 640;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner; FontFamily = new FontFamily("Segoe UI"); FontSize = 13;
+        FontFamily = new FontFamily("Segoe UI"); FontSize = 13;
         UseLayoutRounding = true;
-        Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/AnomalyDonationBridge;component/Assets/AnomalyDonationBridge.ico"));
         SetResourceReference(BackgroundProperty, "BackgroundBrush"); SetResourceReference(ForegroundProperty, "TextBrush");
-        DarkSystemFrame.Attach(this);
-        Content = Build();
+        Content = Build(hostPlayerSeparately);
         foreach (var box in new[] { _target, _minutes, _youTubeWeight }) box.TextChanged += (_, _) => Dirty();
         foreach (var check in new[] { _donationVotes, _youTubeVotes, _youTubeChange })
         { check.Checked += (_, _) => Dirty(); check.Unchecked += (_, _) => Dirty(); }
@@ -200,6 +203,11 @@ public sealed partial class VotingWindow : Window
         {
             if (!_generalSelected) await RunAsync(() => ChangeCollectionActivityAsync(_selectedId, activate: true));
         };
+        _playerNext.Click += async (_, _) =>
+        {
+            if (_playerNext.CommandParameter is string id)
+                await RunAsync(() => ChangeCollectionActivityAsync(id, activate: true, confirmSwitch: false));
+        };
         _playerTitle.Click += async (_, _) =>
         {
             if (_playerCollectionId is { } id && (_generalSelected || _selectedId != id))
@@ -228,13 +236,23 @@ public sealed partial class VotingWindow : Window
         _runtime.SettingsChanged += ProfileChanged;
         _timer.Tick += (_, _) => UpdateDisplay();
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape && _dragCard is not null) { CancelSequenceDrag(); e.Handled = true; } };
-        Closed += (_, _) =>
+        IsVisibleChanged += (_, _) =>
         {
-            _closed = true; CancelSequenceDrag(); _timer.Stop(); _autosaveTimer.Stop(); _runtime.Voting.Changed -= VotingChanged;
-            _runtime.SettingsChanged -= ProfileChanged;
+            if (IsVisible && !_closed) { UpdateDisplay(); _timer.Start(); }
+            else { _timer.Stop(); CancelSequenceDrag(); }
         };
-        Closing += ClosingAsync;
-        LoadDraft(); _timer.Start();
+        LoadDraft();
+    }
+
+    public void Dispose()
+    {
+        if (_closed) return;
+        _closed = true;
+        CancelSequenceDrag();
+        _timer.Stop();
+        _autosaveTimer.Stop();
+        _runtime.Voting.Changed -= VotingChanged;
+        _runtime.SettingsChanged -= ProfileChanged;
     }
 
     private static Border Card(UIElement child, double padding)
@@ -252,6 +270,8 @@ public sealed partial class VotingWindow : Window
         columns.ColumnDefinitions.Add(new ColumnDefinition());
         columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
         columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.1, GridUnitType.Star) });
+        columns.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        columns.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var panel = new StackPanel(); columns.Children.Add(panel);
         panel.Children.Add(_automaticDraw);
         panel.Children.Add(_winnerAuto);
@@ -270,6 +290,15 @@ public sealed partial class VotingWindow : Window
         _obs.Margin = new Thickness(0, 16, 0, 0); _obs.HorizontalAlignment = HorizontalAlignment.Left; hud.Children.Add(_obs);
         var hudCard = Card(hud, 16); hudCard.Tag = "VotingGameHudSettings";
         hudCard.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(hudCard, 2); columns.Children.Add(hudCard);
+        columns.SizeChanged += (_, e) =>
+        {
+            var stacked = e.NewSize.Width < 570;
+            columns.ColumnDefinitions[1].Width = new GridLength(stacked ? 0 : 24);
+            columns.ColumnDefinitions[2].Width = stacked ? new GridLength(0) : new GridLength(1.1, GridUnitType.Star);
+            Grid.SetColumn(hudCard, stacked ? 0 : 2);
+            Grid.SetRow(hudCard, stacked ? 1 : 0);
+            hudCard.Margin = stacked ? new Thickness(0, 12, 0, 0) : new Thickness(0);
+        };
         panel.Children.Add(Heading("Порядок запуска голосований")); _order.Margin = new Thickness(0, 10, 0, 16); panel.Children.Add(_order);
         panel.Children.Add(Heading("Голосования в автоматической очереди"));
         panel.Children.Add(new TextBlock { Text = "Галочки выбирают участников очереди, но не включают их. Одновременно работает только одно голосование. Для изменения порядка потяните за значок ⠿ или название строки.",
@@ -629,7 +658,7 @@ public sealed partial class VotingWindow : Window
         _dirty = false; _loading = false; SetAutosaveStatus("Изменения сохраняются автоматически."); UpdateDisplay();
     }
 
-    internal Task FlushPendingChangesAsync() => SaveSettingsAsync();
+    internal Task FlushPendingChangesAsync() => _dirty || _autosaving ? SaveSettingsAsync() : Task.CompletedTask;
 
     private async Task SaveSettingsAsync(bool flush = true)
     {
@@ -676,15 +705,15 @@ public sealed partial class VotingWindow : Window
     {
         if (IsEditingCollection(collectionId)) await SaveSettingsAsync();
         if (FindCollection(collectionId) is not { } round) return;
-        var dialog = new PresetNameWindow("Заголовок голосования", round.Title) { Owner = this };
-        if (dialog.ShowDialog() == true && round.ProfileId == _runtime.Settings.ActiveProfileId)
+        var dialog = new PresetNameWindow("Заголовок голосования", round.Title) { Owner = HostWindow };
+        if (AppDialogs.ShowModal(dialog) == true && round.ProfileId == _runtime.Settings.ActiveProfileId)
             await _runtime.Voting.RenameAsync(dialog.PresetName, collectionId);
     }
 
     private async Task ConfirmResetAsync(string collectionId)
     {
         if (FindCollection(collectionId) is { } round &&
-            VotingConfirmationWindow.Confirm(this, "Сбросить прогресс", $"«{round.Title}»\n\n{ResetConfirmation}", "Сбросить"))
+            VotingConfirmationWindow.Confirm(HostWindow, "Сбросить прогресс", $"«{round.Title}»\n\n{ResetConfirmation}", "Сбросить"))
             await ResetCollectionAsync(collectionId);
     }
 
@@ -701,7 +730,7 @@ public sealed partial class VotingWindow : Window
     {
         await SaveSettingsAsync();
         var round = ProfileCollections.FirstOrDefault(item => item.IsActive) ?? SelectedRound;
-        var editor = new VotingHudPositionWindow(round, _runtime.Voting.Automation) { Owner = this };
+        var editor = new VotingHudPositionWindow(round, _runtime.Voting.Automation) { Owner = HostWindow };
         if (editor.ShowDialog() != true) return;
         await _runtime.Voting.SaveHudPositionAsync(editor.PositionX, editor.PositionY);
         await _runtime.AdvanceVotingHudAsync();
@@ -711,7 +740,7 @@ public sealed partial class VotingWindow : Window
     private async Task ConfirmDeleteAsync(string collectionId)
     {
         if (FindCollection(collectionId) is { } round &&
-            VotingConfirmationWindow.Confirm(this, "Удалить голосование", DeleteConfirmation(round), "Удалить"))
+            VotingConfirmationWindow.Confirm(HostWindow, "Удалить голосование", DeleteConfirmation(round), "Удалить"))
             await DeleteCollectionAsync(collectionId);
     }
 
@@ -783,7 +812,7 @@ public sealed partial class VotingWindow : Window
     private bool CanChangeActivity(VotingRound round) => !_runtime.VotingIsSpinning ||
         round is { IsActive: true, Phase: VotingPhase.Collecting };
 
-    private async Task ChangeCollectionActivityAsync(string collectionId, bool activate)
+    private async Task ChangeCollectionActivityAsync(string collectionId, bool activate, bool confirmSwitch = true)
     {
         if (activate && IsEditingCollection(collectionId)) await SaveSettingsAsync();
         if (FindCollection(collectionId) is not { } target || target.ProfileId != _runtime.Settings.ActiveProfileId ||
@@ -792,9 +821,9 @@ public sealed partial class VotingWindow : Window
         if (activate)
         {
             if (target.Phase is VotingPhase.Draft or VotingPhase.Paused) VotingRules.Validate(target);
-            if (ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
+            if (confirmSwitch && ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
                     round is { IsActive: true, Phase: VotingPhase.Collecting }) is { } active &&
-                !VotingConfirmationWindow.Confirm(this, "Переключить голосование?",
+                !VotingConfirmationWindow.Confirm(HostWindow, "Переключить голосование?",
                     $"«{active.Title}» встанет на паузу. Прогресс и оставшееся время сохранятся.", ActivityCaption(target)))
                 return;
             if (target.ProfileId != _runtime.Settings.ActiveProfileId || !CanChangeActivity(target)) return;
@@ -816,9 +845,10 @@ public sealed partial class VotingWindow : Window
 
     private void ApplyPanelLayout()
     {
-        MinWidth = !_generalSelected && _settingsCollapsed ? 780 : 1030;
         _settingsCard.Visibility = _settingsCollapsed ? Visibility.Collapsed : Visibility.Visible;
-        _settingsColumn.Width = new GridLength(_settingsCollapsed ? 0 : 266);
+        _commandsPanel.Visibility = _narrow && !_settingsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        _settingsColumn.Width = new GridLength(_settingsCollapsed || _narrow ? 0 : 266);
+        Grid.SetColumn(_settingsCard, _narrow ? 0 : 1);
         _panelToggle.Tag = _settingsCollapsed ? "\uE70D" : "\uE70E";
         if (_settingsCollapsed)
         {
@@ -842,6 +872,11 @@ public sealed partial class VotingWindow : Window
             _pausedPlayerId = null;
         var round = active ?? rounds.FirstOrDefault(item => item.CollectionId == _pausedPlayerId);
         _playerCollectionId = round?.CollectionId;
+        var next = FindNextCollection(rounds, _playerCollectionId ?? _selectedId);
+        _playerNext.CommandParameter = next?.CollectionId;
+        _playerNext.IsEnabled = canUse && !_runtime.VotingIsSpinning && next is not null;
+        _playerNext.ToolTip = next is null ? "Нет другого готового голосования" : $"Следующее голосование · {next.Title}";
+
         var hasRound = round is not null ? Visibility.Visible : Visibility.Collapsed;
         _playerTitle.Visibility = _playerProgress.Visibility = hasRound;
         _playerToggle.Visibility = round is null || round.Phase == VotingPhase.Paused && IsEditingCollection(round.CollectionId)
@@ -881,6 +916,15 @@ public sealed partial class VotingWindow : Window
         System.Windows.Automation.AutomationProperties.SetName(_playerToggle, (string)_playerToggle.ToolTip);
         _playerToggle.IsEnabled = canUse && CanChangeActivity(round);
         UpdateSpinButton(_spin, round, pending.GetValueOrDefault(round.CollectionId), canUse && round.IsActive);
+    }
+
+    private static VotingRound? FindNextCollection(IReadOnlyList<VotingRound> rounds, string currentId)
+    {
+        var afterCurrent = rounds.SkipWhile(round => round.CollectionId != currentId).Skip(1);
+        var beforeCurrent = rounds.TakeWhile(round => round.CollectionId != currentId);
+        return afterCurrent.Concat(beforeCurrent).FirstOrDefault(round =>
+            !round.IsActive && round.Phase is (VotingPhase.Draft or VotingPhase.Paused or VotingPhase.Ready) &&
+            VotingRules.CanStart(round));
     }
 
     private void UpdateSpinButton(Button button, VotingRound round, VotingRound? pending, bool canUse)
@@ -981,13 +1025,6 @@ public sealed partial class VotingWindow : Window
         try { await operation(); }
         catch (Exception error) { _message.Text = error.Message; }
         finally { _busy = false; UpdateDisplay(); }
-    }
-
-    private async void ClosingAsync(object? sender, CancelEventArgs args)
-    {
-        if (_closing || !_dirty) return; args.Cancel = true;
-        try { await SaveSettingsAsync(); _closing = true; Close(); }
-        catch (Exception error) { _message.Text = error.Message; }
     }
 
     private static Button MakeButton(string text, RoutedEventHandler click)

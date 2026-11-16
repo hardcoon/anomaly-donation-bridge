@@ -55,7 +55,7 @@ internal static class DialogUiChecks
                 }
                 var runtime = new BridgeRuntime(new AppPaths(Path.Combine(output, "isolated-settings-unused")));
                 var viewModel = new SettingsViewModel(runtime);
-                var settings = new SettingsWindow(viewModel);
+                var settings = new SettingsView(viewModel);
                 var settingsRoot = (FrameworkElement)settings.Content;
                 var tabs = Find<TabControl>(settingsRoot).Single();
                 tabs.SelectedItem = tabs.Items.OfType<TabItem>().Single(tab => Equals(tab.Header, "Общие настройки"));
@@ -90,7 +90,7 @@ internal static class DialogUiChecks
                     "Save retention card rendered blank");
                 var cardEncoder = new PngBitmapEncoder(); cardEncoder.Frames.Add(BitmapFrame.Create(cardBitmap));
                 using (var stream = File.Create(Path.Combine(output, $"settings-save-retention-{(light ? "light" : "dark")}.png"))) cardEncoder.Save(stream);
-                settings.Close();
+                settings.Dispose();
             }
             Console.WriteLine("PASS themed silent dialogs and save-retention card: both themes, default 50, editable binding, no live settings mutation, nonblank render, safe cancel default and bounded long messages.");
             return 0;

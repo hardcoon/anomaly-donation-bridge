@@ -1296,9 +1296,9 @@ internal static class Program
                 element.Attribute("Content")?.Value == "Обновить события" ||
                 element.Attribute("Content")?.Value.Contains("RefreshEventsButtonText", StringComparison.Ordinal) == true),
             "The history result-recovery button is missing.");
-        Assert(attributeValues.Any(value => value.Contains("QueueStatusText", StringComparison.Ordinal)) &&
+        Assert(attributeValues.Contains("{StaticResource QueueStatusTemplate}") &&
             attributeValues.Any(value => value.Contains("ClearQueueCommand", StringComparison.Ordinal)),
-            "The history header lost the live queue countdown or its clear-queue control.");
+            "The main sections lost the shared queue strip or History lost its clear-queue control.");
         var historyButtons = window.Descendants()
             .Where(element => element.Name.LocalName == "Button")
             .Select(element => new
@@ -1375,13 +1375,12 @@ internal static class Program
             projectRoot,
             "src",
             "AnomalyDonationBridge.App",
-            "SettingsWindow.xaml"));
-        Assert(settingsWindow.Root?.Attribute("Width")?.Value == "1120" &&
-            settingsWindow.Root?.Attribute("MinWidth")?.Value == "900",
-            "The default settings width can wrap the final top-level tab onto a second row.");
+            "SettingsView.xaml"));
+        Assert(settingsWindow.Root?.Name == presentation + "UserControl", "Settings must be an embeddable view.");
         var settingsButtons = settingsWindow.Descendants(presentation + "Button").ToList();
         var settingsTabsRoot = settingsWindow.Descendants(presentation + "TabControl")
             .Single(element => element.Attribute(mainX + "Name")?.Value == "SettingsTabs");
+        Assert(settingsTabsRoot.Attribute("TabStripPlacement")?.Value == "Left", "Settings sections must use left-side navigation.");
         var settingsTabs = settingsTabsRoot.Elements(presentation + "TabItem").ToList();
         var safeZoneTab = settingsTabs.Single(element => element.Attribute("Header")?.Value == "Безопасная зона");
         Assert(safeZoneTab.Attribute("VerticalContentAlignment")?.Value == "Stretch" &&
@@ -1504,8 +1503,7 @@ internal static class Program
             .SingleOrDefault(element => element.Attribute("Click")?.Value == "ThemePicker_Click");
         var profileButton = window.Descendants(presentation + "Button")
             .SingleOrDefault(element => element.Attribute("Content")?.Value == "Профили");
-        var settingsButton = window.Descendants(presentation + "Button")
-            .SingleOrDefault(element => element.Attribute("Content")?.Value == "Настройки");
+
         Assert(themeButton is not null &&
             themeButton.Attribute("Content")?.Value == "Тема" &&
             window.Descendants(presentation + "Popup").Any(popup =>
@@ -1518,11 +1516,19 @@ internal static class Program
                 button.Attribute("GroupName")?.Value == "ApplicationThemeBackground")
                 .Select(button => button.Attribute("Tag")?.Value).Order().SequenceEqual(new[] { "black", "white" }),
             "Theme must be a separate button and dismissible popup with four colors and independent black/white backgrounds.");
-        Assert(profileButton is not null && settingsButton is not null &&
-            ReferenceEquals(profileButton.Parent, settingsButton.Parent) &&
-            profileButton.ElementsBeforeSelf().Count() + 1 == settingsButton.ElementsBeforeSelf().Count() &&
+
+        Assert(profileButton is not null && ReferenceEquals(profileButton.Parent, themeButton?.Parent) &&
             profileButton.Attribute("Click")?.Value == "Profiles_Click",
-            "The Profiles button is missing or is not immediately left of Settings.");
+            "Profiles must remain in the header beside the theme button.");
+        var mainTabs = window.Descendants(presentation + "TabControl")
+            .Single(element => element.Attribute(mainX + "Name")?.Value == "MainSections");
+        var topLevelTabs = mainTabs.Elements(presentation + "TabItem").ToArray();
+        Assert(topLevelTabs.Length == 6 &&
+            topLevelTabs[MainViewModel.SettingsSectionIndex].Descendants(presentation + "ContentControl")
+                .Any(element => element.Attribute(mainX + "Name")?.Value == "WideSettingsHost") &&
+            topLevelTabs[MainViewModel.VotingSectionIndex].Descendants(presentation + "ContentControl")
+                .Any(element => element.Attribute(mainX + "Name")?.Value == "WideVotingHost"),
+            "Voting and Settings must be tabs of the main window.");
 
         var profilesWindow = XDocument.Load(Path.Combine(
             projectRoot,
@@ -1823,9 +1829,25 @@ internal static class Program
                     "A theme changed semantic success/error/warning colors.");
                 accentValues.Add((Color)application.Resources["AccentColor"]);
                 var background = (Color)application.Resources["BackgroundColor"];
-                Assert(Math.Max(background.R, Math.Max(background.G, background.B)) -
-                    Math.Min(background.R, Math.Min(background.G, background.B)) <= 8,
-                    "Theme background is not muted.");
+                var expectedBackground = (lightMode, color) switch
+                {
+                    (true, "red") => "#FFF2F0ED", (true, "green") => "#FFF1F1EC",
+                    (true, "blue") => "#FFF1F1EE", (true, _) => "#FFF2F1EC",
+                    (false, "red") => "#FF1E1D1D", (false, "green") => "#FF1B1F1D",
+                    (false, "blue") => "#FF1B1E21", _ => "#FF1C1E1D"
+                };
+                Assert(background.ToString() == expectedBackground, "The 1.4.3 window background was not restored for " + color);
+                if (lightMode) continue;
+                var (card, status) = color switch
+                {
+                    "red" => ("#FF2C2B2A", "#FF242322"),
+                    "green" => ("#FF2A302C", "#FF212723"),
+                    "blue" => ("#FF2A2F32", "#FF222628"),
+                    _ => ("#FF2A2D2B", "#FF222523")
+                };
+                Assert(((Color)application.Resources["ActionRowEvenColor"]).ToString() == card &&
+                    ((Color)application.Resources["StatusCardColor"]).ToString() == status,
+                    "The original card surfaces were not restored for " + color);
             }
             Assert(accentValues.Count == 4, "Theme presets do not have distinct accents.");
         }

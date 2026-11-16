@@ -114,8 +114,8 @@ public sealed class TrayIconController : IDisposable
         }
 
         // ShutdownMode is explicit so hiding the window never stops the bridge.
-        // When the option is disabled, finish a normal close by explicitly
-        // terminating the application after this Closing event completes.
+        // Keep the editor alive until the application has flushed unsaved writes.
+        e.Cancel = true;
         _beforeUserExit?.Invoke();
         _exitRequested = true;
         _notifyIcon.Visible = false;

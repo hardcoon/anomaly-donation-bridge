@@ -56,7 +56,7 @@ internal static class VotingUiChecks
         var source = runtime.Settings.ActiveProfileId;
         var original = runtime.Voting.Snapshot.CollectionId;
         using var controller = new VotingObsController(runtime);
-        var window = new VotingWindow(runtime, controller);
+        var window = new VotingView(runtime, controller);
         var root = (FrameworkElement)window.Content;
         Layout(root, 1310, 860);
         Invoke(Find<Button>(root).First(button => Equals(button.Tag, original)));
@@ -89,29 +89,29 @@ internal static class VotingUiChecks
         await Wait(() => Field<string>(window, "_profileId") == source);
         Check(Find<Button>(root).Any(button => Equals(button.Tag, original)) && !Find<Button>(root).Any(button => Equals(button.Tag, copied.CollectionId)),
             "Returning to profile did not restore its voting list");
-        window.Close(); await Wait(() => Field<bool>(window, "_closed"));
+        window.Dispose(); await Wait(() => Field<bool>(window, "_closed"));
     }
 
     private static async Task CheckCompactPanelAsync(string output)
     {
         var now = DateTimeOffset.UtcNow;
         var sample = new VotingRound { MoneyGoal = false, TimeGoal = true, DurationSeconds = 90 };
-        Check(VotingWindow.CompactConditions(sample, now) == "1:30 (таймер)", "Compact timer must omit disabled amount condition");
+        Check(VotingView.CompactConditions(sample, now) == "1:30 (таймер)", "Compact timer must omit disabled amount condition");
         sample.MoneyGoal = true;
-        Check(VotingWindow.CompactConditions(sample, now) == "0/1000 рублей ИЛИ 1:30 (таймер)", "Compact OR conditions are incorrect");
+        Check(VotingView.CompactConditions(sample, now) == "0/1000 рублей ИЛИ 1:30 (таймер)", "Compact OR conditions are incorrect");
         sample.Condition = VotingCondition.All; sample.Currency = "EUR"; sample.Target = 25.50m;
         sample.Options = [new VotingOption { Amount = 3.25m }];
-        Check(VotingWindow.CompactConditions(sample, now) == "3,25/25,5 EUR И 1:30 (таймер)", "Compact amount/currency/AND conditions are incorrect");
+        Check(VotingView.CompactConditions(sample, now) == "3,25/25,5 EUR И 1:30 (таймер)", "Compact amount/currency/AND conditions are incorrect");
         sample.TimeGoal = false;
-        Check(VotingWindow.CompactConditions(sample, now) == "3,25/25,5 EUR", "Disabled timer leaked into compact conditions");
+        Check(VotingView.CompactConditions(sample, now) == "3,25/25,5 EUR", "Disabled timer leaked into compact conditions");
         sample.MoneyGoal = false; sample.TimeGoal = true; sample.Phase = VotingPhase.Paused; sample.PausedAt = now; sample.Deadline = now.AddSeconds(90);
-        Check(VotingWindow.CompactConditions(sample, now.AddMinutes(5)) == "1:30 (таймер)", "Compact paused countdown keeps running");
+        Check(VotingView.CompactConditions(sample, now.AddMinutes(5)) == "1:30 (таймер)", "Compact paused countdown keeps running");
         sample.Phase = VotingPhase.Collecting; sample.PausedAt = null;
-        Check(VotingWindow.CompactConditions(sample, now.AddSeconds(1)) == "1:29 (таймер)", "Compact live countdown does not update");
+        Check(VotingView.CompactConditions(sample, now.AddSeconds(1)) == "1:29 (таймер)", "Compact live countdown does not update");
         foreach (var phase in new[] { VotingPhase.Ready, VotingPhase.Failed, VotingPhase.Drawn })
         {
             sample.Phase = phase;
-            Check(VotingWindow.CompactConditions(sample, now) == "0:00 (таймер)", "Compact completed timer is not zero");
+            Check(VotingView.CompactConditions(sample, now) == "0:00 (таймер)", "Compact completed timer is not zero");
         }
 
         using var temporary = new Program.TemporaryDirectory();
@@ -138,7 +138,7 @@ internal static class VotingUiChecks
             Currency = "RUB", CreatedAt = DateTimeOffset.UtcNow }, runtime.Settings.ActiveProfileId);
         await runtime.Voting.SetCollectionActiveAsync(draft.CollectionId, true, runtime.Settings.ActiveProfileId);
         using var controller = new VotingObsController(runtime);
-        var window = new VotingWindow(runtime, controller); var root = (FrameworkElement)window.Content;
+        var window = new VotingView(runtime, controller); var root = (FrameworkElement)window.Content;
         try
         {
             ThemeManager.Apply(false); Layout(root, 1310, 860);
@@ -161,7 +161,7 @@ internal static class VotingUiChecks
             var reset = Field<Button>(window, "_reset");
             Check(Equals(reset.Content, "Сбросить") && ButtonVisual.GetGlyph(reset).Length > 0, "Reset must use a short caption and an icon");
             var delete = Field<Button>(window, "_delete");
-            Check(Equals(delete.Content, "\uE74D") && delete.FontFamily.Source == "Segoe MDL2 Assets" &&
+            Check(Equals(delete.Content, "\uE74D") && Find<VectorIcon>(delete).Single().Glyph == "\uE74D" &&
                 ((SolidColorBrush)delete.Foreground).Color == ((SolidColorBrush)window.FindResource("BadBrush")).Color &&
                 System.Windows.Automation.AutomationProperties.GetName(delete) == "Удалить это голосование", "Delete must be an accessible red trash icon");
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, otherId)));
@@ -211,6 +211,22 @@ internal static class VotingUiChecks
             await Wait(() => runtime.Voting.SnapshotFor(draft.CollectionId).Phase == VotingPhase.Collecting && !Field<bool>(window, "_busy"));
             Check(runtime.Voting.SnapshotFor(draft.CollectionId).Id == paused.Id && Field<string>(window, "_selectedId") == otherId,
                 "Resume restarted the round or moved the editor");
+            var nextVote = Field<Button>(window, "_playerNext");
+            var beforeNext = runtime.Voting.SnapshotFor(draft.CollectionId);
+            var beforeOther = runtime.Voting.SnapshotFor(otherId);
+            Check(nextVote.IsEnabled && nextVote.ToolTip is string hint && hint.Contains(other.Title),
+                "The next-vote button must identify the next configured poll.");
+            Invoke(nextVote);
+            await Wait(() => runtime.Voting.SnapshotFor(otherId).IsActive && !Field<bool>(window, "_busy"));
+            var afterNext = runtime.Voting.SnapshotFor(draft.CollectionId);
+            var resumedOther = runtime.Voting.SnapshotFor(otherId);
+            Check(afterNext is { IsActive: false, Phase: VotingPhase.Paused } && afterNext.Id == beforeNext.Id &&
+                afterNext.Total == beforeNext.Total && afterNext.Deadline == beforeNext.Deadline &&
+                resumedOther.Id == beforeOther.Id && resumedOther.Total == beforeOther.Total &&
+                Field<string>(window, "_selectedId") == otherId,
+                "Next vote discarded progress or changed the editor instead of the live vote.");
+            Invoke(nextVote);
+            await Wait(() => runtime.Voting.SnapshotFor(draft.CollectionId).IsActive && !Field<bool>(window, "_busy"));
             Invoke(Field<Button>(window, "_playerTitle"));
             await Wait(() => Field<string>(window, "_selectedId") == draft.CollectionId && !Field<bool>(window, "_busy"));
             Invoke(Field<Button>(window, "_panelToggle"));
@@ -233,8 +249,8 @@ internal static class VotingUiChecks
             await Wait(() => runtime.UiPreferences.VotingSettingsPanelCollapsed && !Field<bool>(window, "_dirty"));
             Check(runtime.Voting.SnapshotFor(draft.CollectionId).Target == 2500 && summary.Text.Contains("0/2500 рублей ИЛИ "), "Collapsing panel lost the pending settings edit");
             ThemeManager.Apply(true); Layout(root, 1000, 700); Save(root, Path.Combine(output, "voting-panel-compact-light.png"));
-            window.Close(); await Wait(() => Field<bool>(window, "_closed"));
-            window = new VotingWindow(runtime, controller); root = (FrameworkElement)window.Content;
+            window.Dispose(); await Wait(() => Field<bool>(window, "_closed"));
+            window = new VotingView(runtime, controller); root = (FrameworkElement)window.Content;
             Layout(root, 1310, 860);
             Invoke(Find<Button>(root).First(button => Equals(button.Tag, draft.CollectionId)));
             await Wait(() => !Field<bool>(window, "_generalSelected") && !Field<bool>(window, "_busy"));
@@ -279,7 +295,7 @@ internal static class VotingUiChecks
             await window.FlushPendingChangesAsync();
             Check(runtime.Voting.SnapshotFor(draft.CollectionId).DurationSeconds == 120, "Open editor lost unsaved inputs during operations on a different row");
         }
-        finally { window.Close(); ThemeManager.Apply(false); }
+        finally { window.Dispose(); ThemeManager.Apply(false); }
     }
 
     private static async Task CheckAsync(string output)
@@ -301,7 +317,7 @@ internal static class VotingUiChecks
             "Fresh general voting defaults must match requested screenshot without enabling collection");
         var draft = runtime.Voting.Snapshot; draft.TimeGoal = false;
         foreach (var phase in new[] { VotingPhase.Ready, VotingPhase.Failed, VotingPhase.Drawn })
-            Check(VotingWindow.RemainingText(new VotingRound { TimeGoal = true, Phase = phase, Deadline = DateTimeOffset.UtcNow.AddMinutes(9) }).Length == 0,
+            Check(VotingView.RemainingText(new VotingRound { TimeGoal = true, Phase = phase, Deadline = DateTimeOffset.UtcNow.AddMinutes(9) }).Length == 0,
                 "Program and OBS must not display a countdown on a completed vote: " + phase);
         draft.Options = [new VotingOption { Command = "!долг", Preset = first }, new VotingOption { Command = "!свобода", Preset = second }];
         await runtime.Voting.SaveSettingsAsync(draft);
@@ -309,7 +325,9 @@ internal static class VotingUiChecks
         PresentationTraceSources.DataBindingSource.Listeners.Add(listener);
         PresentationTraceSources.DataBindingSource.Switch.Level = SourceLevels.Error;
         using var captureController = new VotingObsController(runtime);
-        var window = new VotingWindow(runtime, captureController); var root = (FrameworkElement)window.Content;
+        var window = new VotingView(runtime, captureController); var root = (FrameworkElement)window.Content;
+        // Give live theme updates a Window resource scope, matching the embedded main-window view.
+        var renderHost = new Window { Content = window, ShowActivated = false, ShowInTaskbar = false };
         var capture = captureController.GetOrCreateWindow();
         capture.Width = 660; capture.Height = 360; capture.Left = 30; capture.Top = 40;
         var captureHandle = new WindowInteropHelper(capture).EnsureHandle(); // Native identity, never shown or activated.
@@ -346,7 +364,7 @@ internal static class VotingUiChecks
                 Check(hudCard.TranslatePoint(new Point(),root).X >= automation.TranslatePoint(new Point(),root).X + automation.ActualWidth + 20 &&
                     Math.Abs(hudCard.TranslatePoint(new Point(),root).Y-automation.TranslatePoint(new Point(),root).Y)<2,
                     "HUD card must occupy the second column, aligned with automation settings, not follow the queue vertically");
-                Check(VotingWindow.ResetConfirmation.Contains("настройки программы") && VotingWindow.ResetConfirmation.Contains("оставшееся время"), "Reset confirmation omits preserved settings");
+                Check(VotingView.ResetConfirmation.Contains("настройки программы") && VotingView.ResetConfirmation.Contains("оставшееся время"), "Reset confirmation omits preserved settings");
                 Check(Find<CheckBox>(root).Any(box => box.Content is TextBlock label && label.Text == "Автоматический запуск рулетки по окончании голосования"), "Automatic draw checkbox missing");
             }
             Layout(root,1084,572);
@@ -428,7 +446,7 @@ internal static class VotingUiChecks
             Invoke(Field<Button>(window, "_collectionToggle")); await Wait(() => runtime.Voting.Snapshot.Phase == VotingPhase.Collecting && !Field<bool>(window, "_busy"));
             Check(Field<TextBlock>(window, "_statusDot").Visibility == Visibility.Visible &&
                 ((SolidColorBrush)Field<TextBlock>(window, "_statusDot").Foreground).Color == ((SolidColorBrush)window.FindResource("GoodBrush")).Color,
-                "Active vote status is not green");
+                $"Active vote status is not green: {Field<TextBlock>(window, "_statusDot").Visibility}, {Field<TextBlock>(window, "_statusDot").Foreground}, selected {Field<string>(window, "_selectedId")}, runtime {runtime.Voting.Snapshot.CollectionId}/{runtime.Voting.Snapshot.IsActive}");
             await window.AddTemplateAsync(first, draft.CollectionId); window.Rows.Last().Command = "!третья";
             window.Rows[0].Bind(new ActionDefinition { DisplayName = "Изменённый шаблон", HandlerId = "add_radiation", IsActive = true });
             await Wait(() => runtime.Voting.Snapshot.Options.Count == 3 && !Field<bool>(window, "_dirty"));
@@ -589,8 +607,8 @@ internal static class VotingUiChecks
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); Layout(root, 1300, 690);
             Check(!Find<Button>(Field<StackPanel>(window, "_sequence")).Any(button => Equals(button.Content, "↑") || Equals(button.Content, "↓")) &&
                 Field<StackPanel>(window, "_sequence").Children.OfType<Border>().Count(border => !border.AllowDrop) == 3, "Reorder still uses arrows or OLE drop targets");
-            Check(VotingWindow.InsertionIndex([25, 85, 145], -20) == 0 && VotingWindow.InsertionIndex([25, 85, 145], 55) == 1 &&
-                VotingWindow.InsertionIndex([25, 85, 145], 200) == 3, "Pointer reorder must support gaps, beginning and end of list");
+            Check(VotingView.InsertionIndex([25, 85, 145], -20) == 0 && VotingView.InsertionIndex([25, 85, 145], 55) == 1 &&
+                VotingView.InsertionIndex([25, 85, 145], 200) == 3, "Pointer reorder must support gaps, beginning and end of list");
             var sidebar = Field<StackPanel>(window, "_sidebar");
             var dots = Find<Button>(sidebar).Where(button => button.Tag is string).SelectMany(button => Find<TextBlock>(button).Where(block => block.Text == "●"))
                 .Select(dot => dot.TranslatePoint(new Point(), root).X).ToList();
@@ -632,7 +650,7 @@ internal static class VotingUiChecks
                 (await new JsonPendingDispatchStore(paths).LoadAsync()).Count == queuedBeforeReset,
                 "Reset left an old winner button or enqueued the cancelled result after animation");
             Layout(root, 1300, 690); CheckLayout(window, root); Save(root, Path.Combine(output, "voting-after-reset.png"));
-            Check(Field<Button>(window, "_delete").Visibility == Visibility.Visible && VotingWindow.DeleteConfirmation(runtime.Voting.SnapshotFor(thirdCollection)).Contains("Другие голосования"),
+            Check(Field<Button>(window, "_delete").Visibility == Visibility.Visible && VotingView.DeleteConfirmation(runtime.Voting.SnapshotFor(thirdCollection)).Contains("Другие голосования"),
                 "Delete vote control or scoped confirmation missing");
             await window.DeleteCollectionAsync(thirdCollection);
             await Wait(() => capture.Wheel.Round is null);
@@ -654,7 +672,7 @@ internal static class VotingUiChecks
                 foreach (var deleting in new[] { false, true })
                 {
                     var dialog = new VotingConfirmationWindow(deleting ? "Удалить голосование" : "Сбросить прогресс",
-                        deleting ? VotingWindow.DeleteConfirmation(runtime.Voting.Collections[0]) : VotingWindow.ResetConfirmation, deleting ? "Удалить" : "Сбросить");
+                        deleting ? VotingView.DeleteConfirmation(runtime.Voting.Collections[0]) : VotingView.ResetConfirmation, deleting ? "Удалить" : "Сбросить");
                     var dialogRoot = (FrameworkElement)dialog.Content;
                     dialogRoot.Measure(new Size(520, double.PositiveInfinity)); Layout(dialogRoot, 520, Math.Ceiling(dialogRoot.DesiredSize.Height));
                     Check(Find<Button>(dialogRoot).Single(button => Equals(button.Content, "Отмена")) is { IsDefault: true, IsCancel: true },
@@ -666,7 +684,9 @@ internal static class VotingUiChecks
             }
             Check(string.IsNullOrWhiteSpace(trace.ToString()), "Binding errors: " + trace);
             var closingId = Field<string>(window, "_selectedId");
-            Field<TextBox>(window, "_target").Text = "4700"; window.Close();
+            Field<TextBox>(window, "_target").Text = "4700";
+            await window.FlushPendingChangesAsync();
+            window.Dispose();
             await Wait(() => Field<bool>(window, "_closed"));
             Check(runtime.Voting.SnapshotFor(closingId).Target == 4700, "Closing before debounce did not flush the final edit");
             CheckCaptureIdentity();
@@ -676,8 +696,8 @@ internal static class VotingUiChecks
             await runtime.Voting.SetCollectionActiveAsync(closingId, true, "test-profile");
             await Wait(() => capture.Wheel.Round?.Title == draft.Title);
             CheckCaptureIdentity();
-            var reopened = new VotingWindow(runtime, captureController);
-            reopened.Close(); await Wait(() => Field<bool>(reopened, "_closed"));
+            var reopened = new VotingView(runtime, captureController);
+            reopened.Dispose(); await Wait(() => Field<bool>(reopened, "_closed"));
             await runtime.Voting.RecordAsync(new DonationEvent { Id = "closed-editor-obs", Amount = 19, Message = "!active", CreatedAt = DateTimeOffset.UtcNow }, "test-profile");
             await Wait(() => capture.Wheel.Round?.Total == 19);
             CheckCaptureIdentity();
@@ -691,12 +711,12 @@ internal static class VotingUiChecks
         }
         finally
         {
-            window.Close(); obs.Close();
+            window.Dispose(); renderHost.Close(); obs.Close();
             PresentationTraceSources.DataBindingSource.Listeners.Remove(listener); ThemeManager.Apply(false);
         }
     }
 
-    private static async Task CheckAutosaveAsync(VotingWindow window, BridgeRuntime runtime, FrameworkElement root, AppPaths paths, string output)
+    private static async Task CheckAutosaveAsync(VotingView window, BridgeRuntime runtime, FrameworkElement root, AppPaths paths, string output)
     {
         var id = runtime.Voting.Collections.Single().CollectionId; var target = Field<TextBox>(window, "_target");
         target.Text = "2"; await Task.Delay(60); target.Text = "23"; await Task.Delay(60); target.Text = "2300"; target.CaretIndex = 2;
@@ -726,7 +746,7 @@ internal static class VotingUiChecks
         await Wait(() => runtime.Voting.SnapshotFor(id).DurationSeconds == 180 && !Field<bool>(window, "_dirty"));
         var timer = runtime.Voting.SnapshotFor(id);
         Check(timer.Deadline >= timerEditedAt.AddMinutes(3) && timer.Deadline <= DateTimeOffset.UtcNow.AddMinutes(3) &&
-            timer.Total == 321 && VotingWindow.RemainingText(timer) == "Осталось 03:00",
+            timer.Total == 321 && VotingView.RemainingText(timer) == "Осталось 03:00",
             "Minutes autosave must restart the full countdown and preserve current funds");
         time.IsChecked = false;
         await Wait(() => !runtime.Voting.SnapshotFor(id).TimeGoal && !Field<bool>(window, "_dirty"));
@@ -783,7 +803,7 @@ internal static class VotingUiChecks
         Layout(root, 1300, 690); CheckLayout(window, root); Save(root, Path.Combine(output, "voting-autosave-defaults.png"));
     }
 
-    private static async Task CheckYouTubeSettingsAsync(VotingWindow window, BridgeRuntime runtime, FrameworkElement root, VotingObsWindow obs, string output)
+    private static async Task CheckYouTubeSettingsAsync(VotingView window, BridgeRuntime runtime, FrameworkElement root, VotingObsWindow obs, string output)
     {
         var id = Field<string>(window, "_selectedId");
         await window.AddTemplateAsync(runtime.Settings.Actions[0], id); window.Rows[0].Command = "!кров";
@@ -845,7 +865,7 @@ internal static class VotingUiChecks
     }
 
     private static T Field<T>(object target, string name) => (T)target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(target)!;
-    private static void CheckLayout(VotingWindow window, FrameworkElement root)
+    private static void CheckLayout(VotingView window, FrameworkElement root)
     {
         var commands = Field<Grid>(window, "_commandsPanel"); var settings = Field<Grid>(window, "_settings");
         var commandsAt = commands.TranslatePoint(new Point(), root); var settingsAt = settings.TranslatePoint(new Point(), root);
@@ -868,9 +888,10 @@ internal static class VotingUiChecks
         }
         var player = Field<Border>(window, "_player");
         var playerAt = player.TranslatePoint(new Point(), root);
-        Check(playerAt.Y >= commandsAt.Y + commands.ActualHeight && Math.Abs(player.ActualWidth - root.ActualWidth) < 1 &&
+        Check(playerAt.Y == 0 && playerAt.Y + player.ActualHeight <= commandsAt.Y &&
+            Math.Abs(player.ActualWidth - root.ActualWidth) < 1 &&
             ReferenceEquals(Field<Button>(window, "_spin").Parent, Field<StackPanel>(window, "_playerActions")),
-            "The broadcast player must be below both panes");
+            "The broadcast player must span the top of the voting editor.");
         var previousRight = -1d;
         foreach (var name in new[] { "_panelToggle", "_reset", "_delete" })
         {
@@ -895,7 +916,7 @@ internal static class VotingUiChecks
             Check(textRect.IsEmpty || textRect.Top >= 0 && textRect.Bottom <= input.ActualHeight - 1, "Text is clipped vertically inside a voting field");
         }
     }
-    private static void CheckDockLaunch(VotingWindow window, FrameworkElement root, string label)
+    private static void CheckDockLaunch(VotingView window, FrameworkElement root, string label)
     {
         var start = Field<Button>(window, "_collectionToggle");
         var dock = Field<Border>(window, "_player");
@@ -903,8 +924,9 @@ internal static class VotingUiChecks
         Check(Equals(start.Content, label) && start.Visibility == Visibility.Visible && start.IsEnabled &&
             ReferenceEquals(start.Parent, Field<StackPanel>(window, "_playerActions")) &&
             at.Y >= dock.TranslatePoint(new Point(), root).Y &&
-            at.X + start.ActualWidth <= root.ActualWidth && at.Y + start.ActualHeight <= root.ActualHeight,
-            "The selected vote's run/resume button must be visible in the lower dock");
+            at.X + start.ActualWidth <= root.ActualWidth &&
+            at.Y + start.ActualHeight <= dock.TranslatePoint(new Point(0, dock.ActualHeight), root).Y,
+            "The selected vote's run/resume button must be visible in the top player.");
     }
 
     private static ContextMenu OpenCollectionMenu(FrameworkElement root, string collectionId)
