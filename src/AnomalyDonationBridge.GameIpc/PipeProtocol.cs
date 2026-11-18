@@ -424,6 +424,7 @@ public static class PipeProtocol
         "helicopter" => CatalogEntryKind.Helicopter,
         "armed_vehicle" => CatalogEntryKind.ArmedVehicle,
         "npc_visual" => CatalogEntryKind.NpcVisual,
+        "dynamic_prop" => CatalogEntryKind.DynamicProp,
         "guitar_music" => CatalogEntryKind.GuitarMusic,
         _ => throw new InvalidDataException($"Неизвестный тип записи каталога: {token}")
     };

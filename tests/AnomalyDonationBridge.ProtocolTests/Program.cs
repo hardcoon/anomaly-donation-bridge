@@ -120,6 +120,12 @@ internal static partial class Program
         True(CatalogContentHash.CanonicalEntryLine(0, parsedHeli.Entry).Contains("\thelicopter\t"),
             "helicopter kind included in canonical catalog hash");
 
+        var parsedProp = IsType<CatalogEntryMessage>(PipeProtocol.ParseInbound(
+            "CATALOG_ENTRY\tsession-1:catalog-1\t0\texplosive_barrel\tdynamic_prop\tBarrel\texplosive_props\tunclassified\t\t1\tnone\tS_EXPLO"));
+        Equal(CatalogEntryKind.DynamicProp, parsedProp.Entry.Kind, "physical prop kind survives IPC parsing");
+        True(CatalogContentHash.CanonicalEntryLine(0, parsedProp.Entry).Contains("\tdynamic_prop\t"),
+            "physical prop participates in the canonical catalogue hash");
+
         assembler.Begin(new CatalogBeginMessage(revision, 1, CatalogContentHash.Compute(entries.Take(1))));
         Throws<InvalidDataException>(() => assembler.Add(new CatalogEntryMessage(revision, 1, entries[0])),
             "out-of-order entry rejected");

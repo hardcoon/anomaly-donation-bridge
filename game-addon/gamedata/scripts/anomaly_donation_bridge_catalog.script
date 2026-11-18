@@ -470,6 +470,11 @@ local function classify(ini, section)
     if section=="adb_wandering_trader" or section=="adb_btr_companion" or section=="adb_helicopter_boss" or section=="adb_helicopter_companion" or section=="adb_guitar_double" or
         section=="adb_stationary_mgun" or section=="adb_stationary_mgun_blast" then return nil end
 	local class_name = (ini_value(ini, section, "class") or ""):upper()
+	local props=anomaly_donation_bridge_props
+	if props then
+		local prop=props.classify(ini,section)
+		if prop then return prop end
+	end
 	if class_name=="SCRPTCAR" then
 		local vehicles=anomaly_donation_bridge_vehicle_catalog
 		local model=vehicles and vehicles.profile(ini,section)
@@ -1015,7 +1020,7 @@ function validate_section(params, key, kind)
 		return nil, "catalog_section_stale"
 	end
 	if (kind == "npc" or kind == "mutant" or kind == "stalker_squad" or
-		kind == "mutant_squad" or kind == "anomaly" or kind == "helicopter" or kind == "armed_vehicle") and not is_spawn_safe(section, kind) then
+		kind == "mutant_squad" or kind == "anomaly" or kind == "helicopter" or kind == "armed_vehicle" or kind == "dynamic_prop") and not is_spawn_safe(section, kind) then
 		return nil, "catalog_section_safety_changed"
 	end
 	return entry

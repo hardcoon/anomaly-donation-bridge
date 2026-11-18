@@ -30,11 +30,11 @@ internal static class FilePresetTests
             Assert(loader.Load(gameRoot).Presets.Count == 0, "Empty effects folder showed presets.");
             var shipped = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
             var shippedFiles = Directory.EnumerateFiles(shipped, "*.script").OrderBy(path => path).ToList();
-            Assert(shippedFiles.Count == 70 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 70,
-                "The app must ship 70 separate effect scripts; archived chimera and psy-dog must not return.");
+            Assert(shippedFiles.Count == 72 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 72,
+                "The app must ship 72 separate effect scripts; archived chimera and psy-dog must not return.");
             var optionalRoot = FindOptionalRoot();
             var optional = new FilePresetLoader(optionalRoot).Load(null);
-            Assert(optional.SourcePaths.Count == 66 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
+            Assert(optional.SourcePaths.Count == 68 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
                 "Each additional Lua effect must have a valid self-describing header.");
             Assert(Directory.EnumerateFiles(Path.Combine(optionalRoot, "gamedata", "scripts"), "*.script")
                     .All(path => shippedFiles.Any(shipped => Path.GetFileName(shipped) == Path.GetFileName(path))),
@@ -43,7 +43,7 @@ internal static class FilePresetTests
                 File.Copy(file, Path.Combine(effectsScripts, Path.GetFileName(file)));
 
             var candidates = loader.Load(gameRoot);
-            Assert(candidates.SourcePaths.Count == 70 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
+            Assert(candidates.SourcePaths.Count == 72 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
                 "Uninstalled scripts produced visible presets or invalid headers.");
             var v2Path = Path.Combine(effectsScripts, "anomaly_donation_bridge_effect_hardcoon_adb_mutant_companion_v2.script");
             var v2Text = await File.ReadAllTextAsync(v2Path);
@@ -76,13 +76,47 @@ internal static class FilePresetTests
 
             var manager = new EffectScriptManager(new AppPaths(Path.Combine(root, "data")), loader);
             var before = await manager.InspectAsync(gameRoot);
-            Assert(before.CanInstall && before.SourceCount == 70 && before.InstalledCount == 0,
+            Assert(before.CanInstall && before.SourceCount == 72 && before.InstalledCount == 0,
                 "Effect installer did not identify missing scripts.");
             await manager.PreflightAsync(gameRoot);
             var after = await manager.InstallAllAsync(gameRoot);
-            Assert(after.InstalledCount == 70 && loader.Load(gameRoot).Presets.Count == 70,
-                "Installing all effects did not reveal all 70 templates.");
+            Assert(after.InstalledCount == 72 && loader.Load(gameRoot).Presets.Count == 72,
+                "Installing all effects did not reveal all 72 templates.");
             var squads = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.show_squads");
+            var kick = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.kick");
+            var kickHeight = kick.ParameterDefinitions.Single();
+            Assert(kick.DisplayName == "Дать пинка" && kickHeight.Key == "height_meters" &&
+                kick.Parameters[kickHeight.Key] == "5" && kickHeight.Validate("2") is null &&
+                kickHeight.Validate("500") is null && kickHeight.Validate("1") is not null &&
+                kickHeight.Validate("501") is not null && kickHeight.Validate("2.5") is not null,
+                "Kick must expose the requested 2–500 metre range and 5 metre default.");
+            var rain = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.prop_rain");
+            var propEntries = new[] {
+                new CatalogEntry { SectionId = "explosive_barrel", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Бочка", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
+                new CatalogEntry { SectionId = "crate", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Ящик", Category = "physics_props", NativeClass = "O_PHYSIC", IsAvailable = true },
+                new CatalogEntry { SectionId = "story_prop", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Квестовый объект", IsAvailable = false, QuarantineReason = QuarantineReason.StoryOrUnique },
+                new CatalogEntry { SectionId = "ordinary_item", Kind = CatalogEntryKind.Item,
+                    DisplayName = "Предмет", IsAvailable = true }
+            };
+            var propsCatalog = new CatalogSnapshot(new CatalogRevision("props-live"),
+                CatalogContentHash.Compute(propEntries), propEntries);
+            DynamicCatalogBinding.Apply(propsCatalog, [rain]);
+            var propSelection = rain.ParameterDefinitions.Single(p => p.Key == "prop_sections");
+            Assert(propSelection.Kind == ParameterKind.MultiChoice && propSelection.CatalogKind == CatalogEntryKind.DynamicProp &&
+                propSelection.Options.Count == 2 && propSelection.Validate("explosive_barrel,crate") is null &&
+                propSelection.Validate("ordinary_item") is not null && propSelection.Validate("story_prop") is not null &&
+                rain.CatalogRevision == propsCatalog.Revision &&
+                new ActionViewModel(rain).Parameters.Single(p => p.Definition.Key == "random_object").IsBooleanChoice &&
+                rain.Parameters["count"] == "9" && rain.Parameters["spacing_meters"] == "3" &&
+                rain.Parameters["height_meters"] == "15",
+                "Prop rain must bind only available physical objects, show a checkbox, and retain its defaults.");
+            rain.Parameters["prop_sections"] = "explosive_barrel,crate";
+            DynamicCatalogBinding.Apply(propsCatalog, [rain]);
+            Assert(rain.Parameters["prop_sections"] == "explosive_barrel,crate",
+                "Catalogue refresh must preserve the user's selected props.");
             var pdaMessage = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == DonationDispatcher.PdaMessageHandlerId);
             Assert(pdaMessage.DisplayName == "Отправить сообщение в КПК" &&
                 pdaMessage.ParameterDefinitions.Count == 0 && pdaMessage.Parameters.Count == 0 &&
@@ -943,9 +977,9 @@ internal static class FilePresetTests
                     "The unified button is disabled when core and effect scripts are missing.");
                 await settings.InstallBridgeAsync();
                 Assert((await runtime.InspectAddonAsync(unifiedGameRoot)).State == AddonInstallState.Current &&
-                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 70 &&
+                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 72 &&
                     !settings.CanInstallBridge,
-                    "The unified operation did not install both core and all 70 effect scripts.");
+                    "The unified operation did not install both core and all 72 effect scripts.");
                 Assert(!(await runtime.InspectBridgeAsync(unifiedGameRoot, string.Empty)).CanInstall,
                     "Header update button must be hidden for a verified current installation.");
                 await runtime.AddCatalogExclusionsAsync([new CatalogEntry

@@ -1,0 +1,52 @@
+-- Discover movable physical props from the running engine's merged INI/VFS.
+-- Never instantiate models or touch their physics during catalogue discovery.
+local CLASSES={O_PHYSIC=true,O_PHYS_S=true,P_DSTRBL=true,O_DSTR_S=true,S_EXPLO=true}
+local function field(ini,section,key)
+    return (anomaly_donation_bridge_common.trim(anomaly_donation_bridge_common.ini_string(ini,section,key) or ""))
+end
+local function path(value)
+    return value:gsub('^"(.*)"$','%1'):gsub("^'(.*)'$","%1"):lower():gsub("/","\\")
+end
+function classify(ini,section)
+    local c=anomaly_donation_bridge_common
+    local class=field(ini,section,"class"):upper()
+    if not CLASSES[class] then return end
+    local spawn=path(field(ini,section,"$spawn"))
+    local visual=path(field(ini,section,"visual"))
+    -- Inventory explosives retain their existing item catalogue semantics.
+    if class=="S_EXPLO" and (c.ini_bool(ini,section,"can_take")~=false or
+        not spawn:find("^weapons\\explosive\\")) then return end
+    -- Bare physics/door bases require a level-placed visual and are not props.
+    if visual=="" or spawn=="" then return end
+    local reason
+    if section:lower():find("^mp_") or section:lower():find("^adb_") or
+        c.meaningful_story_id(field(ini,section,"story_id")) or
+        c.meaningful_story_id(field(ini,section,"spawn_story_id")) or
+        c.ini_bool(ini,section,"quest_item")==true or spawn:find("scene_objects",1,true) then
+        reason="story_unique"
+    end
+    local binding=field(ini,section,"script_binding")
+    if not reason and (field(ini,section,"fixed_bones")~="" or field(ini,section,"custom_data")~="" or
+        field(ini,section,"startup_animation")~="" or binding~="" and binding~="bind_physic_object.init" or
+        spawn:find("door",1,true)) then reason="scripted" end
+    if not reason and class=="S_EXPLO" and tonumber(field(ini,section,"blast"))==nil then
+        reason="invalid_structure"
+    end
+    if not reason and (not visual:match("^[%w_][%w_%.%-%/\\]*$") or visual:find("..",1,true)) then
+        reason="invalid_structure"
+    end
+    if visual~="" and not visual:match("%.ogf$") then visual=visual..".ogf" end
+    if not reason then
+        local ok,exists=pcall(function() return getFS():exist("$game_meshes$",visual) end)
+        if not ok or not exists then reason="missing_required_fields" end
+    end
+    local name=field(ini,section,"inv_name")
+    if name=="" then name=field(ini,section,"name") end
+    if name~="" and game and type(game.translate_string)=="function" then
+        local ok,text=pcall(game.translate_string,name);if ok and text and text~="" then name=text end
+    end
+    if name=="" then name=section end
+    return {section_id=section,kind="dynamic_prop",native_class=class,display_name=name,
+        category=class=="S_EXPLO" and "explosive_props" or "physics_props",strength="unclassified",faction="",
+        available=reason==nil,quarantine_reason=reason or "none"}
+end

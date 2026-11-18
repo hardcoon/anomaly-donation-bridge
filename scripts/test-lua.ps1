@@ -62,11 +62,11 @@ $effects = @(Get-ChildItem -LiteralPath $effectRoot -Filter 'anomaly_donation_br
 $optionalEffects = @(Get-ChildItem -LiteralPath $optionalRoot -Filter 'anomaly_donation_bridge_effect_*.script' -File | Sort-Object Name)
 $fixtures = @(Get-ChildItem -LiteralPath $fixtureRoot -Filter '*_smoke.lua' -File | Sort-Object Name)
 
-if ($scripts.Count -ne 28) { throw "Expected 28 installable core scripts, found $($scripts.Count)." }
+if ($scripts.Count -ne 29) { throw "Expected 29 installable core scripts, found $($scripts.Count)." }
 if ($legacyScripts.Count -ne 3) { throw "Expected three archived regression modules, found $($legacyScripts.Count)." }
 if ($effects.Count -ne 4) { throw "Expected four starter effect scripts, found $($effects.Count)." }
-if ($optionalEffects.Count -ne 66) { throw "Expected 66 optional effect scripts, found $($optionalEffects.Count)." }
-if ($fixtures.Count -ne 53) { throw "Expected 53 Lua smoke fixtures, found $($fixtures.Count)." }
+if ($optionalEffects.Count -ne 68) { throw "Expected 68 optional effect scripts, found $($optionalEffects.Count)." }
+if ($fixtures.Count -ne 54) { throw "Expected 54 Lua smoke fixtures, found $($fixtures.Count)." }
 
 foreach ($script in @($scripts) + @($legacyScripts) + @($effects) + @($optionalEffects)) {
     # Forward slashes and Lua single quotes avoid the MinGW CRT stripping the
@@ -111,7 +111,7 @@ foreach ($fixture in $fixtures) {
             Invoke-LuaJit @($fixture.FullName, $scriptRoot, $effectRoot, $optionalRoot, $constructorProfile)
         }
     } elseif ($fixture.Name -in @('show_squads_smoke.lua', 'needs_wait_smoke.lua', 'spawn_point_methods_smoke.lua', 'file_effects_smoke.lua', 'actor_boost_smoke.lua', 'new_life_smoke.lua', 'dementia_smoke.lua', 'teleport_level_smoke.lua', 'explosive_effect_smoke.lua',
-        'rename_nearest_npc_smoke.lua', 'annoying_fan_smoke.lua', 'cleanup_corpses_smoke.lua', 'mutant_companion_v2_smoke.lua', 'helicopter_boss_smoke.lua', 'helicopter_companion_smoke.lua', 'equipment_ammo_smoke.lua', 'play_guitar_smoke.lua', 'slow_time_smoke.lua', 'aim_teleport_smoke.lua', 'stationary_mgun_smoke.lua', 'burer_form_smoke.lua', 'pseudogiant_form_smoke.lua', 'tushkano_form_smoke.lua', 'poltergeist_form_smoke.lua', 'bloodsucker_form_smoke.lua', 'controller_form_smoke.lua')) {
+        'rename_nearest_npc_smoke.lua', 'annoying_fan_smoke.lua', 'cleanup_corpses_smoke.lua', 'mutant_companion_v2_smoke.lua', 'helicopter_boss_smoke.lua', 'helicopter_companion_smoke.lua', 'equipment_ammo_smoke.lua', 'play_guitar_smoke.lua', 'slow_time_smoke.lua', 'aim_teleport_smoke.lua', 'kick_prop_rain_smoke.lua', 'stationary_mgun_smoke.lua', 'burer_form_smoke.lua', 'pseudogiant_form_smoke.lua', 'tushkano_form_smoke.lua', 'poltergeist_form_smoke.lua', 'bloodsucker_form_smoke.lua', 'controller_form_smoke.lua')) {
         Invoke-LuaJit @($fixture.FullName, $scriptRoot, $effectRoot, $optionalRoot)
     } elseif ($fixture.Name -in @('btr_companion_smoke.lua', 'pda_message_smoke.lua', 'special_companion_smoke.lua')) {
         Invoke-LuaJit @($fixture.FullName, $scriptRoot, $effectRoot, $optionalRoot)

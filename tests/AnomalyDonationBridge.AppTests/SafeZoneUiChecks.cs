@@ -34,7 +34,7 @@ internal static class SafeZoneUiChecks
             foreach (var script in Directory.EnumerateFiles(loader.EffectsDirectory, "*.script"))
                 File.Copy(script, Path.Combine(game, "gamedata", "scripts", Path.GetFileName(script)));
             var presets = loader.Load(game).Presets.ToList();
-            Check(presets.Count == 70, "UI fixture must contain all 70 real templates.");
+            Check(presets.Count == 72, "UI fixture must contain all 72 real templates.");
             typeof(BridgeRuntime).GetField("_presets", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(runtime, presets);
             var catalog = new CatalogSnapshot(new CatalogRevision("safe-zone-ui"), new string('a',64),
                 [SafeZoneTests.Level("l01_escape","Кордон"),SafeZoneTests.Level("l05_bar","Бар"),SafeZoneTests.Level("l02_garbage","Свалка")]);
@@ -111,7 +111,7 @@ internal static class SafeZoneUiChecks
                             selectedMode.GetBindingExpression(ToggleButton.IsCheckedProperty)!.UpdateSource();
                             Layout(root,width);
                             Check(rule.BlockSelected && allMode.IsChecked==false,"Styled radios failed to restore selected-effect mode.");
-                            Check(rule.TotalCount==70,"Template picker lost shipped templates.");
+                            Check(rule.TotalCount==72,"Template picker lost shipped templates.");
                             var checkbox=Find<CheckBox>(pane).Single(box=>box.DataContext is SafeZoneEffectViewModel effect && effect.HandlerId=="spawn_mutants");
                             checkbox.SetCurrentValue(ToggleButton.IsCheckedProperty,false);
                             checkbox.GetBindingExpression(ToggleButton.IsCheckedProperty)!.UpdateSource();

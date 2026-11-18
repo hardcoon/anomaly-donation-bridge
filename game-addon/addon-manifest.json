@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.183",
+  "addonVersion": "1.0.184",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
@@ -91,7 +91,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_catalog.script",
-      "sha256": "467A4E2CA625267C6C8960C0094C168E07647CCF1251CED02B733BE34EF9A986"
+      "sha256": "AE52B9211775C546FCD0A02C464845AB5781737267C6C1B6D9121048AE90648C"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_common.script",
@@ -112,6 +112,10 @@
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_npc_visuals.script",
       "sha256": "357F9508BE315BC27128F2ADAC90CE7BE88D7AB3077B27A89A0667B60467745B"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_props.script",
+      "sha256": "FBE53F95A9F2E46AFD632EF14841B6EBCC9EF8E57F4372F84C9054601990DAE4"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_protocol.script",
@@ -151,7 +155,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "565820CE0F3338F642255D35291677D1228F100D22577A872380B3BC51F75D64"
+      "sha256": "9A3F4E90C471C35A03642EA9EA54F25E15A9C559EB63E0702E7C2335EAAA92D9"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",

@@ -754,7 +754,8 @@ internal static class Program
         Assert(coreFiles.Count(name => name!.StartsWith("anomaly_donation_bridge_roulette", StringComparison.Ordinal)) == 5 &&
             !Directory.EnumerateFiles(game, "hc_upgrader*", SearchOption.AllDirectories).Any(),
             "Roulette integration must ship five private modules without replacing the standalone addon.");
-        Assert(coreFiles.Count == 28 && coreFiles.Contains("anomaly_donation_bridge_btr_ai.script") &&
+        Assert(coreFiles.Count == 29 && coreFiles.Contains("anomaly_donation_bridge_props.script") &&
+            coreFiles.Contains("anomaly_donation_bridge_btr_ai.script") &&
             coreFiles.Contains("anomaly_donation_bridge_reincarnation.script") &&
             coreFiles.Contains("anomaly_donation_bridge_relife_companions.script") &&
             coreFiles.Contains("anomaly_donation_bridge_azazel_hud.script") &&
@@ -789,8 +790,8 @@ internal static class Program
             !sharedSource.Contains("register_builtin", StringComparison.Ordinal),
             "Direct-spawn shared logic unexpectedly registered a preset itself.");
         var effectRoot = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
-        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 70,
-            "The application delivery must contain 70 one-file templates, excluding the archived chimera and psy-dog.");
+        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 72,
+            "The application delivery must contain 72 one-file templates, excluding the archived chimera and psy-dog.");
         var taskSource = await File.ReadAllTextAsync(Path.Combine(packageRoot,
             "gamedata", "configs", "misc", "task", "tm_anomaly_donation_bridge.ltx"));
         Assert(System.Text.RegularExpressions.Regex.Matches(taskSource,

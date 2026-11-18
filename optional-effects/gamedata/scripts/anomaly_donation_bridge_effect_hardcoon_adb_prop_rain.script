@@ -1,0 +1,167 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,"handlerId":"hardcoon.adb.prop_rain","displayName":"Дождь из предметов",
+  "description":"Создаёт над героем сетку падающих физических объектов из живого каталога игры. Выберите подвижные пропы, например взрывоопасные бочки. При случайном выборе каждый объект выбирается из отмеченных; иначе они чередуются по списку. Количество — общее число объектов, расстояние — шаг сетки, высота — над героем в момент активации. Объекты падают и разрушаются по своим игровым настройкам; взрыв бочек зависит от повреждения при столкновении. Создание выполняется порциями. План сохраняется до начала дождя: загрузка ADB after запускает его повторно, более позднее сохранение продолжает оставшуюся часть.",
+  "category":"world","cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"prop_sections","displayName":"Динамические объекты","kind":"MultiChoice","catalogKind":"DynamicProp","minimumSelections":1,"defaultValue":""},
+    {"key":"random_object","displayName":"Выбирать случайный объект из списка","kind":"Choice","options":["false","true"],"defaultValue":"true"},
+    {"key":"count","displayName":"Количество пропов","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"9"},
+    {"key":"spacing_meters","displayName":"Расстояние между пропами, м","kind":"Decimal","minimum":1,"maximum":20,"defaultValue":"3"},
+    {"key":"height_meters","displayName":"Высота пропов, м","kind":"Integer","minimum":2,"maximum":500,"defaultValue":"15"}
+  ],
+  "parameters":{"prop_sections":"","random_object":"true","count":"9","spacing_meters":"3","height_meters":"15"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local ID="hardcoon.adb.prop_rain"
+local SAVE="adb_prop_rain_v1"
+local pending,registered,ready_frame,last_frame
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e7 end
+local function integer(n,lo,hi) return finite(n) and n%1==0 and n>=lo and n<=hi end
+local function store() return alife_storage_manager and alife_storage_manager.get_state() end
+local function point(p) return {x=p.x,y=p.y,z=p.z} end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function valid_point(p) return type(p)=="table" and finite(p.x) and finite(p.y) and finite(p.z) end
+local function copy_job(job)
+    if not job then return end
+    local result={version=1,cursor=job.cursor,level=job.level,lvid=job.lvid,gvid=job.gvid,slots={}}
+    for i,slot in ipairs(job.slots) do result.slots[i]={section=slot.section,position=point(slot.position)} end
+    return result
+end
+local function persist(data)
+    data=data or store();if data then data[SAVE]=copy_job(pending) end
+end
+local function log(reason)
+    if type(printf)=="function" then pcall(printf,"[ADB] prop rain: %s",tostring(reason)) end
+end
+local function suspend() ready_frame,last_frame=nil,nil end
+local function read_saved()
+    pending=nil;suspend()
+    local r=store();r=r and r[SAVE]
+    if type(r)~="table" or r.version~=1 or type(r.level)~="string" or #r.level>100 or
+        not integer(r.lvid,0,4294967294) or not integer(r.gvid,0,65534) or type(r.slots)~="table" or
+        #r.slots<1 or #r.slots>100 or not integer(r.cursor,1,#r.slots) then return end
+    for _,slot in ipairs(r.slots) do
+        if type(slot)~="table" or not valid_point(slot.position) or
+            not anomaly_donation_bridge_common.valid_section_id(slot.section) then return end
+    end
+    pending=copy_job(r)
+end
+local function playable()
+    local a=db and db.actor
+    if not a or not a:alive() or not level.present() then return end
+    if type(app_ready)=="function" and not app_ready() then return end
+    local d=device()
+    if d:is_paused() or (tonumber(d.precache_frame) or 0)>0 or (tonumber(d.f_time_delta) or 0)<=0 or
+        a:is_talking() or a:get_current_holder() then return end
+    if type(Check_UI)=="function" and Check_UI() then return end
+    if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return end
+    if type(_GUIs)=="table" and next(_GUIs) then return end
+    local registry=anomaly_donation_bridge_registry
+    if registry.busy_reason and registry.busy_reason(ID) then return end
+    return a,d.frame
+end
+local function supported()
+    return db~=nil and db.actor~=nil and type(alife)=="function" and level~=nil and
+        type(level.present)=="function" and type(level.name)=="function" and vector~=nil and
+        type(RegisterScriptCallback)=="function" and store()~=nil and anomaly_donation_bridge_props~=nil
+end
+local function sections(value,revision)
+    local list,seen={},{}
+    if type(value)~="string" or #value>12000 then return nil,"prop_rain_sections_invalid" end
+    for section in (value..","):gmatch("(.-),") do
+        section=anomaly_donation_bridge_common.trim(section)
+        if section=="" or seen[section] or #list>=512 then return nil,"prop_rain_sections_invalid" end
+        local entry,reason=anomaly_donation_bridge_catalog.validate_section(
+            {section_id=section,catalog_revision=revision},"section_id","dynamic_prop")
+        if not entry then return nil,reason end
+        list[#list+1]=section;seen[section]=true
+    end
+    return #list>0 and list or nil,"prop_rain_selection_empty"
+end
+local function can_execute(context,params)
+    local c=anomaly_donation_bridge_common
+    local ok,why=c.params_only(params,{prop_sections=true,random_object=true,count=true,spacing_meters=true,height_meters=true,catalog_revision=true})
+    if not ok then return false,"rejected",why end
+    local count,error_code=c.parse_integer(params.count,9,1,100,"prop_rain_count_invalid")
+    if not count then return false,"rejected",error_code end
+    local height,height_error=c.parse_integer(params.height_meters,15,2,500,"prop_rain_height_invalid")
+    if not height then return false,"rejected",height_error end
+    local spacing=tonumber(params.spacing_meters or "3")
+    if not finite(spacing) or spacing<1 or spacing>20 then return false,"rejected","prop_rain_spacing_invalid" end
+    local random=params.random_object or "true"
+    if random~="true" and random~="false" then return false,"rejected","prop_rain_random_invalid" end
+    local selected,reason=sections(params.prop_sections,params.catalog_revision)
+    if not selected then return false,"rejected",reason end
+    if not supported() then return false,"deferred","prop_rain_api_unavailable" end
+    if pending then return false,"deferred","prop_rain_pending" end
+    local a=playable()
+    if not a then return false,"deferred","prop_rain_waiting_for_gameplay" end
+    if not valid_point(point(a:position())) or not integer(a:level_vertex_id(),0,4294967294) or
+        not integer(a:game_vertex_id(),0,65534) then return false,"deferred","prop_rain_position_unavailable" end
+    context.options={sections=selected,count=count,height=height,spacing=spacing,random=random=="true",
+        revision=params.catalog_revision};return true
+end
+local function execute(context)
+    local o=context.options
+    if not o then return "rejected","prop_rain_options_missing" end
+    local checked={};local ok,status,why=can_execute(checked,{prop_sections=table.concat(o.sections,","),
+        random_object=tostring(o.random),count=tostring(o.count),height_meters=tostring(o.height),
+        spacing_meters=tostring(o.spacing),catalog_revision=o.revision})
+    if not ok then return status,why end
+    o=checked.options
+    local a=db.actor;local origin=point(a:position())
+    local columns=math.ceil(math.sqrt(o.count));local rows=math.ceil(o.count/columns)
+    local plan={version=1,cursor=1,level=level.name(),lvid=a:level_vertex_id(),gvid=a:game_vertex_id(),slots={}}
+    for i=1,o.count do
+        local column,row=(i-1)%columns,math.floor((i-1)/columns)
+        plan.slots[i]={section=o.sections[o.random and math.random(#o.sections) or ((i-1)%#o.sections+1)],
+            position={x=origin.x+(column-(columns-1)/2)*o.spacing,y=origin.y+o.height,
+                z=origin.z+(row-(rows-1)/2)*o.spacing}}
+    end
+    -- The exact plan (including random picks) reaches ADB after before any
+    -- server object is created. A restored plan never rerolls its selection.
+    pending=plan;ready_frame=device().frame;persist()
+    return "executed","prop_rain_armed_"..o.count
+end
+local function update()
+    if not pending then return end
+    local a,frame=playable()
+    if not a then suspend();return end
+    if frame==last_frame then return end;last_frame=frame
+    if not ready_frame or frame<ready_frame then ready_frame=frame;return end
+    if frame-ready_frame<15 then return end
+    if level.name()~=pending.level then log("cancelled_on_different_level");pending=nil;persist();return end
+    local snapshot=anomaly_donation_bridge_catalog.snapshot()
+    if not snapshot then return end
+    -- Bound work per frame even with a large user selection/count.
+    for _=1,2 do
+        if not pending then return end
+        local slot=pending.slots[pending.cursor]
+        local entry,why=anomaly_donation_bridge_catalog.validate_section(
+            {section_id=slot.section,catalog_revision=snapshot.revision},"section_id","dynamic_prop")
+        if entry then
+            local ok,object=pcall(function()
+                return alife():create(slot.section,vec(slot.position),pending.lvid,pending.gvid)
+            end)
+            -- No automatic retry after an uncertain native creation: it may
+            -- have created the object before throwing. Do not duplicate it.
+            if not ok or not object then log("spawn_failed_"..slot.section) end
+        else log("section_skipped_"..tostring(why)) end
+        pending.cursor=pending.cursor+1
+        if pending.cursor>#pending.slots then pending=nil end
+        persist()
+    end
+end
+function on_game_start()
+    if registered then return end;registered=true
+    read_saved()
+    anomaly_donation_bridge_registry.register(ID,{is_supported=supported,can_execute=can_execute,execute=execute,
+        update=update,on_game_load=read_saved,on_level_changing=suspend})
+    RegisterScriptCallback("save_state",function(data) persist(data) end)
+    for _,name in ipairs({"on_before_load_input","main_menu_on_init","actor_on_net_destroy"}) do
+        RegisterScriptCallback(name,suspend)
+    end
+end

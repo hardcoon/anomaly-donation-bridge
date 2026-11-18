@@ -123,6 +123,7 @@ public static class CatalogContentHash
         CatalogEntryKind.Helicopter => "helicopter",
         CatalogEntryKind.ArmedVehicle => "armed_vehicle",
         CatalogEntryKind.NpcVisual => "npc_visual",
+        CatalogEntryKind.DynamicProp => "dynamic_prop",
         CatalogEntryKind.GuitarMusic => "guitar_music",
         _ => throw new InvalidDataException($"Неизвестный тип каталога: {kind}")
     };

@@ -2,7 +2,7 @@
 
 [← Первый запуск](../README.md)
 
-В `main` опубликованы исходники программы **1.4.6** и аддона **1.0.183**. Готовый комплект доступен в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
+В `main` опубликованы исходники программы **1.4.7** и аддона **1.0.184**. Готовый комплект доступен в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
 
 ## Требования
 
@@ -19,12 +19,12 @@
 | --- | --- |
 | `src` | Приложение, ядро, хранение данных, интеграции DonationAlerts, DonateX и YouTube, обмен с игрой, процесс восстановления после сбоя. |
 | `game-addon` | Аддон, манифест с контрольными суммами и необходимые ресурсы. |
-| `effects`, `optional-effects` | 70 поставляемых файловых шаблонов; при сборке объединяются в одну папку эффектов. |
+| `effects`, `optional-effects` | 72 поставляемых файловых шаблонов; при сборке объединяются в одну папку эффектов. |
 | `tests` | Тесты C# и Lua, искусственные каталоги и данные для проверок. |
 | `scripts` | Сборка, тесты, установка локального SDK и подготовка переносимого архива. |
 | `third-party` | Лицензии и сведения об используемых сторонних компонентах. |
 
-`game-addon/legacy-scripts` и отдельные файлы в `deferred-effects` нужны существующим регрессионным тестам. Они не устанавливаются в игру и не добавляются в комплект из 70 шаблонов.
+`game-addon/legacy-scripts` и отдельные файлы в `deferred-effects` нужны существующим регрессионным тестам. Они не устанавливаются в игру и не добавляются в комплект из 72 шаблонов.
 
 ## Сборка EXE
 
@@ -79,14 +79,14 @@ Lua-проверки выполняются с подставными игров
 
 ```powershell
 ./scripts/stage-minimal-release.ps1 `
-    -Version '1.4.6' `
-    -ExpectedEffectCount 70 `
+    -Version '1.4.7' `
+    -ExpectedEffectCount 72 `
     -PublishedRoot './artifacts/portable-win-x64' `
     -ReadmePath './README.md' `
-    -ReleaseNotesPath './docs/RELEASE_1.4.6_RU.md'
+    -ReleaseNotesPath './docs/RELEASE_1.4.7_RU.md'
 ```
 
-ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.4.6`. Повторная подготовка архива заменяет эту локальную папку. Подробные инструкции из `docs` доступны в репозитории, а в ZIP входит README.
+ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.4.7`. Повторная подготовка архива заменяет эту локальную папку. Подробные инструкции из `docs` доступны в репозитории, а в ZIP входит README.
 
 ## Лицензия
 

@@ -24,7 +24,8 @@ public enum CatalogEntryKind
     Helicopter,
     GuitarMusic,
     ArmedVehicle,
-    NpcVisual
+    NpcVisual,
+    DynamicProp
 }
 
 public enum CatalogStrength
@@ -701,6 +702,7 @@ public static class DynamicCatalogBinding
                 }
 
                 var fallback = definition.Kind == ParameterKind.MultiChoice && definition.CatalogKind != CatalogEntryKind.NpcVisual &&
+                    definition.CatalogKind != CatalogEntryKind.DynamicProp &&
                     !(action.HandlerId == "hardcoon.adb.wandering_trader" && definition.Key == "visuals")
                     ? string.Join(',', definition.Options)
                     : entries.FirstOrDefault()?.SectionId ?? string.Empty;
