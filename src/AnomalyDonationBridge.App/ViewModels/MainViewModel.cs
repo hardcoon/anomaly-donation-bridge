@@ -47,6 +47,7 @@ public sealed class MainViewModel : ObservableObject
     private bool _isInstallingBridge;
     private BridgeInstallationStatus? _bridgeInstallation;
     private int _bridgeStateRevision;
+    private readonly Dictionary<string, string> _presetSchemas = new(StringComparer.Ordinal);
 
     public MainViewModel(BridgeRuntime runtime)
     {
@@ -720,75 +721,15 @@ public sealed class MainViewModel : ObservableObject
             nameof(IsRedTheme), nameof(IsGreenTheme), nameof(IsBlueTheme), nameof(IsYellowTheme) })
             RaisePropertyChanged(name);
     }
-    private void RefreshFromSettings()
+    internal void RefreshFromSettings()
     {
         _runtime.UiPreferences.ActivePriceGroupNamesByProfile.TryGetValue(
             _runtime.ActiveProfile.Id, out var activeProfileGroupNames);
         ActiveBrowser.RestorePriceGroupNames(activeProfileGroupNames);
-        var currentResults = ActiveActions
-            .GroupBy(item => item.Id, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First().LastResult, StringComparer.Ordinal);
-        var currentDrafts = Presets
-            .GroupBy(item => item.HandlerId, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First().Model.Clone(), StringComparer.Ordinal);
-        var currentUserResults = UserPresets
-            .GroupBy(item => item.Id, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First().LastResult, StringComparer.Ordinal);
-        ActiveActions.Clear();
-        UserPresets.Clear();
-        Presets.Clear();
-        var displayOrdinal = 1;
-        foreach (var action in _runtime.Settings.Actions)
-        {
-            var viewModel = new ActionViewModel(
-                action,
-                catalogState: _runtime.CatalogState,
-                originLabel: _runtime.GetActionOriginLabel(action.HandlerId),
-                manifestAvailable: _runtime.IsHandlerAvailable(action.HandlerId),
-                displayOrdinal: displayOrdinal++,
-                hideUnavailableCatalogSections: _runtime.Settings.HideUnavailableCatalogSections);
-            if (currentResults.TryGetValue(action.Id, out var result)) viewModel.LastResult = result;
-            ActiveActions.Add(viewModel);
-        }
-        var userPresetOrdinal = 1;
-        foreach (var preset in _runtime.Settings.UserPresets)
-        {
-            var viewModel = new ActionViewModel(
-                preset,
-                isUserPreset: true,
-                catalogState: _runtime.CatalogState,
-                originLabel: _runtime.GetActionOriginLabel(preset.HandlerId),
-                manifestAvailable: _runtime.IsHandlerAvailable(preset.HandlerId),
-                displayOrdinal: userPresetOrdinal++,
-                hideUnavailableCatalogSections: _runtime.Settings.HideUnavailableCatalogSections);
-            if (currentUserResults.TryGetValue(preset.Id, out var result)) viewModel.LastResult = result;
-            UserPresets.Add(viewModel);
-        }
-        foreach (var preset in _runtime.Presets)
-        {
-            currentDrafts.TryGetValue(preset.HandlerId, out var existingDraft);
-            Presets.Add(new ActionViewModel(
-                CreatePresetDraft(preset, existingDraft),
-                isPreset: true,
-                catalogState: _runtime.CatalogState,
-                originLabel: _runtime.GetActionOriginLabel(preset.HandlerId),
-                manifestAvailable: _runtime.IsHandlerAvailable(preset.HandlerId),
-                hideUnavailableCatalogSections: _runtime.Settings.HideUnavailableCatalogSections));
-        }
-        foreach (var action in ActiveActions.Concat(UserPresets).Concat(Presets))
-        {
-            action.PropertyChanged += (_, change) =>
-            {
-                if (change.PropertyName == nameof(ActionViewModel.CanTest) &&
-                    TestCommand is AsyncRelayCommand command)
-                    command.RaiseCanExecuteChanged();
-                if (change.PropertyName == nameof(ActionViewModel.CanTest) &&
-                    RunAsDonorCommand is AsyncRelayCommand donorCommand)
-                    donorCommand.RaiseCanExecuteChanged();
-            };
-        }
-        Currencies.Clear();
-        foreach (var currency in _runtime.Settings.ObservedCurrencies) Currencies.Add(currency);
+        SynchronizeActionCards(ActiveActions, _runtime.Settings.Actions, ActiveBrowser);
+        SynchronizeActionCards(UserPresets, _runtime.Settings.UserPresets, UserPresetBrowser, isUserPreset: true);
+        SynchronizeActionCards(Presets, _runtime.Presets, PresetBrowser, isPreset: true);
+        foreach (var _ in CollectionSynchronization.Apply(Currencies, _runtime.Settings.ObservedCurrencies)) { }
         RaisePropertyChanged(nameof(Armed));
         RaisePropertyChanged(nameof(ProcessingStatus));
         RaisePropertyChanged(nameof(CanArm));
@@ -801,6 +742,57 @@ public sealed class MainViewModel : ObservableObject
         if (RunAsDonorCommand is AsyncRelayCommand donorCommand) donorCommand.RaiseCanExecuteChanged();
         if (AddHistoryExclusionCommand is AsyncRelayCommand exclusionCommand)
             exclusionCommand.RaiseCanExecuteChanged();
+    }
+
+    private void SynchronizeActionCards(ObservableCollection<ActionViewModel> target,
+        IEnumerable<ActionDefinition> source, ActionBrowserViewModel browser, bool isPreset = false, bool isUserPreset = false)
+    {
+        var existing = target.GroupBy(action => isPreset ? action.HandlerId : action.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var wanted = new List<ActionViewModel>();
+        var contentChanged = false;
+        foreach (var definition in source)
+        {
+            var key = isPreset ? definition.HandlerId : definition.Id;
+            existing.TryGetValue(key, out var card);
+            var model = definition;
+            if (isPreset)
+            {
+                var schema = ActionViewModel.SchemaSignature(definition);
+                model = card is not null && _presetSchemas.TryGetValue(key, out var previousSchema) && previousSchema == schema
+                    ? card.Model : CreatePresetDraft(definition, card?.Model);
+                _presetSchemas[key] = schema;
+            }
+            var ordinal = isPreset ? 0 : wanted.Count + 1;
+            if (card is not null && card.HandlerId == model.HandlerId)
+            {
+                contentChanged |= card.SynchronizeModel(model, _runtime.CatalogState,
+                    _runtime.GetActionOriginLabel(model.HandlerId), _runtime.IsHandlerAvailable(model.HandlerId),
+                    ordinal, _runtime.Settings.HideUnavailableCatalogSections);
+            }
+            else
+            {
+                var result = card?.LastResult;
+                card = new ActionViewModel(model, isPreset, isUserPreset, _runtime.CatalogState,
+                    _runtime.GetActionOriginLabel(model.HandlerId), _runtime.IsHandlerAvailable(model.HandlerId), ordinal,
+                    _runtime.Settings.HideUnavailableCatalogSections);
+                if (result is not null) card.LastResult = result;
+                card.PropertyChanged += ActionCardPropertyChanged;
+            }
+            wanted.Add(card);
+        }
+        foreach (var removed in target.Except(wanted).ToArray()) removed.PropertyChanged -= ActionCardPropertyChanged;
+        foreach (var _ in CollectionSynchronization.Apply(target, wanted)) { }
+        if (contentChanged) browser.InvalidateSource();
+        if (isPreset)
+            foreach (var key in _presetSchemas.Keys.Except(wanted.Select(card => card.HandlerId)).ToArray()) _presetSchemas.Remove(key);
+    }
+
+    private void ActionCardPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs change)
+    {
+        if (change.PropertyName != nameof(ActionViewModel.CanTest)) return;
+        if (TestCommand is AsyncRelayCommand command) command.RaiseCanExecuteChanged();
+        if (RunAsDonorCommand is AsyncRelayCommand donorCommand) donorCommand.RaiseCanExecuteChanged();
     }
 
     private async Task AddFromPresetAsync(ActionViewModel preset)

@@ -16,6 +16,11 @@ public sealed class ActivePriceGroupViewModel : ObservableObject
 {
     private bool _isExpanded;
     private string _displayName;
+    private IReadOnlyList<ActionViewModel> _actions;
+    private IReadOnlyList<TriggerRuleViewModel> _sharedTriggers;
+    private int _displayOrdinal;
+    private bool _strictSequence;
+    private int _groupDelaySeconds;
     private readonly Action<bool> _expandedChanged;
 
     internal ActivePriceGroupViewModel(
@@ -28,20 +33,20 @@ public sealed class ActivePriceGroupViewModel : ObservableObject
         bool deferRendering = false)
     {
         Key = key;
-        Actions = actions;
+        _actions = actions;
         RenderedActions = new(deferRendering ? [] : actions);
-        DisplayOrdinal = displayOrdinal;
+        _displayOrdinal = displayOrdinal;
         _displayName = displayName;
         _isExpanded = isExpanded;
         _expandedChanged = expandedChanged;
-        SharedTriggers = actions[0].Triggers.Where(trigger => trigger.Model.Enabled).ToArray();
+        _sharedTriggers = actions[0].Triggers.Where(trigger => trigger.Model.Enabled).ToArray();
     }
 
     public string Key { get; }
-    public IReadOnlyList<ActionViewModel> Actions { get; }
+    public IReadOnlyList<ActionViewModel> Actions => _actions;
     public ObservableCollection<ActionViewModel> RenderedActions { get; }
-    public IReadOnlyList<TriggerRuleViewModel> SharedTriggers { get; }
-    public int DisplayOrdinal { get; }
+    public IReadOnlyList<TriggerRuleViewModel> SharedTriggers => _sharedTriggers;
+    public int DisplayOrdinal => _displayOrdinal;
     public string DisplayOrdinalLabel => $"№{DisplayOrdinal}";
     public string DisplayName
     {
@@ -51,8 +56,35 @@ public sealed class ActivePriceGroupViewModel : ObservableObject
     public string CountLabel => $"Шаблонов: {Actions.Count}";
     public string Description => $"Одна сумма запускает {Actions.Count} активных шаблона";
     public bool CanTest => SharedTriggers.Count > 0 && Actions.All(action => action.CanTest);
-    public bool StrictSequence { get; internal set; }
-    public int GroupDelaySeconds { get; internal set; }
+    public bool StrictSequence { get => _strictSequence; internal set => SetProperty(ref _strictSequence, value); }
+    public int GroupDelaySeconds { get => _groupDelaySeconds; internal set => SetProperty(ref _groupDelaySeconds, value); }
+    internal void Refresh(IReadOnlyList<ActionViewModel> actions, int ordinal, string name, bool strict, int delay)
+    {
+        if (!Actions.SequenceEqual(actions))
+        {
+            _actions = actions;
+            RaisePropertyChanged(nameof(Actions));
+            RaisePropertyChanged(nameof(CountLabel));
+            RaisePropertyChanged(nameof(Description));
+        }
+        if (_displayOrdinal != ordinal)
+        {
+            _displayOrdinal = ordinal;
+            RaisePropertyChanged(nameof(DisplayOrdinal));
+            RaisePropertyChanged(nameof(DisplayOrdinalLabel));
+        }
+        var shared = actions[0].Triggers.Where(trigger => trigger.Model.Enabled).ToArray();
+        if (!SharedTriggers.SequenceEqual(shared))
+        {
+            _sharedTriggers = shared;
+            RaisePropertyChanged(nameof(SharedTriggers));
+        }
+        DisplayName = name;
+        StrictSequence = strict;
+        GroupDelaySeconds = delay;
+        NotifyAvailabilityChanged();
+    }
+    internal void NotifyAvailabilityChanged() => RaisePropertyChanged(nameof(CanTest));
     public bool IsExpanded
     {
         get => _isExpanded;
@@ -104,6 +136,10 @@ public sealed class ActionBrowserViewModel : ObservableObject
     private SearchItem[] _searchItems = [];
     private bool _sourceDirty;
     private bool _isUpdating;
+    private bool _presentationCurrent;
+    private bool _hasBeenDisplayed;
+    private string _appliedQuery = string.Empty;
+    private string _appliedCategory = string.Empty;
     internal bool DeferPresentation { get; set; }
     internal event Action? PresentationInvalidated;
     private readonly bool _groupEqualPrices;
@@ -213,16 +249,20 @@ public sealed class ActionBrowserViewModel : ObservableObject
 
     public void RestorePriceGroupNames(IReadOnlyDictionary<string, string>? names)
     {
-        _priceGroupNames.Clear();
+        var normalizedNames = new Dictionary<string, string>(StringComparer.Ordinal);
         if (names is not null)
         {
             foreach (var (key, value) in names)
             {
                 var normalized = value.Trim();
                 if (!string.IsNullOrWhiteSpace(key) && normalized.Length > 0)
-                    _priceGroupNames[key] = normalized[..Math.Min(normalized.Length, 160)];
+                    normalizedNames[key] = normalized[..Math.Min(normalized.Length, 160)];
             }
         }
+        if (_priceGroupNames.Count == normalizedNames.Count && normalizedNames.All(pair =>
+            _priceGroupNames.TryGetValue(pair.Key, out var value) && value == pair.Value)) return;
+        _priceGroupNames.Clear();
+        foreach (var pair in normalizedNames) _priceGroupNames.Add(pair.Key, pair.Value);
         RebuildVisibleEntries();
     }
 
@@ -270,7 +310,12 @@ public sealed class ActionBrowserViewModel : ObservableObject
 
     private void ActionsChanged(object? sender, NotifyCollectionChangedEventArgs change)
     {
-        _groupEntries.Clear();
+        // Moving a source item does not remove its cached presentation wrapper.
+        if (change.Action == NotifyCollectionChangedAction.Move)
+        {
+            RebuildVisibleEntries();
+            return;
+        }
         if (change.Action == NotifyCollectionChangedAction.Reset)
         {
             foreach (var action in _subscribed.ToArray()) Unsubscribe(action);
@@ -285,24 +330,48 @@ public sealed class ActionBrowserViewModel : ObservableObject
             foreach (ActionViewModel action in change.OldItems) Unsubscribe(action);
         if (change.NewItems is not null)
             foreach (ActionViewModel action in change.NewItems) Subscribe(action);
+        if (DeferPresentation && change.OldItems is not null)
+        {
+            // Do not leave deleted/previous-profile commands clickable while
+            // the asynchronous result is waiting for the next dispatcher turn.
+            var removed = change.OldItems.Cast<ActionViewModel>().ToHashSet();
+            foreach (var action in removed) _visibleActions.Remove(action);
+            foreach (var entry in VisibleEntries.Where(entry => entry.Action is { } action && removed.Contains(action) ||
+                entry.Group is { } group && group.Actions.Any(removed.Contains)).ToArray()) VisibleEntries.Remove(entry);
+        }
         RebuildVisibleEntries();
     }
 
     private void Subscribe(ActionViewModel action)
     {
-        if (_subscribed.Add(action)) action.TriggersChanged += RebuildVisibleEntries;
+        if (!_subscribed.Add(action)) return;
+        action.TriggersChanged += RebuildVisibleEntries;
+        action.PropertyChanged += ActionPropertyChanged;
     }
 
     private void Unsubscribe(ActionViewModel action)
     {
-        if (_subscribed.Remove(action)) action.TriggersChanged -= RebuildVisibleEntries;
+        if (_subscribed.Remove(action))
+        {
+            action.TriggersChanged -= RebuildVisibleEntries;
+            action.PropertyChanged -= ActionPropertyChanged;
+        }
         _singleEntries.Remove(action);
     }
+
+    private void ActionPropertyChanged(object? sender, PropertyChangedEventArgs change)
+    {
+        if (change.PropertyName != nameof(ActionViewModel.CanTest)) return;
+        foreach (var entry in _groupEntries.Values) entry.Group!.NotifyAvailabilityChanged();
+    }
+
+    internal void InvalidateSource() => RebuildVisibleEntries();
 
     private void RebuildVisibleEntries()
     {
         _searchCancellation?.Cancel();
         _sourceDirty = true;
+        _presentationCurrent = false;
         if (DeferPresentation)
         {
             _searchCancellation = null;
@@ -316,24 +385,41 @@ public sealed class ActionBrowserViewModel : ObservableObject
             CultureInfo.CurrentCulture.CompareInfo, _groupEqualPrices, CancellationToken.None);
         foreach (var _ in Synchronize(_visibleActions, result.Actions)) { }
         foreach (var _ in Synchronize(VisibleEntries, CreateEntries(result))) { }
+        _presentationCurrent = true;
+        _appliedQuery = SearchText.Trim();
+        _appliedCategory = SelectedCategory.Id;
     }
 
     internal void PrepareForDisplay()
     {
         _searchCancellation?.Cancel();
         _searchCancellation = null;
-        IsUpdating = true;
-        _visibleActions.Clear();
-        VisibleEntries.Clear();
+        // The first opening may contain thousands of never-realized rows.
+        // Populate that initial view in batches; retain it on later visits.
+        if (!_hasBeenDisplayed)
+        {
+            _hasBeenDisplayed = true;
+            _presentationCurrent = false;
+            _visibleActions.Clear();
+            VisibleEntries.Clear();
+        }
+        IsUpdating = _sourceDirty || !_presentationCurrent;
     }
 
     internal async Task SearchAsync(string query, CancellationToken token)
     {
         _searchCancellation?.Cancel();
+        SetProperty(ref _searchText, query, nameof(SearchText));
+        if (!_sourceDirty && _presentationCurrent && _appliedQuery == query.Trim() && _appliedCategory == SelectedCategory.Id)
+        {
+            _searchCancellation = null;
+            IsUpdating = false;
+            return;
+        }
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
         _searchCancellation = cancellation;
         IsUpdating = true;
-        SetProperty(ref _searchText, query, nameof(SearchText));
+        _presentationCurrent = false;
         if (_sourceDirty)
         {
             _searchItems = Snapshot();
@@ -371,6 +457,10 @@ public sealed class ActionBrowserViewModel : ObservableObject
                     batchSize = 0;
                     watch.Restart();
                 }
+                cancellation.Token.ThrowIfCancellationRequested();
+                _presentationCurrent = true;
+                _appliedQuery = query.Trim();
+                _appliedCategory = category;
             }, DispatcherPriority.Background, cancellation.Token).Task.Unwrap().ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
@@ -443,6 +533,9 @@ public sealed class ActionBrowserViewModel : ObservableObject
 
     private ActiveActionListEntryViewModel[] CreateEntries(SearchResult result, bool deferRendering = false)
     {
+        var currentGroupKeys = _searchItems.Where(item => item.PriceKey is not null).GroupBy(item => item.PriceKey!)
+            .Where(group => group.Count() >= 2).Select(group => group.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var key in _groupEntries.Keys.Where(key => !currentGroupKeys.Contains(key)).ToArray()) _groupEntries.Remove(key);
         foreach (var (action, ordinal) in result.Ordinals)
         {
             action.SetSequenceOrdinal(ordinal.Sequence);
@@ -461,10 +554,7 @@ public sealed class ActionBrowserViewModel : ObservableObject
             }
             var name = GroupName(key, entry.Actions.Length);
             if (!_groupEntries.TryGetValue(key, out var cached) || cached.Group is not { } group ||
-                group.DisplayOrdinal != entry.Ordinal || !group.Actions.SequenceEqual(entry.Actions) ||
-                group.StrictSequence != entry.Strict || group.GroupDelaySeconds != entry.Delay ||
-                !group.SharedTriggers.SequenceEqual(entry.Actions[0].Triggers.Where(trigger => trigger.Model.Enabled)) ||
-                group.DisplayName != name)
+                !group.Actions.SequenceEqual(entry.Actions))
             {
                 group = new ActivePriceGroupViewModel(key, entry.Actions, entry.Ordinal, name,
                     _expandedPriceGroups.TryGetValue(key, out var expanded) && expanded,
@@ -472,6 +562,7 @@ public sealed class ActionBrowserViewModel : ObservableObject
                 { StrictSequence = entry.Strict, GroupDelaySeconds = entry.Delay };
                 _groupEntries[key] = cached = ActiveActionListEntryViewModel.PriceGroup(group);
             }
+            else group.Refresh(entry.Actions, entry.Ordinal, name, entry.Strict, entry.Delay);
             if (!deferRendering)
                 foreach (var _ in Synchronize(group.RenderedActions, group.Actions)) { }
             else if (!VisibleEntries.Contains(cached))
@@ -482,23 +573,7 @@ public sealed class ActionBrowserViewModel : ObservableObject
     }
 
     private static IEnumerable<bool> Synchronize<T>(ObservableCollection<T> target, IReadOnlyList<T> wanted) where T : class
-    {
-        var retained = wanted.ToHashSet();
-        for (var index = target.Count - 1; index >= 0; index--)
-        {
-            if (retained.Contains(target[index])) continue;
-            target.RemoveAt(index);
-            yield return true;
-        }
-        var existing = target.ToHashSet();
-        for (var index = 0; index < wanted.Count; index++)
-        {
-            if (index < target.Count && ReferenceEquals(target[index], wanted[index])) continue;
-            if (existing.Add(wanted[index])) target.Insert(index, wanted[index]);
-            else target.Move(target.IndexOf(wanted[index]), index);
-            yield return true;
-        }
-    }
+        => CollectionSynchronization.Apply(target, wanted);
 
     private static string? PriceSignature(ActionViewModel action)
         => ActionPriceOrdering.GroupKey(action.Model);

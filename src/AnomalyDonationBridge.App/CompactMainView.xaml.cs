@@ -64,6 +64,7 @@ public partial class CompactMainView : UserControl
     }
 
     internal void SetApplicationLogo(ImageSource logo) => SmallLogo.Source = logo;
+    private ScrollViewer? ActionScroll => SmallActionsList.Template.FindName("ActionScroll", SmallActionsList) as ScrollViewer;
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e) => OwnerWindow?.ToggleSidebar();
     internal void FocusSearch()
     {
@@ -95,7 +96,7 @@ public partial class CompactMainView : UserControl
         SetValue(IsActiveSectionProperty, section == 0);
         var tabs = new[] { ActiveTab, UserTab, TemplatesTab, HistoryTab, SettingsNavigationTab, VotingNavigationTab };
         for (var index = 0; index < tabs.Length; index++) tabs[index].IsChecked = index == section;
-        ActionScroll.ScrollToTop();
+        ActionScroll?.ScrollToTop();
     }
 
     private void Section_Click(object sender, RoutedEventArgs e)

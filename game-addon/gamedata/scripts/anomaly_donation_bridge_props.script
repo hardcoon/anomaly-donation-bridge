@@ -1,6 +1,5 @@
--- Discover movable physical props from the running engine's merged INI/VFS.
+-- Discover physical explosive objects from the running engine's merged INI/VFS.
 -- Never instantiate models or touch their physics during catalogue discovery.
-local CLASSES={O_PHYSIC=true,O_PHYS_S=true,P_DSTRBL=true,O_DSTR_S=true,S_EXPLO=true}
 local function field(ini,section,key)
     return (anomaly_donation_bridge_common.trim(anomaly_donation_bridge_common.ini_string(ini,section,key) or ""))
 end
@@ -10,12 +9,13 @@ end
 function classify(ini,section)
     local c=anomaly_donation_bridge_common
     local class=field(ini,section,"class"):upper()
-    if not CLASSES[class] then return end
+    if class~="S_EXPLO" then return end
     local spawn=path(field(ini,section,"$spawn"))
     local visual=path(field(ini,section,"visual"))
-    -- Inventory explosives retain their existing item catalogue semantics.
-    if class=="S_EXPLO" and (c.ini_bool(ini,section,"can_take")~=false or
-        not spawn:find("^weapons\\explosive\\")) then return end
+    -- Restore the world's explosive family (barrels, cylinders, fuel cans,
+    -- tanks, powder cans, etc.), while excluding ordinary scenery/inventory.
+    if c.ini_bool(ini,section,"can_take")~=false or
+        not spawn:match("^weapons\\explosive\\[%w_%.%-]+$") then return end
     -- Bare physics/door bases require a level-placed visual and are not props.
     if visual=="" or spawn=="" then return end
     local reason
@@ -29,7 +29,7 @@ function classify(ini,section)
     if not reason and (field(ini,section,"fixed_bones")~="" or field(ini,section,"custom_data")~="" or
         field(ini,section,"startup_animation")~="" or binding~="" and binding~="bind_physic_object.init" or
         spawn:find("door",1,true)) then reason="scripted" end
-    if not reason and class=="S_EXPLO" and tonumber(field(ini,section,"blast"))==nil then
+    if not reason and tonumber(field(ini,section,"blast"))==nil then
         reason="invalid_structure"
     end
     if not reason and (not visual:match("^[%w_][%w_%.%-%/\\]*$") or visual:find("..",1,true)) then
@@ -47,6 +47,6 @@ function classify(ini,section)
     end
     if name=="" then name=section end
     return {section_id=section,kind="dynamic_prop",native_class=class,display_name=name,
-        category=class=="S_EXPLO" and "explosive_props" or "physics_props",strength="unclassified",faction="",
+        category="explosive_props",strength="unclassified",faction="",
         available=reason==nil,quarantine_reason=reason or "none"}
 end

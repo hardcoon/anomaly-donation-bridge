@@ -91,7 +91,8 @@ internal static class CompactWindowUiChecks
                     foreach (var section in new[] { 0,1,2,3 })
                     {
                         model.SelectedSectionIndex = section; Layout(window,size);
-                        Bounds(root);
+                        try { Bounds(root); }
+                        catch { Save(root, Path.Combine(outputDirectory, "layout-failure.png")); throw; }
                         Check(compact.IsHistorySection == (section == 3), "History did not follow the selected section.");
                         Check(compact.IsActiveSection == (section == 0), "Active-list tools leaked into another section.");
                         if(section!=3)
@@ -590,7 +591,7 @@ internal static class CompactWindowUiChecks
     private static void Bounds(FrameworkElement root)
     {
         foreach(var control in Find<Control>(root).Where(item=>item is ButtonBase or ComboBox or TextBox).Where(item=>Displayed(item,root)))
-        {var origin=control.TranslatePoint(new Point(),root);Check(origin.X>=-1&&origin.X+control.ActualWidth<=root.ActualWidth+1,$"Control overflows: {AutomationProperties.GetName(control)} {control.GetType().Name} {(control as ContentControl)?.Content}: {origin.X}+{control.ActualWidth}/{root.ActualWidth}");}
+        {var origin=control.TranslatePoint(new Point(),root);Check(origin.X>=-1&&origin.X+control.ActualWidth<=root.ActualWidth+1,$"Control overflows: {AutomationProperties.GetName(control)} {control.GetType().Name} {(control as ContentControl)?.Content}: {origin.X}+{control.ActualWidth}/{root.ActualWidth}, y={origin.Y}, rootHeight={root.ActualHeight}");}
     }
     private static void Save(FrameworkElement root,string file,double dpi=96)
     {var scale=dpi/96;var bitmap=new RenderTargetBitmap((int)Math.Ceiling(root.ActualWidth*scale),(int)Math.Ceiling(root.ActualHeight*scale),dpi,dpi,PixelFormats.Pbgra32);bitmap.Render(root);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using var output=File.Create(file);encoder.Save(output);}

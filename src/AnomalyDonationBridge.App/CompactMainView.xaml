@@ -286,7 +286,20 @@
             </ListBox>
         </Grid>
         <Grid Grid.Row="4" Grid.Column="1" Visibility="{Binding ShowTemplateSearch, Converter={StaticResource BoolToVisibility}}">
-            <ScrollViewer x:Name="ActionScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsControl x:Name="SmallActionsList" ItemsSource="{Binding VisibleItems, ElementName=CompactRoot}" Margin="0,0,4,0" AlternationCount="2" /></ScrollViewer>
+            <ItemsControl x:Name="SmallActionsList" ItemsSource="{Binding VisibleItems, ElementName=CompactRoot}" Margin="0,0,4,0" AlternationCount="2"
+                          VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                          VirtualizingPanel.ScrollUnit="Pixel" VirtualizingPanel.CacheLength="0">
+                <ItemsControl.ItemContainerStyle><Style TargetType="ContentPresenter">
+                    <Setter Property="Width" Value="{Binding ViewportWidth, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" />
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                </Style></ItemsControl.ItemContainerStyle>
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
+                    <ScrollViewer x:Name="ActionScroll" CanContentScroll="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <ItemsPresenter />
+                    </ScrollViewer>
+                </ControlTemplate></ItemsControl.Template>
+            </ItemsControl>
             <TextBlock Text="Ничего не найдено" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding ElementName=SmallActionsList, Path=HasItems}" Value="False"><Setter Property="Visibility" Value="Visible" /></DataTrigger><DataTrigger Binding="{Binding IsTemplateBrowserUpdating}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
         </Grid>
         <Grid Grid.Row="3" Grid.RowSpan="2" Grid.Column="1" Visibility="{Binding IsHistorySection, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" Margin="0,6,0,0">

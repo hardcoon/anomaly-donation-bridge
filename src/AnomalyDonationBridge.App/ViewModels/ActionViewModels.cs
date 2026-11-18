@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.ComponentModel;
+using System.Text.Json;
 using System.Windows.Data;
 using System.Windows.Input;
 using AnomalyDonationBridge.App.Services;
@@ -684,7 +685,12 @@ public sealed class TriggerRuleViewModel : ObservableObject
     }
 
     public ActionViewModel Owner { get; }
-    public TriggerRule Model { get; }
+    public TriggerRule Model { get; private set; }
+    internal void Rebind(TriggerRule model)
+    {
+        Model = model;
+        RaisePropertyChanged(nameof(Label));
+    }
     public string Label => $"{(Model.Comparator == TriggerComparator.Exact ? "=" : "≥")} {Model.Amount:0.##} {Model.Currency}";
     public void Refresh()
     {
@@ -697,9 +703,11 @@ public sealed class ActionViewModel : ObservableObject
 {
     private string _lastResult = "Ещё не запускалось";
     private string _cooldownText;
-    private readonly CatalogRuntimeState _catalogState;
-    private readonly bool _hideUnavailableCatalogSections;
-    private readonly bool _manifestAvailable;
+    private CatalogRuntimeState _catalogState;
+    private bool _hideUnavailableCatalogSections;
+    private bool _manifestAvailable;
+    private string _renderedState;
+    private string _renderedTriggers;
     private readonly RelayCommand _removeItemSpawnCommand;
     private readonly RelayCommand _removeSpawnGroupCommand;
     private int _visualDisplayOrdinal;
@@ -770,11 +778,13 @@ public sealed class ActionViewModel : ObservableObject
             RaisePropertyChanged(nameof(HasTriggers));
             TriggersChanged?.Invoke();
         };
+        _renderedState = StateSignature(Model);
+        _renderedTriggers = JsonSerializer.Serialize(Model.Triggers);
     }
 
     public event Action? TriggersChanged;
 
-    public ActionDefinition Model { get; }
+    public ActionDefinition Model { get; private set; }
     public string Id => Model.Id;
     public string HandlerId => Model.HandlerId;
     public bool IsPreset { get; }
@@ -784,7 +794,7 @@ public sealed class ActionViewModel : ObservableObject
     public bool IsSpawnGroupBundle => SpawnGroupBundleCodec.Supports(HandlerId);
     public bool HasRowBundle => IsItemBundle || IsSpawnGroupBundle;
     public string DisplayName => Model.DisplayName;
-    public int DisplayOrdinal { get; }
+    public int DisplayOrdinal { get; private set; }
     public string DisplayOrdinalLabel => DisplayOrdinal > 0 ? $"№{DisplayOrdinal}" : string.Empty;
     public int VisualDisplayOrdinal
     {
@@ -797,7 +807,7 @@ public sealed class ActionViewModel : ObservableObject
     }
     public string VisualDisplayOrdinalLabel => VisualDisplayOrdinal > 0 ? $"№{VisualDisplayOrdinal}" : string.Empty;
     public string Description => Model.Description;
-    public string OriginLabel { get; }
+    public string OriginLabel { get; private set; }
     public bool RequiresCatalog => CatalogRevisionEnforcement.RequiresCatalog(Model);
     public bool IsSupported => _manifestAvailable && (!_catalogState.IsLive ||
         ReferenceEquals(_catalogState.Capabilities, CapabilitySet.Empty) ||
@@ -833,7 +843,7 @@ public sealed class ActionViewModel : ObservableObject
             ? 1
             : Parameters.Count == 3 && Parameters.All(parameter => !parameter.IsGroupedItemChoice) ? 3 : 2;
     public bool IsWanderingTrader => HandlerId == "hardcoon.adb.wandering_trader";
-    public IReadOnlyList<TraderStockRowViewModel> TraderStockRows { get; }
+    public IReadOnlyList<TraderStockRowViewModel> TraderStockRows { get; private set; }
     public IEnumerable<ParameterValueViewModel> RegularParameters => Parameters.Where(parameter =>
         !parameter.AllowsMouseKey && (!IsWanderingTrader || !TraderStockRowViewModel.IsStockKey(parameter.Definition.Key)));
     public IEnumerable<ParameterValueViewModel> AbilityKeyParameters => Parameters.Where(parameter => parameter.AllowsMouseKey);
@@ -1019,6 +1029,101 @@ public sealed class ActionViewModel : ObservableObject
     }
 
     internal void NotifyTriggersChanged() => TriggersChanged?.Invoke();
+
+    // A settings notification may change one action or only a global toggle.
+    // Keep the card and its commands alive; refresh editor data only when its
+    // model/schema or effective catalogue actually changed.
+    internal bool SynchronizeModel(ActionDefinition model, CatalogRuntimeState catalogState,
+        string originLabel, bool manifestAvailable, int ordinal, bool hideUnavailable)
+    {
+        var signature = StateSignature(model);
+        var changed = _renderedState != signature || !ReferenceEquals(Model, model);
+        var catalogChanged = _catalogState.IsLive != catalogState.IsLive ||
+            _catalogState.Catalog?.Revision != catalogState.Catalog?.Revision ||
+            _catalogState.Catalog?.ContentHash != catalogState.Catalog?.ContentHash ||
+            !ReferenceEquals(_catalogState.Capabilities, catalogState.Capabilities);
+        var availabilityChanged = _manifestAvailable != manifestAvailable || OriginLabel != originLabel;
+        var ordinalChanged = DisplayOrdinal != ordinal;
+        var hideChanged = _hideUnavailableCatalogSections != hideUnavailable;
+        Model = model;
+        _catalogState = catalogState;
+        _manifestAvailable = manifestAvailable;
+        _hideUnavailableCatalogSections = hideUnavailable;
+        OriginLabel = originLabel;
+        if (ordinalChanged)
+        {
+            DisplayOrdinal = ordinal;
+            RaisePropertyChanged(nameof(DisplayOrdinal));
+            RaisePropertyChanged(nameof(DisplayOrdinalLabel));
+        }
+        if (changed || catalogChanged || hideChanged)
+        {
+            if (catalogState.Catalog is { } catalog)
+            {
+                DynamicCatalogBinding.Apply(catalog, [Model]);
+                if (!catalogState.IsLive) Model.CatalogRevision = null;
+            }
+            Parameters.Clear();
+            foreach (var definition in Model.ParameterDefinitions.Where(definition => !IsBundledParameter(definition.Key)))
+                Parameters.Add(new ParameterValueViewModel(Model, definition, OnParameterChanged, catalogState, hideUnavailable));
+            TraderStockRows = IsWanderingTrader ? TraderStockRowViewModel.Create(Parameters).ToArray() : [];
+            ReloadBundleRowsFromModel();
+            _cooldownText = Model.CooldownSeconds.ToString(CultureInfo.InvariantCulture);
+            var triggerState = JsonSerializer.Serialize(Model.Triggers);
+            if (_renderedTriggers != triggerState || !Triggers.Select(trigger => trigger.Model).SequenceEqual(Model.Triggers))
+            {
+                var previous = Triggers.GroupBy(trigger => trigger.Model.Id, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+                var wanted = Model.Triggers.Select(rule =>
+                {
+                    if (!previous.TryGetValue(rule.Id, out var trigger)) return new TriggerRuleViewModel(this, rule);
+                    trigger.Rebind(rule);
+                    return trigger;
+                }).ToArray();
+                foreach (var _ in CollectionSynchronization.Apply(Triggers, wanted)) { }
+                _renderedTriggers = triggerState;
+                foreach (var property in new[] { nameof(PriceItems), nameof(PrimaryPriceLabel), nameof(FirstThreeTriggers), nameof(HasTriggers) })
+                    RaisePropertyChanged(property);
+                TriggersChanged?.Invoke();
+            }
+            _renderedState = StateSignature(Model);
+            foreach (var property in new[] { nameof(Model), nameof(DisplayName), nameof(Description), nameof(Parameters),
+                nameof(TraderStockRows), nameof(RegularParameters), nameof(AbilityKeyParameters), nameof(CompactParameterColumns),
+                nameof(CooldownText), nameof(CooldownSeconds), nameof(CooldownValidationMessage), nameof(RequiresCatalog),
+                nameof(SequenceGroupKey) })
+                RaisePropertyChanged(property);
+            RaiseEditorProperties();
+        }
+        if (availabilityChanged || catalogChanged)
+        {
+            RaisePropertyChanged(nameof(OriginLabel));
+            RaisePropertyChanged(nameof(IsSupported));
+            RaisePropertyChanged(nameof(CanTest));
+            RaisePropertyChanged(nameof(AvailabilityHint));
+        }
+        return changed || ordinalChanged;
+    }
+
+    internal static string SchemaSignature(ActionDefinition model) => JsonSerializer.Serialize(new
+    {
+        model.HandlerId, model.DisplayName, model.HasCustomDisplayName, model.Description, model.CategoryId, model.ScriptRelativePath,
+        Definitions = model.ParameterDefinitions.Select(definition => new
+        {
+            definition.Key, definition.DisplayName, definition.Kind, definition.Minimum, definition.Maximum,
+            definition.DefaultValue, definition.CatalogKind, definition.CatalogNativeClasses, definition.CatalogCategories,
+            definition.MinimumSelections,
+            Options = definition.CatalogKind is null ? definition.Options : null,
+            Groups = definition.CatalogKind is null ? definition.OptionGroups : null,
+            Labels = definition.CatalogKind is null ? definition.OptionLabels : null
+        })
+    });
+
+    private static string StateSignature(ActionDefinition model) => JsonSerializer.Serialize(new
+    {
+        Schema = SchemaSignature(model), model.IsActive, model.StrictSequence, model.GroupDelaySeconds, model.CooldownSeconds,
+        Parameters = model.Parameters.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase),
+        model.ItemSpawns, model.SpawnGroups, model.Triggers
+    });
 
     private void OnParameterChanged()
     {

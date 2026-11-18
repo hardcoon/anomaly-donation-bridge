@@ -1,18 +1,18 @@
 --[[ADB_PRESET_V1
 {
   "schemaVersion":1,"handlerId":"hardcoon.adb.kick","displayName":"Дать пинка",
-  "description":"Автоматически подбрасывает героя на заданную высоту над точкой старта. Высота рассчитывается по текущей гравитации; потолки и другие препятствия ограничивают подъём. Ждёт закрытия окон и окончания загрузки. На старом движке без управления скоростью использует обычный прыжок и ждёт возможности прыгнуть, затем восстанавливает обычную высоту прыжка. Эффект записывается в сохранение до запуска: загрузка ADB after повторяет его. Более поздние сохранения после прыжка его не повторяют.",
+  "description":"Однократно запускает штатный прыжок героя на заданную высоту над точкой отрыва. При подтверждённом подъёме проигрывает штатный звук боли от падения, без нанесения урона. Высота рассчитывается по гравитации; препятствия ограничивают подъём. Перед импульсом ждёт закрытия окон и окончания загрузки. Клавиша отпускается после одного импульса, обычная высота прыжка восстанавливается. Заблокированная попытка не повторяется бесконечно. ADB after повторяет ожидающий импульс один раз; сейвы во время и после попытки её не запускают заново.",
   "category":"player_state","cooldownSeconds":3,
   "parameterDefinitions":[
-    {"key":"height_meters","displayName":"Высота прыжка, м","kind":"Integer","minimum":2,"maximum":500,"defaultValue":"5"}
+    {"key":"height_meters","displayName":"Высота прыжка, м","kind":"Integer","minimum":2,"maximum":500,"defaultValue":"10"}
   ],
-  "parameters":{"height_meters":"5"},"itemSpawns":[],"spawnGroups":[]
+  "parameters":{"height_meters":"10"},"itemSpawns":[],"spawnGroups":[]
 }
 ADB_PRESET_END]]
 
 local ID="hardcoon.adb.kick"
 local SAVE="adb_kick_v1"
-local pending,lease,registered,ready_frame,last_frame,retry_at
+local pending,lease,registered,ready_frame,last_frame
 local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e10 end
 local function valid_height(n) return finite(n) and n%1==0 and n>=2 and n<=500 end
 local function store() return alife_storage_manager and alife_storage_manager.get_state() end
@@ -23,7 +23,7 @@ local function jump_dik()
 end
 local function persist(data)
     data=data or store();if not data then return end
-    data[SAVE]=pending and {version=1,height=pending.height,
+    data[SAVE]=pending and {version=2,height=pending.height,phase=pending.phase,
         previous=lease and lease.previous,applied=lease and lease.applied} or nil
 end
 local function restore_speed(a,previous,applied)
@@ -33,7 +33,7 @@ end
 local function release()
     local old=lease;lease=nil
     if not old then return end
-    pcall(level.release_action,old.dik)
+    if not old.input_released then pcall(level.release_action,old.dik) end
     pcall(restore_speed,old.actor,old.previous,old.applied)
 end
 local function suspend()
@@ -41,10 +41,14 @@ local function suspend()
 end
 local function read_saved()
     local data=store();local r=data and data[SAVE]
-    pending=nil;retry_at=nil
-    if type(r)=="table" and r.version==1 and valid_height(r.height) then
+    pending=nil
+    if type(r)=="table" and (r.version==1 or r.version==2) and valid_height(r.height) then
         pcall(restore_speed,db and db.actor,r.previous,r.applied)
-        pending={height=r.height}
+        -- ADB after contains an armed job. A later save taken during/after the
+        -- input pulse must never turn that same attempt into another jump.
+        local armed=r.version==1 and r.applied==nil or r.version==2 and r.phase=="armed"
+        if armed then pending={height=r.height,phase="armed"} end
+        persist(data)
     end
 end
 local function playable()
@@ -66,56 +70,100 @@ local function gravity()
     local ok,g=pcall(function() return tonumber(get_console():get_string("ph_gravity")) end)
     return ok and finite(g) and g>0 and g<=1000 and g or nil
 end
+local function play_fall_pain(a)
+    -- CActor loads sndHit[eHitTypeStrike] from actor.hit_sounds -> strike.
+    -- Reuse that merged configuration (including voice replacements in MO2).
+    -- Never synthesize a hit just to make the actor vocalize.
+    local c=anomaly_donation_bridge_common
+    local ini=system_ini()
+    local section=type(a.section)=="function" and a:section() or "actor"
+    local profile=c.ini_string(ini,section,"hit_sounds")
+    if not profile or profile=="" then profile=c.ini_string(ini,"actor","hit_sounds") end
+    if not profile or profile=="" then return false,"hit_sound_profile_unavailable" end
+    local list=c.ini_string(ini,profile,"strike") or ""
+    local choices={}
+    for token in (list..","):gmatch("(.-),") do
+        local name=c.trim(token):gsub('^"(.*)"$','%1'):gsub("/","\\")
+        if name:lower():match("%.ogg$") then name=name:sub(1,-5) end
+        if #name>0 and #name<=180 and not name:find("..",1,true) and
+            name:match("^[%w_][%w_%.%-%s\\]*$") and getFS():exist("$game_sounds$",name..".ogg") then
+            choices[#choices+1]=name
+        end
+    end
+    if #choices==0 then return false,"strike_sound_resource_unavailable" end
+    local sound=sound_object(choices[math.random(#choices)])
+    -- No-feedback playback survives disposal of the short-lived Lua wrapper.
+    sound:play_no_feedback(a,sound_object.s2d,0,vector():set(0,0,0),1,1)
+    return true
+end
 local function supported()
     local a=db and db.actor
-    local native=a and type(a.get_movement_speed)=="function" and type(a.set_movement_speed)=="function" and vector~=nil
-    local legacy=a and type(a.get_actor_jump_speed)=="function" and type(a.set_actor_jump_speed)=="function" and
+    local jump=a and type(a.get_actor_jump_speed)=="function" and type(a.set_actor_jump_speed)=="function" and
         type(a.get_movement_speed)=="function" and level~=nil and type(level.press_action)=="function" and
         type(level.release_action)=="function" and jump_dik()~=nil
-    return (native or legacy) and level~=nil and
+    return jump and level~=nil and
         type(level.present)=="function" and type(RegisterScriptCallback)=="function" and
         type(device)=="function" and store()~=nil
 end
 local function update()
     if not pending then return end
+    -- UI/level transitions release the transient lease. An issued job remains
+    -- consumed even if that happens before the rise-confirmation update.
+    if pending.phase=="issued" and not lease then pending=nil;persist();return end
     local a,frame=playable()
     if not a then suspend();return end
     if last_frame==frame then return end
     last_frame=frame
     if lease then
+        -- One native press is one attempt. Release input at the next update,
+        -- even if a mod suppresses the jump callback or a ceiling stops us.
+        if frame>lease.frame and not lease.input_released then
+            pcall(level.release_action,lease.dik);lease.input_released=true
+        end
         -- actor_on_jump precedes PHMovementControl::Calculate. Restoring the
         -- speed in that callback would cancel the boost before native Jump.
-        if lease.jumped and frame>lease.frame then
-            release();pending=nil;persist();return
+        if frame>lease.frame then
+            local velocity=a:get_movement_speed()
+            local pos=a:position()
+            -- CActor_on_jump also fires when the character's physical body
+            -- refuses to jump. Confirm actual takeoff before consuming the job.
+            if finite(pos.y) and pos.y>lease.start_y+.025 and
+                (lease.jumped or velocity and finite(velocity.y) and velocity.y>0.1) then
+                local ok,played,why=pcall(play_fall_pain,a)
+                if (not ok or not played) and type(printf)=="function" then
+                    pcall(printf,"[ADB] kick: fall sound unavailable: %s",tostring(ok and why or played))
+                end
+                if type(printf)=="function" then pcall(printf,"[ADB] kick: native takeoff, height=%sm",tostring(pending.height)) end
+                release();pending=nil;persist();return
+            end
         end
-        if time_global()-lease.started>=500 then
-            release();persist();retry_at=time_global()+500
+        if time_global()-lease.started>=1000 then
+            if type(printf)=="function" then
+                pcall(printf,"[ADB] kick: attempt finished without confirmed rise (jump callback=%s)",tostring(lease.jumped==true))
+            end
+            release();pending=nil;persist()
         end
         return
     end
     if not ready_frame or frame<ready_frame then ready_frame=frame;return end
-    if frame-ready_frame<15 or retry_at and time_global()<retry_at then return end
+    if frame-ready_frame<15 then return end
     local g=gravity()
     if not g then return end
     local speed=math.sqrt(2*g*pending.height)
     local velocity=a:get_movement_speed()
     if not velocity or not finite(velocity.x) or not finite(velocity.y) or not finite(velocity.z) then return end
-    if type(a.set_movement_speed)=="function" then
-        -- Monolith exposes CPHMovementControl::SetVelocity. Preserve horizontal
-        -- motion and use a vertical ballistic launch, also when already airborne.
-        pending=nil;persist()
-        local ok,why=pcall(function() a:set_movement_speed(vector():set(velocity.x,speed,velocity.z)) end)
-        if not ok and type(printf)=="function" then pcall(printf,"[ADB] kick launch failed: %s",tostring(why)) end
-        return
-    end
-    -- Stock's actor_on_jump can fire without a physical jump in midair. Do not
-    -- spend the pending kick while falling or rising on that compatibility path.
+    -- SetVelocity alone leaves ground/control flags intact: the next physics
+    -- step clamps the speed and can report collision damage without takeoff.
+    -- Use CPHActorCharacter::Jump via the ordinary jump action on every engine.
     if math.abs(velocity.y)>.1 then return end
     local dik=jump_dik()
     if not dik then return end
     local before=a:get_actor_jump_speed()
     if not finite(before) or before<=0 then return end
-    lease={actor=a,dik=dik,previous=before,applied=speed,frame=frame,started=time_global()}
+    local pos=a:position()
+    if not pos or not finite(pos.y) then return end
+    lease={actor=a,dik=dik,previous=before,applied=speed,frame=frame,started=time_global(),start_y=pos.y}
+    pending.phase="issued"
     persist()
     local ok=pcall(function()
         a:set_actor_jump_speed(speed)
@@ -123,13 +171,13 @@ local function update()
         -- Uses the configured jump binding, never the monster-only obj:jump API.
         level.press_action(dik)
     end)
-    if not ok then release();persist();retry_at=time_global()+1000 end
+    if not ok then release();pending=nil;persist() end
 end
 local function can_execute(context,params)
     local c=anomaly_donation_bridge_common
     local ok,why=c.params_only(params,{height_meters=true})
     if not ok then return false,"rejected",why end
-    local height,error_code=c.parse_integer(params.height_meters,5,2,500,"kick_height_invalid")
+    local height,error_code=c.parse_integer(params.height_meters,10,2,500,"kick_height_invalid")
     if not height then return false,"rejected",error_code end
     if not supported() then return false,"deferred","kick_jump_api_unavailable" end
     if pending then return false,"deferred","kick_pending" end
@@ -141,7 +189,7 @@ local function execute(context)
     if not ok then return status,why end
     -- Runtime writes ADB after synchronously after execute. No input or native
     -- setting is changed until a later update, so the save contains the kick.
-    pending={height=checked.height};retry_at=nil;ready_frame=device().frame
+    pending={height=checked.height,phase="armed"};ready_frame=device().frame
     persist();return "executed","kick_armed_"..pending.height.."m"
 end
 function on_game_start()

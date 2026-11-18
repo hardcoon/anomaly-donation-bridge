@@ -86,14 +86,22 @@ internal static class FilePresetTests
             var kick = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.kick");
             var kickHeight = kick.ParameterDefinitions.Single();
             Assert(kick.DisplayName == "Дать пинка" && kickHeight.Key == "height_meters" &&
-                kick.Parameters[kickHeight.Key] == "5" && kickHeight.Validate("2") is null &&
+                kick.Parameters[kickHeight.Key] == "10" && kickHeight.Validate("2") is null &&
                 kickHeight.Validate("500") is null && kickHeight.Validate("1") is not null &&
                 kickHeight.Validate("501") is not null && kickHeight.Validate("2.5") is not null,
-                "Kick must expose the requested 2–500 metre range and 5 metre default.");
+                "Kick must expose the requested 2–500 metre range and 10 metre default.");
             var rain = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.prop_rain");
             var propEntries = new[] {
                 new CatalogEntry { SectionId = "explosive_barrel", Kind = CatalogEntryKind.DynamicProp,
                     DisplayName = "Бочка", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
+                new CatalogEntry { SectionId = "explosive_barrel_low", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Бочка малая", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
+                new CatalogEntry { SectionId = "explosive_gaz_balon", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Газовый баллон", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
+                new CatalogEntry { SectionId = "explosive_fuelcan", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Канистра", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
+                new CatalogEntry { SectionId = "explosive_mobiltank", Kind = CatalogEntryKind.DynamicProp,
+                    DisplayName = "Бак", Category = "explosive_props", NativeClass = "S_EXPLO", IsAvailable = true },
                 new CatalogEntry { SectionId = "crate", Kind = CatalogEntryKind.DynamicProp,
                     DisplayName = "Ящик", Category = "physics_props", NativeClass = "O_PHYSIC", IsAvailable = true },
                 new CatalogEntry { SectionId = "story_prop", Kind = CatalogEntryKind.DynamicProp,
@@ -106,16 +114,19 @@ internal static class FilePresetTests
             DynamicCatalogBinding.Apply(propsCatalog, [rain]);
             var propSelection = rain.ParameterDefinitions.Single(p => p.Key == "prop_sections");
             Assert(propSelection.Kind == ParameterKind.MultiChoice && propSelection.CatalogKind == CatalogEntryKind.DynamicProp &&
-                propSelection.Options.Count == 2 && propSelection.Validate("explosive_barrel,crate") is null &&
+                propSelection.Options.Count == 5 && propSelection.Validate("explosive_barrel,explosive_gaz_balon,explosive_fuelcan,explosive_mobiltank") is null &&
                 propSelection.Validate("ordinary_item") is not null && propSelection.Validate("story_prop") is not null &&
+                propSelection.Validate("crate") is not null &&
                 rain.CatalogRevision == propsCatalog.Revision &&
                 new ActionViewModel(rain).Parameters.Single(p => p.Definition.Key == "random_object").IsBooleanChoice &&
-                rain.Parameters["count"] == "9" && rain.Parameters["spacing_meters"] == "3" &&
-                rain.Parameters["height_meters"] == "15",
-                "Prop rain must bind only available physical objects, show a checkbox, and retain its defaults.");
-            rain.Parameters["prop_sections"] = "explosive_barrel,crate";
+                rain.DisplayName == "Дождь из бочек" && rain.Parameters["detonate_on_impact"] == "true" &&
+                new ActionViewModel(rain).Parameters.Single(p => p.Definition.Key == "detonate_on_impact").IsBooleanChoice &&
+                rain.Parameters["count"] == "9" && rain.Parameters["spacing_meters"] == "4" &&
+                rain.Parameters["height_meters"] == "50",
+                "Rain must bind available physical explosives, show a checkbox, and retain 9/4m/50m defaults.");
+            rain.Parameters["prop_sections"] = "explosive_barrel,explosive_gaz_balon";
             DynamicCatalogBinding.Apply(propsCatalog, [rain]);
-            Assert(rain.Parameters["prop_sections"] == "explosive_barrel,crate",
+            Assert(rain.Parameters["prop_sections"] == "explosive_barrel,explosive_gaz_balon",
                 "Catalogue refresh must preserve the user's selected props.");
             var pdaMessage = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == DonationDispatcher.PdaMessageHandlerId);
             Assert(pdaMessage.DisplayName == "Отправить сообщение в КПК" &&

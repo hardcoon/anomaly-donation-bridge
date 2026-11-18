@@ -122,7 +122,10 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         try
         {
             var preferences = update(UiPreferences);
-            await _uiPreferencesStore.SaveAsync(preferences).ConfigureAwait(false);
+            // Opening/replacing a WriteThrough settings file can block before
+            // its first asynchronous write. Keep that work off the UI thread,
+            // retaining this gate so preference changes keep their order.
+            await Task.Run(() => _uiPreferencesStore.SaveAsync(preferences)).ConfigureAwait(false);
             UiPreferences = preferences;
         }
         finally { _uiPreferencesSaveGate.Release(); }

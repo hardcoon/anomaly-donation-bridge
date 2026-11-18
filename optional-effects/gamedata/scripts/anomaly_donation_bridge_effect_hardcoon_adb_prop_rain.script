@@ -1,16 +1,17 @@
 --[[ADB_PRESET_V1
 {
-  "schemaVersion":1,"handlerId":"hardcoon.adb.prop_rain","displayName":"Дождь из предметов",
-  "description":"Создаёт над героем сетку падающих физических объектов из живого каталога игры. Выберите подвижные пропы, например взрывоопасные бочки. При случайном выборе каждый объект выбирается из отмеченных; иначе они чередуются по списку. Количество — общее число объектов, расстояние — шаг сетки, высота — над героем в момент активации. Объекты падают и разрушаются по своим игровым настройкам; взрыв бочек зависит от повреждения при столкновении. Создание выполняется порциями. План сохраняется до начала дождя: загрузка ADB after запускает его повторно, более позднее сохранение продолжает оставшуюся часть.",
+  "schemaVersion":1,"handlerId":"hardcoon.adb.prop_rain","displayName":"Дождь из бочек",
+  "description":"Создаёт над героем дождь из отмеченных взрывоопасных объектов игры: бочек, газовых баллонов, канистр и других физических взрывных объектов. Обычные пропы в выборе отсутствуют. Случайный выбор использует отмеченный список; без него объекты чередуются. После появления физики восстанавливается заданная высота и запускается падение. Детонация после удара включена по умолчанию; её инициатор — сам взрывной объект. ADB after повторяет дождь; промежуточный сейв продолжает оставшуюся часть и слежение за падением.",
   "category":"world","cooldownSeconds":3,
   "parameterDefinitions":[
-    {"key":"prop_sections","displayName":"Динамические объекты","kind":"MultiChoice","catalogKind":"DynamicProp","minimumSelections":1,"defaultValue":""},
+    {"key":"prop_sections","displayName":"Взрывоопасные объекты","kind":"MultiChoice","catalogKind":"DynamicProp","catalogNativeClasses":["S_EXPLO"],"catalogCategories":["explosive_props"],"minimumSelections":1,"defaultValue":""},
     {"key":"random_object","displayName":"Выбирать случайный объект из списка","kind":"Choice","options":["false","true"],"defaultValue":"true"},
-    {"key":"count","displayName":"Количество пропов","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"9"},
-    {"key":"spacing_meters","displayName":"Расстояние между пропами, м","kind":"Decimal","minimum":1,"maximum":20,"defaultValue":"3"},
-    {"key":"height_meters","displayName":"Высота пропов, м","kind":"Integer","minimum":2,"maximum":500,"defaultValue":"15"}
+    {"key":"count","displayName":"Количество бочек","kind":"Integer","minimum":1,"maximum":100,"defaultValue":"9"},
+    {"key":"spacing_meters","displayName":"Расстояние между бочками, м","kind":"Decimal","minimum":1,"maximum":20,"defaultValue":"4"},
+    {"key":"height_meters","displayName":"Высота бочек, м","kind":"Integer","minimum":2,"maximum":500,"defaultValue":"50"},
+    {"key":"detonate_on_impact","displayName":"Детонировать при падении","kind":"Choice","options":["false","true"],"defaultValue":"true"}
   ],
-  "parameters":{"prop_sections":"","random_object":"true","count":"9","spacing_meters":"3","height_meters":"15"},
+  "parameters":{"prop_sections":"","random_object":"true","count":"9","spacing_meters":"4","height_meters":"50","detonate_on_impact":"true"},
   "itemSpawns":[],"spawnGroups":[]
 }
 ADB_PRESET_END]]
@@ -26,8 +27,14 @@ local function vec(p) return vector():set(p.x,p.y,p.z) end
 local function valid_point(p) return type(p)=="table" and finite(p.x) and finite(p.y) and finite(p.z) end
 local function copy_job(job)
     if not job then return end
-    local result={version=1,cursor=job.cursor,level=job.level,lvid=job.lvid,gvid=job.gvid,slots={}}
+    local result={version=2,cursor=job.cursor,level=job.level,lvid=job.lvid,gvid=job.gvid,
+        detonate=job.detonate~=false,slots={},waiting={}}
     for i,slot in ipairs(job.slots) do result.slots[i]={section=slot.section,position=point(slot.position)} end
+    for i,r in ipairs(job.waiting or {}) do
+        result.waiting[i]={id=r.id,name=r.name,slot=r.slot,placed=r.placed==true,attempts=r.attempts or 0,
+            falling=r.falling==true,previous_vy=r.previous_vy,remaining_ms=r.remaining_ms or 120000,
+            offline_before=r.offline_before}
+    end
     return result
 end
 local function persist(data)
@@ -36,16 +43,33 @@ end
 local function log(reason)
     if type(printf)=="function" then pcall(printf,"[ADB] prop rain: %s",tostring(reason)) end
 end
-local function suspend() ready_frame,last_frame=nil,nil end
+local function suspend()
+    ready_frame,last_frame=nil,nil
+    for _,r in ipairs(pending and pending.waiting or {}) do r.last_clock=nil end
+end
 local function read_saved()
     pending=nil;suspend()
     local r=store();r=r and r[SAVE]
-    if type(r)~="table" or r.version~=1 or type(r.level)~="string" or #r.level>100 or
+    if type(r)~="table" or (r.version~=1 and r.version~=2) or type(r.level)~="string" or #r.level>100 or
         not integer(r.lvid,0,4294967294) or not integer(r.gvid,0,65534) or type(r.slots)~="table" or
-        #r.slots<1 or #r.slots>100 or not integer(r.cursor,1,#r.slots) then return end
+        #r.slots<1 or #r.slots>100 or not integer(r.cursor,1,#r.slots+1) then return end
     for _,slot in ipairs(r.slots) do
         if type(slot)~="table" or not valid_point(slot.position) or
             not anomaly_donation_bridge_common.valid_section_id(slot.section) then return end
+    end
+    if r.version==2 then
+        if type(r.waiting)~="table" or #r.waiting>100 or type(r.detonate)~="boolean" then return end
+        local seen={}
+        for _,body in ipairs(r.waiting) do
+            if type(body)~="table" or not integer(body.id,0,65534) or
+                type(body.name)~="string" or #body.name<1 or #body.name>256 or
+                not integer(body.slot,1,#r.slots) or body.slot>=r.cursor or seen[body.id] or
+                type(body.placed)~="boolean" or not integer(body.attempts,0,120) or
+                type(body.falling)~="boolean" or not integer(body.remaining_ms,0,120000) or
+                (body.previous_vy~=nil and not finite(body.previous_vy)) or
+                (body.offline_before~=nil and type(body.offline_before)~="boolean") then return end
+            seen[body.id]=true
+        end
     end
     pending=copy_job(r)
 end
@@ -65,7 +89,7 @@ local function playable()
 end
 local function supported()
     return db~=nil and db.actor~=nil and type(alife)=="function" and level~=nil and
-        type(level.present)=="function" and type(level.name)=="function" and vector~=nil and
+        type(level.present)=="function" and type(level.name)=="function" and type(level.object_by_id)=="function" and vector~=nil and
         type(RegisterScriptCallback)=="function" and store()~=nil and anomaly_donation_bridge_props~=nil
 end
 local function sections(value,revision)
@@ -77,22 +101,28 @@ local function sections(value,revision)
         local entry,reason=anomaly_donation_bridge_catalog.validate_section(
             {section_id=section,catalog_revision=revision},"section_id","dynamic_prop")
         if not entry then return nil,reason end
+        if entry.native_class~="S_EXPLO" or entry.category~="explosive_props" then
+            return nil,"prop_rain_not_a_physical_explosive"
+        end
         list[#list+1]=section;seen[section]=true
     end
     return #list>0 and list or nil,"prop_rain_selection_empty"
 end
 local function can_execute(context,params)
     local c=anomaly_donation_bridge_common
-    local ok,why=c.params_only(params,{prop_sections=true,random_object=true,count=true,spacing_meters=true,height_meters=true,catalog_revision=true})
+    local ok,why=c.params_only(params,{prop_sections=true,random_object=true,count=true,spacing_meters=true,height_meters=true,
+        detonate_on_impact=true,catalog_revision=true})
     if not ok then return false,"rejected",why end
     local count,error_code=c.parse_integer(params.count,9,1,100,"prop_rain_count_invalid")
     if not count then return false,"rejected",error_code end
-    local height,height_error=c.parse_integer(params.height_meters,15,2,500,"prop_rain_height_invalid")
+    local height,height_error=c.parse_integer(params.height_meters,50,2,500,"prop_rain_height_invalid")
     if not height then return false,"rejected",height_error end
-    local spacing=tonumber(params.spacing_meters or "3")
+    local spacing=tonumber(params.spacing_meters or "4")
     if not finite(spacing) or spacing<1 or spacing>20 then return false,"rejected","prop_rain_spacing_invalid" end
     local random=params.random_object or "true"
     if random~="true" and random~="false" then return false,"rejected","prop_rain_random_invalid" end
+    local detonate=params.detonate_on_impact or "true"
+    if detonate~="true" and detonate~="false" then return false,"rejected","prop_rain_detonate_invalid" end
     local selected,reason=sections(params.prop_sections,params.catalog_revision)
     if not selected then return false,"rejected",reason end
     if not supported() then return false,"deferred","prop_rain_api_unavailable" end
@@ -102,19 +132,20 @@ local function can_execute(context,params)
     if not valid_point(point(a:position())) or not integer(a:level_vertex_id(),0,4294967294) or
         not integer(a:game_vertex_id(),0,65534) then return false,"deferred","prop_rain_position_unavailable" end
     context.options={sections=selected,count=count,height=height,spacing=spacing,random=random=="true",
-        revision=params.catalog_revision};return true
+        revision=params.catalog_revision,detonate=detonate=="true"};return true
 end
 local function execute(context)
     local o=context.options
     if not o then return "rejected","prop_rain_options_missing" end
     local checked={};local ok,status,why=can_execute(checked,{prop_sections=table.concat(o.sections,","),
         random_object=tostring(o.random),count=tostring(o.count),height_meters=tostring(o.height),
-        spacing_meters=tostring(o.spacing),catalog_revision=o.revision})
+        spacing_meters=tostring(o.spacing),detonate_on_impact=tostring(o.detonate),catalog_revision=o.revision})
     if not ok then return status,why end
     o=checked.options
     local a=db.actor;local origin=point(a:position())
     local columns=math.ceil(math.sqrt(o.count));local rows=math.ceil(o.count/columns)
-    local plan={version=1,cursor=1,level=level.name(),lvid=a:level_vertex_id(),gvid=a:game_vertex_id(),slots={}}
+    local plan={version=2,cursor=1,level=level.name(),lvid=a:level_vertex_id(),gvid=a:game_vertex_id(),
+        detonate=o.detonate,slots={},waiting={}}
     for i=1,o.count do
         local column,row=(i-1)%columns,math.floor((i-1)/columns)
         plan.slots[i]={section=o.sections[o.random and math.random(#o.sections) or ((i-1)%#o.sections+1)],
@@ -126,6 +157,95 @@ local function execute(context)
     pending=plan;ready_frame=device().frame;persist()
     return "executed","prop_rain_armed_"..o.count
 end
+local function restore_offline(r)
+    if r.offline_before==nil then return end
+    local slot=pending.slots[r.slot]
+    local se=alife():object(r.id,true)
+    if se and se:name()==r.name and se:section_name()==slot.section then
+        alife():set_switch_offline(r.id,r.offline_before)
+    end
+end
+local function prepare_body(r)
+    local slot=pending.slots[r.slot]
+    -- Resolve both identities afresh. Never retain client/shell userdata across
+    -- frames or touch an unrelated object that reused a saved native ID.
+    local se=alife():object(r.id,true)
+    if not se then return true end
+    if se:name()~=r.name or se:section_name()~=slot.section then return true end
+    local object=level.object_by_id(r.id)
+    if not object then return false end
+    if object:name()~=r.name or object:section()~=slot.section or object:parent() then return true end
+    if type(object.get_physics_shell)~="function" or type(object.force_set_position)~="function" then
+        log("body_position_api_unavailable_"..slot.section);return true
+    end
+    local shell=object:get_physics_shell()
+    if not shell or shell:get_elements_number()<1 then return false end
+    if not r.placed then
+        -- Inventory-derived explosives can be snapped to the actor's AI node
+        -- while going online. Place the ready physical body, not just its CSE.
+        object:force_set_position(vec(slot.position),true)
+        shell:apply_force(0,-.001,0)
+        if type(shell.set_linear_vel)=="function" then shell:set_linear_vel(vector():set(0,-.25,0)) end
+        r.placed=true
+        r.physics_frame=device().frame
+        return false
+    end
+    if not r.physics_frame then
+        -- A loaded shell can briefly have zero speed while still in midair.
+        -- Wake it and wait for fresh physics before interpreting a stop as impact.
+        shell:apply_force(0,-.001,0)
+        r.physics_frame=device().frame;r.previous_vy=nil
+        return false
+    end
+    if device().frame-r.physics_frame<2 then return false end
+    local pos=object:position()
+    if not pos or not finite(pos.y) then return false end
+    local drop=slot.position.y-pos.y
+    local velocity=vector():set(0,0,0)
+    if type(shell.get_linear_vel)~="function" then return false end
+    shell:get_linear_vel(velocity)
+    if not finite(velocity.y) then return false end
+    if drop>.01 then r.falling=true end
+    -- Gravity alone makes vertical speed more negative. A falling barrel
+    -- stopping/bouncing (or already settled after a polling/load gap) marks
+    -- impact. Never detonate the dormant body before placement and takeoff.
+    local impact=r.falling and drop>.05 and
+        ((r.previous_vy and r.previous_vy<-.75 and velocity.y>r.previous_vy+.75) or velocity.y>=-.1)
+    if impact then
+        pcall(restore_offline,r)
+        if not pending.detonate then return true end
+        -- Remove this owned record from saved tracking before the native event.
+        -- A failed/uncertain call is never repeated against a detonating body.
+        persist()
+        -- CScriptGameObject::explode sets Initiator(object.ID), including for
+        -- fragments and blast. Do not replace it with actor-attributed hits.
+        local ok,why=pcall(function() object:explode(0) end)
+        if not ok then log("detonation_failed_"..tostring(why)) end
+        return true
+    end
+    r.previous_vy=velocity.y
+    -- Some binders initially disable a just-created shell again. A tiny force
+    -- wakes it without a hit, condition damage, explosion, or unfixing bones.
+    if not r.falling and r.attempts%8==0 then shell:apply_force(0,-.001,0) end
+    return false
+end
+local function update_bodies()
+    local count=math.min(4,#pending.waiting)
+    for _=1,count do
+        local r=table.remove(pending.waiting,1)
+        local now=time_global()
+        r.remaining_ms=math.max(0,r.remaining_ms-math.max(0,now-(r.last_clock or now)))
+        r.last_clock=now
+        local ok,done=pcall(prepare_body,r)
+        if not r.falling then r.attempts=r.attempts+1 end
+        if not ok and (r.attempts==1 or r.attempts%30==0) then log("body_activation_failed_"..tostring(done)) end
+        if (not ok or not done) and r.attempts<120 and r.remaining_ms>0 then pending.waiting[#pending.waiting+1]=r
+        elseif not ok or not done then
+            pcall(restore_offline,r)
+            log("body_activation_timeout_"..pending.slots[r.slot].section)
+        else pcall(restore_offline,r) end
+    end
+end
 local function update()
     if not pending then return end
     local a,frame=playable()
@@ -133,12 +253,16 @@ local function update()
     if frame==last_frame then return end;last_frame=frame
     if not ready_frame or frame<ready_frame then ready_frame=frame;return end
     if frame-ready_frame<15 then return end
-    if level.name()~=pending.level then log("cancelled_on_different_level");pending=nil;persist();return end
+    if level.name()~=pending.level then
+        for _,r in ipairs(pending.waiting) do pcall(restore_offline,r) end
+        log("cancelled_on_different_level");pending=nil;persist();return
+    end
     local snapshot=anomaly_donation_bridge_catalog.snapshot()
     if not snapshot then return end
+    update_bodies()
     -- Bound work per frame even with a large user selection/count.
     for _=1,2 do
-        if not pending then return end
+        if pending.cursor>#pending.slots then break end
         local slot=pending.slots[pending.cursor]
         local entry,why=anomaly_donation_bridge_catalog.validate_section(
             {section_id=slot.section,catalog_revision=snapshot.revision},"section_id","dynamic_prop")
@@ -148,12 +272,33 @@ local function update()
             end)
             -- No automatic retry after an uncertain native creation: it may
             -- have created the object before throwing. Do not duplicate it.
-            if not ok or not object then log("spawn_failed_"..slot.section) end
+            if not ok or not object then log("spawn_failed_"..slot.section)
+            else
+                local identified,record=pcall(function()
+                    -- Disable AI-node relocation before the object goes online.
+                    if type(object.use_ai_locations)=="function" then object:use_ai_locations(false) end
+                    local record={id=object.id,name=object:name(),slot=pending.cursor,placed=false,attempts=0,
+                        falling=false,remaining_ms=120000}
+                    -- Keep high-altitude barrels online while falling. Normal
+                    -- ALife distance switching resumes when they reach a surface.
+                    local ok,before=pcall(function() return object:can_switch_offline() end)
+                    if ok and type(before)=="boolean" then
+                        record.offline_before=before
+                        alife():set_switch_online(record.id,true)
+                        alife():set_switch_offline(record.id,false)
+                    end
+                    return record
+                end)
+                if identified and integer(record.id,0,65534) and type(record.name)=="string" then
+                    pending.waiting[#pending.waiting+1]=record
+                else log("spawn_identity_unavailable_"..slot.section) end
+            end
         else log("section_skipped_"..tostring(why)) end
         pending.cursor=pending.cursor+1
-        if pending.cursor>#pending.slots then pending=nil end
         persist()
     end
+    if pending.cursor>#pending.slots and #pending.waiting==0 then pending=nil end
+    persist()
 end
 function on_game_start()
     if registered then return end;registered=true
