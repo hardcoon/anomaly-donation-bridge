@@ -94,8 +94,10 @@ public partial class MainWindow : Window
         }
         DarkSystemFrame.Attach(this);
         _viewModel = viewModel;
+        Closed += (_, _) => _viewModel.CancelTemplateSearch();
         _runtime = runtime;
         _votingObs = new VotingObsController(runtime);
+        viewModel.EnableDeferredTemplateRendering();
         DataContext = viewModel;
         viewModel.ShowTriggerEditor = ShowTriggerEditor;
         viewModel.PromptForPresetName = PromptForPresetName;

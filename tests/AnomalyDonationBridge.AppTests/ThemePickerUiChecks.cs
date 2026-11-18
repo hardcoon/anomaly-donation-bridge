@@ -357,6 +357,7 @@ internal static class ThemePickerUiChecks
     }
     private static void Layout(FrameworkElement root, double width)
     {
+        if (root.DataContext is MainViewModel model) TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
         root.Margin = new Thickness(0);root.Width = width;root.Height = 782;
         root.Measure(new Size(width, 782));root.Arrange(new Rect(0, 0, width, 782));root.UpdateLayout();
     }

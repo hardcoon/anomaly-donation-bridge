@@ -39,6 +39,9 @@ public sealed class MainViewModel : ObservableObject
     private int _fileScanTicks;
     private string _queueStatusText = string.Empty;
     private string _templateSearchText = string.Empty;
+    private CancellationTokenSource? _templateSearchCancellation;
+    private bool _deferredTemplateRendering;
+    internal Task TemplateSearchCompletion { get; private set; } = Task.CompletedTask;
     private int _selectedSectionIndex;
     private bool _isRefreshingBridge;
     private bool _isInstallingBridge;
@@ -51,6 +54,19 @@ public sealed class MainViewModel : ObservableObject
         ActiveBrowser = new ActionBrowserViewModel(ActiveActions, groupEqualPrices: true);
         UserPresetBrowser = new ActionBrowserViewModel(UserPresets);
         PresetBrowser = new ActionBrowserViewModel(Presets);
+        foreach (var browser in new[] { ActiveBrowser, UserPresetBrowser, PresetBrowser })
+        {
+            browser.PresentationInvalidated += () =>
+            {
+                if (ReferenceEquals(browser, SelectedTemplateBrowser)) ScheduleTemplateSearch(debounce: false);
+            };
+            browser.PropertyChanged += (_, change) =>
+            {
+                if (change.PropertyName == nameof(ActionBrowserViewModel.IsUpdating) &&
+                    ReferenceEquals(browser, SelectedTemplateBrowser))
+                    RaisePropertyChanged(nameof(IsTemplateBrowserUpdating));
+            };
+        }
         ActiveBrowser.PreferencesChanged += SaveViewPreferences;
         UserPresetBrowser.PreferencesChanged += SaveViewPreferences;
         PresetBrowser.PreferencesChanged += SaveViewPreferences;
@@ -161,8 +177,8 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _templateSearchText, value ?? string.Empty)) return;
-            ActiveBrowser.SearchText = UserPresetBrowser.SearchText = PresetBrowser.SearchText = _templateSearchText;
             RaisePropertyChanged(nameof(HasTemplateSearchText));
+            ScheduleTemplateSearch(debounce: true);
         }
     }
     public bool HasTemplateSearchText => !string.IsNullOrWhiteSpace(TemplateSearchText);
@@ -177,11 +193,73 @@ public sealed class MainViewModel : ObservableObject
         get => _selectedSectionIndex;
         set
         {
-            if (!SetProperty(ref _selectedSectionIndex, value)) return;
+            if (_selectedSectionIndex == value) return;
+            _templateSearchCancellation?.Cancel();
+            if (_deferredTemplateRendering) TemplateBrowserFor(value)?.PrepareForDisplay();
+            SetProperty(ref _selectedSectionIndex, value);
             RaisePropertyChanged(nameof(ShowTemplateSearch));
             RaisePropertyChanged(nameof(ShowSectionStatus));
             RaisePropertyChanged(nameof(ShowVotingPlayer));
             RaisePropertyChanged(nameof(TemplateSearchHint));
+            RaisePropertyChanged(nameof(IsTemplateBrowserUpdating));
+            ScheduleTemplateSearch(debounce: false);
+        }
+    }
+
+    private ActionBrowserViewModel? TemplateBrowserFor(int section) => section switch
+    {
+        0 => ActiveBrowser,
+        1 => UserPresetBrowser,
+        2 => PresetBrowser,
+        _ => null
+    };
+    private ActionBrowserViewModel? SelectedTemplateBrowser => TemplateBrowserFor(SelectedSectionIndex);
+    public bool IsTemplateBrowserUpdating => SelectedTemplateBrowser?.IsUpdating == true;
+
+    internal void EnableDeferredTemplateRendering()
+    {
+        if (_deferredTemplateRendering) return;
+        _deferredTemplateRendering = true;
+        foreach (var browser in new[] { ActiveBrowser, UserPresetBrowser, PresetBrowser })
+            browser.DeferPresentation = true;
+        SelectedTemplateBrowser?.PrepareForDisplay();
+        ScheduleTemplateSearch(debounce: false);
+    }
+
+    private void ScheduleTemplateSearch(bool debounce)
+    {
+        _templateSearchCancellation?.Cancel();
+        var browser = SelectedTemplateBrowser;
+        if (browser is null) return;
+        var cancellation = new CancellationTokenSource();
+        _templateSearchCancellation = cancellation;
+        TemplateSearchCompletion = SearchTemplatesAsync(browser, TemplateSearchText, debounce, cancellation);
+    }
+
+    internal void CancelTemplateSearch() => _templateSearchCancellation?.Cancel();
+
+    private async Task SearchTemplatesAsync(ActionBrowserViewModel browser, string query, bool debounce,
+        CancellationTokenSource cancellation)
+    {
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        try
+        {
+            if (debounce) await Task.Delay(120, cancellation.Token).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(() => browser.SearchAsync(query, cancellation.Token),
+                DispatcherPriority.Background, cancellation.Token).Task.Unwrap().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            await dispatcher.InvokeAsync(() => Notice = "Не удалось обновить поиск: " + error.Message);
+        }
+        finally
+        {
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (ReferenceEquals(_templateSearchCancellation, cancellation)) _templateSearchCancellation = null;
+                cancellation.Dispose();
+            });
         }
     }
     public string TemplateSearchHint => SelectedSectionIndex switch

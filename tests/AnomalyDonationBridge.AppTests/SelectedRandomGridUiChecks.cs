@@ -51,6 +51,7 @@ internal static class SelectedRandomGridUiChecks
             var window = new MainWindow(model, runtime);
             var root = (FrameworkElement)window.FindName("WideShell");
             model.ActiveBrowser.SelectedView = ActionBrowserViewModel.ViewOptions.Single(o => o.Columns == 3);
+            TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
             model.ActiveBrowser.VisibleEntries.Single(e => e.IsGroup).Group!.IsExpanded = true;
             Layout(root, 1388, 900);
             var original = profile.Actions.Select(a => a.Id).ToArray();
@@ -80,6 +81,7 @@ internal static class SelectedRandomGridUiChecks
                 while (!model.Notice.Contains("Порядок шагов сохранён") && wait.Elapsed < TimeSpan.FromSeconds(5))
                 { Pump(); Thread.Sleep(10); }
                 Check(drop.Handled && model.Notice.Contains("Порядок шагов сохранён"), "Actual routed drop did not save: " + model.Notice);
+                TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
                 model.ActiveBrowser.VisibleEntries.Single(e => e.IsGroup).Group!.IsExpanded = true;
                 Layout(root, 1388, 900);
             }
@@ -117,6 +119,7 @@ internal static class SelectedRandomGridUiChecks
     private static void Pump() => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
     private static void Layout(FrameworkElement root, double width, double height)
     {
+        if (root.DataContext is MainViewModel model) TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
         root.Margin = new Thickness(0); root.Width = width; root.Height = height;
         for (var i = 0; i < 3; i++) { root.Measure(new(width, height)); root.Arrange(new(0, 0, width, height)); root.UpdateLayout(); Pump(); }
     }

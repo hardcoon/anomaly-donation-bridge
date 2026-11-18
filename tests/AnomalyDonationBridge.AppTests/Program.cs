@@ -30,6 +30,7 @@ internal static class Program
         if (args is ["--render-price-editor", var priceOutput]) return PdaUiChecks.RunPriceEditor(priceOutput);
         if (args is ["--render-bridge-update", var updateOutput]) return PdaUiChecks.Run(updateOutput, updatedUiOnly: true);
         if (args is ["--render-browser-view", var browserOutput]) return BrowserViewUiChecks.Run(browserOutput);
+        if (args is ["--profile-template-search", var searchOutput]) return TemplateSearchUiChecks.Run(searchOutput);
         if (args is ["--render-selected-random-grid", var selectedOutput]) return SelectedRandomGridUiChecks.Run(selectedOutput);
         if (args is ["--selected-random-test"]) { SelectedRandomTests.RunAsync().GetAwaiter().GetResult(); return 0; }
         if (args is ["--render-compact-window", var compactOutput]) return CompactWindowUiChecks.Run(compactOutput);

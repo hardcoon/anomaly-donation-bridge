@@ -94,6 +94,7 @@ internal static class GroupDelayUiChecks
     private static void Pump() => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
     private static void Layout(MainWindow window, double width, double height)
     {
+        TemplateSearchUiChecks.WaitForSearch((MainViewModel)window.DataContext, window.Dispatcher);
         window.Width = width; window.Height = height;
         var root = (FrameworkElement)window.Content; root.Width = width - 16; root.Height = height - 40;
         for (var pass = 0; pass < 3; pass++)

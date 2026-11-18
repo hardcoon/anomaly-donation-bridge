@@ -207,6 +207,7 @@ internal static class CompactWindowUiChecks
             var grouping=model.ActiveActions[1].Model.CloneAsNewInstance();
             grouping.DisplayName="Очень длинное название второго шага для проверки переноса без наложения на кнопки";
             runtime.Settings.Actions.Add(grouping);model.ActiveActions.Add(new ActionViewModel(grouping,displayOrdinal:5));
+            TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
             var group=model.ActiveBrowser.VisibleEntries.Single(entry=>entry.IsGroup).Group!;group.IsExpanded=true;
             Layout(window,new Size(640,520));
             var sequence=Find<Border>(compact).Where(row=>Equals(row.Tag,"SequenceStepRow")&&row.DataContext is ActionViewModel {IsSequenceStep:true}).ToList();
@@ -572,6 +573,7 @@ internal static class CompactWindowUiChecks
     private static void Pump()=>Dispatcher.CurrentDispatcher.Invoke(()=>{},DispatcherPriority.ApplicationIdle);
     private static void Layout(MainWindow window,Size size)
     {
+        TemplateSearchUiChecks.WaitForSearch((MainViewModel)window.DataContext, window.Dispatcher);
         window.Width=size.Width;window.Height=size.Height;
         var root=(FrameworkElement)window.Content;root.Width=size.Width-16;root.Height=size.Height-40;
         for(var pass=0;pass<3;pass++){Pump();root.Measure(new Size(root.Width,root.Height));root.Arrange(new Rect(0,0,root.Width,root.Height));root.UpdateLayout();}

@@ -112,6 +112,7 @@ internal static class HistoryUiChecks
     }
     private static void Layout(MainWindow window, Size size)
     {
+        TemplateSearchUiChecks.WaitForSearch((MainViewModel)window.DataContext, window.Dispatcher);
         window.Width = size.Width; window.Height = size.Height;
         var root = (FrameworkElement)window.Content; root.Width = size.Width - 16; root.Height = size.Height - 40;
         root.Margin = new Thickness(0);

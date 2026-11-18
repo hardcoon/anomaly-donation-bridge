@@ -1012,6 +1012,7 @@ public sealed class ActionViewModel : ObservableObject
     public string SequenceGroupKey => ActionPriceOrdering.GroupKey(Model) ?? string.Empty;
     internal void SetSequenceOrdinal(int value)
     {
+        if (SequenceOrdinal == value) return;
         SequenceOrdinal = value;
         RaisePropertyChanged(nameof(SequenceOrdinal));
         RaisePropertyChanged(nameof(IsSequenceStep));

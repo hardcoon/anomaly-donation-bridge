@@ -1302,7 +1302,7 @@
                                     <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
                                 </StackPanel>
                             </WrapPanel>
-                        <ItemsControl ItemsSource="{Binding Actions}" Margin="18,0,-1,9"
+                        <ItemsControl ItemsSource="{Binding RenderedActions}" Margin="18,0,-1,9"
                                       ItemTemplate="{StaticResource SequenceCardTemplate}">
                             <ItemsControl.ItemsPanel><ItemsPanelTemplate>
                                 <local:ActionCardPanel MinimumColumnWidth="380" MaximumColumns="5"
@@ -1375,7 +1375,7 @@
                                     <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
                                 </StackPanel>
                             </WrapPanel>
-                            <ItemsControl ItemsSource="{Binding Actions}" Margin="18,1,-1,4" ItemTemplate="{StaticResource CompactSequenceTemplate}" />
+                            <ItemsControl ItemsSource="{Binding RenderedActions}" Margin="18,1,-1,4" ItemTemplate="{StaticResource CompactSequenceTemplate}" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -1659,6 +1659,9 @@
                                         <DataTrigger Binding="{Binding ElementName=ActiveActionsList, Path=HasItems}" Value="False">
                                             <Setter Property="Visibility" Value="Visible" />
                                         </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsTemplateBrowserUpdating}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </StackPanel.Style>
@@ -1715,7 +1718,11 @@
                                 <Setter Property="Visibility" Value="Collapsed" />
                                 <Style.Triggers><DataTrigger Binding="{Binding ElementName=UserPresetsList, Path=HasItems}" Value="False">
                                     <Setter Property="Visibility" Value="Visible" />
-                                </DataTrigger></Style.Triggers>
+                                </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsTemplateBrowserUpdating}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style></StackPanel.Style>
                             <TextBlock Tag="Пользовательских шаблонов пока нет" Style="{StaticResource SearchEmptyTitleStyle}" FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" />
                             <TextBlock Tag="Настройте коробочный шаблон и нажмите «В пользовательские». Сумму назначьте уже здесь перед активацией." Style="{StaticResource SearchEmptyHintStyle}"
@@ -1766,6 +1773,9 @@
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding ElementName=PresetsList, Path=HasItems}" Value="False">
                                             <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsTemplateBrowserUpdating}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>

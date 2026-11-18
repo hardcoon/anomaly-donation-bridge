@@ -46,6 +46,42 @@ internal static class VotingUiChecks
         await CheckAsync(output);
         await CheckProfilesAsync(output);
         await CheckCompactPanelAsync(output);
+        await CheckLargeCommandListAsync();
+    }
+
+    private static async Task CheckLargeCommandListAsync()
+    {
+        using var temporary = new Program.TemporaryDirectory();
+        await using var runtime = new BridgeRuntime(new AppPaths(temporary.Path));
+        await runtime.InitializeVotingModuleAsync();
+        var round = runtime.Voting.Snapshot;
+        round.Options = Enumerable.Range(0, 200).Select(index => new VotingOption
+        {
+            Command = "!vote" + index,
+            Preset = new ActionDefinition { HandlerId = "add_radiation", DisplayName = "Effect " + index }
+        }).ToList();
+        await runtime.Voting.SaveSettingsAsync(round);
+        using var controller = new VotingObsController(runtime);
+        using var view = new VotingView(runtime, controller);
+        var root = (FrameworkElement)view.Content;
+        Layout(root, 1200, 800);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        var list = Field<ListBox>(view, "_commandList");
+        var realized = Enumerable.Range(0, list.Items.Count)
+            .Count(index => list.ItemContainerGenerator.ContainerFromIndex(index) is not null);
+        Check(list.Items.Count == 200 && realized is > 0 and < 80 &&
+            list.ItemContainerGenerator.ContainerFromIndex(199) is null,
+            "Voting must realize the viewport rather than all 200 command controls.");
+        list.ScrollIntoView(view.Rows[199]);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        Layout(root, 1200, 800);
+        var last = list.ItemContainerGenerator.ContainerFromIndex(199) as ListBoxItem;
+        Check(last is not null, "The last virtualized voting command cannot be reached.");
+        Find<TextBox>(last!).First().Text = "!edited-last";
+        await view.FlushPendingChangesAsync();
+        Check(runtime.Voting.SnapshotFor(round.CollectionId).Options[199].Command == "!edited-last",
+            "Recycling command controls lost the edit.");
+        Console.WriteLine($"PASS 200-command voting list: {realized} realized containers at startup, last-row scrolling/editing persists.");
     }
 
     private static async Task CheckProfilesAsync(string output)

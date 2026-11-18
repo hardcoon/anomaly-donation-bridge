@@ -185,6 +185,7 @@ internal static class BrowserViewUiChecks
         tabs.SelectedIndex = 0;
         model.ActiveBrowser.SearchText = string.Empty; model.ActiveBrowser.SelectCategory("all");
         foreach (var action in model.ActiveActions.Take(3)) action.ReplaceTriggers([new TriggerRule { Amount = 31, Currency = "RUB" }]);
+        TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
         model.ActiveBrowser.VisibleEntries.Single(entry => entry.IsGroup).Group!.IsExpanded = true;
         foreach (var light in new[] { false, true })
         {
@@ -233,6 +234,7 @@ internal static class BrowserViewUiChecks
 
     private static void Layout(FrameworkElement root, double width)
     {
+        if (root.DataContext is MainViewModel model) TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
         root.Margin = new Thickness(0);
         root.Width = width;
         root.Height = 782;
@@ -248,6 +250,11 @@ internal static class BrowserViewUiChecks
     private static void CheckTemplateSearch(MainWindow window, FrameworkElement root, MainViewModel model,
         TabControl tabs, string outputDirectory)
     {
+        void SearchLayout(double width)
+        {
+            TemplateSearchUiChecks.WaitForSearch(model, root.Dispatcher);
+            Layout(root, width);
+        }
         var source = model.ActiveActions.ToArray();
         var input = (TextBox)tabs.Template.FindName("TemplateSearchTextBox", tabs);
         var open = (Button)tabs.Template.FindName("TemplateSearchButton", tabs);
@@ -258,20 +265,20 @@ internal static class BrowserViewUiChecks
         void Queue(string text) => typeof(MainViewModel).GetProperty(nameof(MainViewModel.QueueStatusText))!.SetValue(model, text);
         foreach (var width in new[] { 1000d, 1388d, 1868d })
         {
-            tabs.SelectedIndex = 0; model.ClearTemplateSearch(); Queue(string.Empty); Layout(root, width);
+            tabs.SelectedIndex = 0; model.ClearTemplateSearch(); Queue(string.Empty); SearchLayout(width);
             var initialTop = content.TranslatePoint(new Point(), root).Y;
             var searchWidth = search.ActualWidth;
             Check(searchWidth is >= 215 and <= 270 && input.ActualWidth > 150 && search.Visibility == Visibility.Visible,
                 "Search must initially be a visible text field, including with an empty query.");
-            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
+            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); SearchLayout(width);
             Check(search.ActualWidth == searchWidth, "Focusing search changed its width.");
             var expandedX = search.TranslatePoint(new Point(), root).X;
             Check(content.TranslatePoint(new Point(), root).Y == initialTop, "Focusing search moved the lower toolbar.");
             var query = source[0].DisplayName.ToUpperInvariant();
-            input.SetCurrentValue(TextBox.TextProperty, query); Layout(root, width);
+            input.SetCurrentValue(TextBox.TextProperty, query); SearchLayout(width);
             foreach (var section in new[] { 0, 1, 2 })
             {
-                tabs.SelectedIndex = section; Layout(root, width);
+                tabs.SelectedIndex = section; SearchLayout(width);
                 var browser = section switch { 0 => model.ActiveBrowser, 1 => model.UserPresetBrowser, _ => model.PresetBrowser };
                 Check(model.SelectedSectionIndex == section && browser.SearchText == query && model.TemplateSearchText == query &&
                     browser.VisibleActions.Cast<ActionViewModel>().All(action => action.DisplayName.Contains(query, StringComparison.CurrentCultureIgnoreCase)) &&
@@ -291,20 +298,20 @@ internal static class BrowserViewUiChecks
                     $"Management controls and search must share one row above the categories, {width}/{section}, search {search.TranslatePoint(new Point(search.ActualWidth, search.ActualHeight / 2), root)}, " +
                     string.Join(" / ", toolbar.Select(control => $"{control} at {control.TranslatePoint(new Point(0, control.ActualHeight / 2), root)}")));
             }
-            tabs.SelectedIndex = 0; Layout(root, width);
+            tabs.SelectedIndex = 0; SearchLayout(width);
             if (width == 1388) Save(root, Path.Combine(outputDirectory, "search-expanded.png"));
             const string nextEffect = "Следующий эффект через 00:12 «Добавить радиацию» · в очереди: 3";
             Queue(nextEffect);
             foreach (var section in new[] { 0, 1, 2, 3 })
             {
                 tabs.SelectedIndex = section;
-                Layout(root, width);
+                SearchLayout(width);
                 Check(status.Visibility == Visibility.Visible && status.ActualWidth > 300 &&
                     status.TranslatePoint(new Point(0, status.ActualHeight), root).Y <= content.TranslatePoint(new Point(), root).Y &&
                     Find<TextBlock>(status).Any(text => text.Text == nextEffect),
                     $"The queue strip is missing or overlaps content in section {section} at {width} DIP.");
             }
-            tabs.SelectedIndex = 0; Layout(root, width);
+            tabs.SelectedIndex = 0; SearchLayout(width);
             Check(search.Visibility == Visibility.Visible && search.ActualWidth == searchWidth && open.IsEnabled && model.TemplateSearchText == query,
                 "Queue status closed or disabled the active search field.");
             Check(status.TranslatePoint(new Point(0, status.ActualHeight), root).Y <= search.TranslatePoint(new Point(), root).Y &&
@@ -313,21 +320,21 @@ internal static class BrowserViewUiChecks
             Check(content.TranslatePoint(new Point(), root).Y >= initialTop, "Countdown overlapped the lower toolbar.");
             CheckControlsInBounds(root);
             if (width == 1388) Save(root, Path.Combine(outputDirectory, "search-countdown.png"));
-            Queue(string.Empty); Layout(root, width);
+            Queue(string.Empty); SearchLayout(width);
             Check(status.Visibility == Visibility.Collapsed &&
                 search.Visibility == Visibility.Visible && open.IsEnabled && search.TranslatePoint(new Point(), root).X == expandedX,
                 "Empty queue left a strip or changed the active search state.");
-            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
+            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); SearchLayout(width);
             Check(input.Text == query, "Search text disappeared after the countdown.");
-            tabs.SelectedIndex = 3; Layout(root, width);
+            tabs.SelectedIndex = 3; SearchLayout(width);
             Check(search.Visibility == Visibility.Collapsed && !model.ShowTemplateSearch && model.TemplateSearchText == query,
                 "Template search must not filter History or lose its query there.");
-            tabs.SelectedIndex = 0; Layout(root, width);
-            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
-            input.SetCurrentValue(TextBox.TextProperty, "no such template 891723"); Layout(root, width);
+            tabs.SelectedIndex = 0; SearchLayout(width);
+            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); SearchLayout(width);
+            input.SetCurrentValue(TextBox.TextProperty, "no such template 891723"); SearchLayout(width);
             Check(model.ActiveBrowser.VisibleActions.IsEmpty && Find<TextBlock>(root).Any(text => text.Visibility == Visibility.Visible && text.Text == "Ничего не найдено"),
                 "No-match search has no correct empty state.");
-            clear.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Layout(root, width);
+            clear.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); SearchLayout(width);
             Check(model.TemplateSearchText.Length == 0 && search.Visibility == Visibility.Visible && search.ActualWidth == searchWidth && input.ActualWidth > 150 &&
                 model.ActiveBrowser.VisibleActions.Cast<ActionViewModel>().SequenceEqual(source), "Clearing search hid the field or did not restore all original action instances.");
         }

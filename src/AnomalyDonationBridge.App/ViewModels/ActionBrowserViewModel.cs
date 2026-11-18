@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Windows.Data;
+using System.Windows.Threading;
 using AnomalyDonationBridge.Core;
 
 namespace AnomalyDonationBridge.App.ViewModels;
@@ -22,10 +24,12 @@ public sealed class ActivePriceGroupViewModel : ObservableObject
         int displayOrdinal,
         string displayName,
         bool isExpanded,
-        Action<bool> expandedChanged)
+        Action<bool> expandedChanged,
+        bool deferRendering = false)
     {
         Key = key;
         Actions = actions;
+        RenderedActions = new(deferRendering ? [] : actions);
         DisplayOrdinal = displayOrdinal;
         _displayName = displayName;
         _isExpanded = isExpanded;
@@ -35,6 +39,7 @@ public sealed class ActivePriceGroupViewModel : ObservableObject
 
     public string Key { get; }
     public IReadOnlyList<ActionViewModel> Actions { get; }
+    public ObservableCollection<ActionViewModel> RenderedActions { get; }
     public IReadOnlyList<TriggerRuleViewModel> SharedTriggers { get; }
     public int DisplayOrdinal { get; }
     public string DisplayOrdinalLabel => $"№{DisplayOrdinal}";
@@ -91,6 +96,16 @@ public sealed class ActionBrowserViewModel : ObservableObject
     private bool _compactMode;
     private string _searchText = string.Empty;
     private readonly ObservableCollection<ActionViewModel> _actions;
+    private readonly ObservableCollection<ActionViewModel> _visibleActions = [];
+    private readonly Dictionary<ActionViewModel, ActiveActionListEntryViewModel> _singleEntries = [];
+    private readonly Dictionary<string, ActiveActionListEntryViewModel> _groupEntries = new(StringComparer.Ordinal);
+    private readonly HashSet<ActionViewModel> _subscribed = [];
+    private CancellationTokenSource? _searchCancellation;
+    private SearchItem[] _searchItems = [];
+    private bool _sourceDirty;
+    private bool _isUpdating;
+    internal bool DeferPresentation { get; set; }
+    internal event Action? PresentationInvalidated;
     private readonly bool _groupEqualPrices;
     private readonly Dictionary<string, bool> _expandedPriceGroups = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _priceGroupNames = new(StringComparer.Ordinal);
@@ -103,7 +118,7 @@ public sealed class ActionBrowserViewModel : ObservableObject
         _actions = actions;
         _groupEqualPrices = groupEqualPrices;
         // Do not use the shared default view: Active and Presets have independent filters.
-        VisibleActions = new ListCollectionView(actions) { Filter = MatchesFilter };
+        VisibleActions = new ListCollectionView(_visibleActions);
         VisibleEntries = [];
         foreach (var action in actions) Subscribe(action);
         actions.CollectionChanged += ActionsChanged;
@@ -111,6 +126,7 @@ public sealed class ActionBrowserViewModel : ObservableObject
     }
 
     public ICollectionView VisibleActions { get; }
+    public bool IsUpdating { get => _isUpdating; private set => SetProperty(ref _isUpdating, value); }
     public ObservableCollection<ActiveActionListEntryViewModel> VisibleEntries { get; }
     public IReadOnlyDictionary<string, string> PriceGroupNames => _priceGroupNames;
     // Presentation only: never persist this query or change action membership.
@@ -120,7 +136,6 @@ public sealed class ActionBrowserViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _searchText, value ?? string.Empty)) return;
-            VisibleActions.Refresh();
             RebuildVisibleEntries();
         }
     }
@@ -130,7 +145,6 @@ public sealed class ActionBrowserViewModel : ObservableObject
         set
         {
             if (value is null || !Categories.Contains(value) || !SetProperty(ref _selectedCategory, value)) return;
-            VisibleActions.Refresh();
             RebuildVisibleEntries();
             PreferencesChanged?.Invoke();
         }
@@ -256,69 +270,233 @@ public sealed class ActionBrowserViewModel : ObservableObject
 
     private void ActionsChanged(object? sender, NotifyCollectionChangedEventArgs change)
     {
+        _groupEntries.Clear();
+        if (change.Action == NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var action in _subscribed.ToArray()) Unsubscribe(action);
+            foreach (var action in _actions) Subscribe(action);
+            if (DeferPresentation && _actions.Count == 0)
+            {
+                _visibleActions.Clear();
+                VisibleEntries.Clear();
+            }
+        }
         if (change.OldItems is not null)
             foreach (ActionViewModel action in change.OldItems) Unsubscribe(action);
         if (change.NewItems is not null)
             foreach (ActionViewModel action in change.NewItems) Subscribe(action);
-        VisibleActions.Refresh();
         RebuildVisibleEntries();
     }
 
-    private void Subscribe(ActionViewModel action) => action.TriggersChanged += RebuildVisibleEntries;
-    private void Unsubscribe(ActionViewModel action) => action.TriggersChanged -= RebuildVisibleEntries;
+    private void Subscribe(ActionViewModel action)
+    {
+        if (_subscribed.Add(action)) action.TriggersChanged += RebuildVisibleEntries;
+    }
+
+    private void Unsubscribe(ActionViewModel action)
+    {
+        if (_subscribed.Remove(action)) action.TriggersChanged -= RebuildVisibleEntries;
+        _singleEntries.Remove(action);
+    }
 
     private void RebuildVisibleEntries()
     {
-        foreach (var action in _actions) action.SetSequenceOrdinal(0);
-        var visible = VisibleActions.Cast<ActionViewModel>().ToList();
-        VisibleEntries.Clear();
-        if (!_groupEqualPrices)
+        _searchCancellation?.Cancel();
+        _sourceDirty = true;
+        if (DeferPresentation)
         {
-            foreach (var action in visible)
-            {
-                action.SetVisualDisplayOrdinal(action.DisplayOrdinal);
-                VisibleEntries.Add(ActiveActionListEntryViewModel.Single(action));
-            }
+            _searchCancellation = null;
+            IsUpdating = true;
+            PresentationInvalidated?.Invoke();
             return;
         }
+        _searchItems = Snapshot();
+        _sourceDirty = false;
+        var result = Filter(_searchItems, SearchText.Trim(), SelectedCategory.Id,
+            CultureInfo.CurrentCulture.CompareInfo, _groupEqualPrices, CancellationToken.None);
+        foreach (var _ in Synchronize(_visibleActions, result.Actions)) { }
+        foreach (var _ in Synchronize(VisibleEntries, CreateEntries(result))) { }
+    }
 
-        foreach (var action in _actions) action.SetVisualDisplayOrdinal(0);
-        var keyed = visible
-            .Select(action => (Action: action, Key: PriceSignature(action)))
-            .ToList();
-        var groups = keyed
-            .Where(item => item.Key is not null)
-            .GroupBy(item => item.Key!, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key,
-                group => group.Select(item => item.Action).ToList(), StringComparer.Ordinal);
-        var emitted = new HashSet<string>(StringComparer.Ordinal);
-        var displayOrdinal = 1;
-        foreach (var item in keyed)
+    internal void PrepareForDisplay()
+    {
+        _searchCancellation?.Cancel();
+        _searchCancellation = null;
+        IsUpdating = true;
+        _visibleActions.Clear();
+        VisibleEntries.Clear();
+    }
+
+    internal async Task SearchAsync(string query, CancellationToken token)
+    {
+        _searchCancellation?.Cancel();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        _searchCancellation = cancellation;
+        IsUpdating = true;
+        SetProperty(ref _searchText, query, nameof(SearchText));
+        if (_sourceDirty)
         {
-            if (item.Key is not null && groups[item.Key].Count >= 2)
+            _searchItems = Snapshot();
+            _sourceDirty = false;
+        }
+        var snapshot = _searchItems;
+        var category = SelectedCategory.Id;
+        var culture = CultureInfo.CurrentCulture.CompareInfo;
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        try
+        {
+            var result = await Task.Run(() => Filter(snapshot, query.Trim(), category, culture,
+                _groupEqualPrices, cancellation.Token), cancellation.Token).ConfigureAwait(false);
+            await dispatcher.InvokeAsync(async () =>
             {
-                if (!emitted.Add(item.Key)) continue;
-                var actions = groups[item.Key];
-                foreach (var action in actions) action.SetVisualDisplayOrdinal(0);
-                var allMembers = _actions.Where(action => PriceSignature(action) == item.Key).ToList();
-                foreach (var action in actions) action.SetSequenceOrdinal(allMembers.IndexOf(action) + 1);
-                var group = new ActivePriceGroupViewModel(
-                    item.Key,
-                    actions,
-                    displayOrdinal++,
-                    GroupName(item.Key, actions.Count),
-                    _expandedPriceGroups.TryGetValue(item.Key, out var expanded) && expanded,
-                    value => _expandedPriceGroups[item.Key] = value)
+                cancellation.Token.ThrowIfCancellationRequested();
+                var watch = Stopwatch.StartNew();
+                var batchSize = 0;
+                var entries = CreateEntries(result, deferRendering: true);
+                var retained = entries.ToHashSet();
+                var removedGroups = VisibleEntries.Where(entry => entry.IsGroup && !retained.Contains(entry)).ToArray();
+                var changes = removedGroups.SelectMany(entry => Synchronize(entry.Group!.RenderedActions, []))
+                    .Concat(Synchronize(_visibleActions, result.Actions))
+                    .Concat(Synchronize(VisibleEntries, entries))
+                    .Concat(entries.Where(entry => entry.IsGroup)
+                        .SelectMany(entry => Synchronize(entry.Group!.RenderedActions, entry.Group.Actions)));
+                foreach (var _ in changes)
                 {
-                    StrictSequence = allMembers.Any(action => action.Model.StrictSequence),
-                    GroupDelaySeconds = ActionPriceOrdering.ResolveGroupDelay(allMembers.Select(action => action.Model))
-                };
-                VisibleEntries.Add(ActiveActionListEntryViewModel.PriceGroup(group));
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    // WPF realizes templates at the next layout pass, after collection notifications.
+                    // Limit the number too, even when those notifications themselves are inexpensive.
+                    if (++batchSize < 2 && watch.ElapsedMilliseconds < 8) continue;
+                    await Dispatcher.Yield(DispatcherPriority.Background);
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    batchSize = 0;
+                    watch.Restart();
+                }
+            }, DispatcherPriority.Background, cancellation.Token).Task.Unwrap().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        finally
+        {
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (ReferenceEquals(_searchCancellation, cancellation))
+                {
+                    _searchCancellation = null;
+                    IsUpdating = false;
+                }
+            });
+        }
+    }
+
+    private sealed record SearchItem(ActionViewModel Action, string Name, string Category,
+        string? PriceKey, bool Strict, int? Delay, int Ordinal);
+    private sealed record SearchEntry(ActionViewModel[] Actions, string? GroupKey, int Ordinal, bool Strict, int Delay);
+    private sealed record SearchResult(ActionViewModel[] Actions, SearchEntry[] Entries,
+        Dictionary<ActionViewModel, (int Visual, int Sequence)> Ordinals);
+
+    private SearchItem[] Snapshot() => _actions.Select(action => new SearchItem(action, action.DisplayName,
+        HasCanonicalSpawnCategory(action.HandlerId) || string.IsNullOrWhiteSpace(action.Model.CategoryId)
+            ? CategoryFor(action.HandlerId) : action.Model.CategoryId,
+        _groupEqualPrices ? PriceSignature(action) : null, action.Model.StrictSequence,
+        action.Model.GroupDelaySeconds, action.DisplayOrdinal)).ToArray();
+
+    private static SearchResult Filter(SearchItem[] source, string query, string category, CompareInfo culture,
+        bool groupPrices, CancellationToken token)
+    {
+        var visible = new List<SearchItem>();
+        foreach (var item in source)
+        {
+            token.ThrowIfCancellationRequested();
+            if ((category == "all" || item.Category == category) &&
+                culture.IndexOf(item.Name, query, CompareOptions.IgnoreCase) >= 0) visible.Add(item);
+        }
+        var ordinals = source.ToDictionary(item => item.Action,
+            item => (Visual: groupPrices ? 0 : item.Ordinal, Sequence: 0));
+        var allGroups = source.Where(item => item.PriceKey is not null)
+            .GroupBy(item => item.PriceKey!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var visibleGroups = visible.Where(item => item.PriceKey is not null)
+            .GroupBy(item => item.PriceKey!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Select(item => item.Action).ToArray(), StringComparer.Ordinal);
+        var emitted = new HashSet<string>(StringComparer.Ordinal);
+        var visibleActions = visible.Select(item => item.Action).ToHashSet();
+        var entries = new List<SearchEntry>();
+        var displayOrdinal = 1;
+        foreach (var item in visible)
+        {
+            token.ThrowIfCancellationRequested();
+            if (item.PriceKey is { } key && visibleGroups[key].Length >= 2)
+            {
+                if (!emitted.Add(key)) continue;
+                var members = allGroups[key];
+                for (var index = 0; index < members.Length; index++)
+                    if (visibleActions.Contains(members[index].Action)) ordinals[members[index].Action] = (0, index + 1);
+                entries.Add(new(visibleGroups[key], key, displayOrdinal++, members.Any(member => member.Strict),
+                    Math.Clamp(members.Max(member => member.Delay) ?? 1, 0, 86_400)));
                 continue;
             }
+            var ordinal = groupPrices ? displayOrdinal++ : item.Ordinal;
+            ordinals[item.Action] = (ordinal, 0);
+            entries.Add(new([item.Action], null, ordinal, false, 0));
+        }
+        return new(visible.Select(item => item.Action).ToArray(), entries.ToArray(), ordinals);
+    }
 
-            item.Action.SetVisualDisplayOrdinal(displayOrdinal++);
-            VisibleEntries.Add(ActiveActionListEntryViewModel.Single(item.Action));
+    private ActiveActionListEntryViewModel[] CreateEntries(SearchResult result, bool deferRendering = false)
+    {
+        foreach (var (action, ordinal) in result.Ordinals)
+        {
+            action.SetSequenceOrdinal(ordinal.Sequence);
+            action.SetVisualDisplayOrdinal(ordinal.Visual);
+        }
+        var entries = new List<ActiveActionListEntryViewModel>();
+        foreach (var entry in result.Entries)
+        {
+            if (entry.GroupKey is not { } key)
+            {
+                var action = entry.Actions[0];
+                if (!_singleEntries.TryGetValue(action, out var single))
+                    _singleEntries[action] = single = ActiveActionListEntryViewModel.Single(action);
+                entries.Add(single);
+                continue;
+            }
+            var name = GroupName(key, entry.Actions.Length);
+            if (!_groupEntries.TryGetValue(key, out var cached) || cached.Group is not { } group ||
+                group.DisplayOrdinal != entry.Ordinal || !group.Actions.SequenceEqual(entry.Actions) ||
+                group.StrictSequence != entry.Strict || group.GroupDelaySeconds != entry.Delay ||
+                !group.SharedTriggers.SequenceEqual(entry.Actions[0].Triggers.Where(trigger => trigger.Model.Enabled)) ||
+                group.DisplayName != name)
+            {
+                group = new ActivePriceGroupViewModel(key, entry.Actions, entry.Ordinal, name,
+                    _expandedPriceGroups.TryGetValue(key, out var expanded) && expanded,
+                    value => _expandedPriceGroups[key] = value, deferRendering)
+                { StrictSequence = entry.Strict, GroupDelaySeconds = entry.Delay };
+                _groupEntries[key] = cached = ActiveActionListEntryViewModel.PriceGroup(group);
+            }
+            if (!deferRendering)
+                foreach (var _ in Synchronize(group.RenderedActions, group.Actions)) { }
+            else if (!VisibleEntries.Contains(cached))
+                group.RenderedActions.Clear();
+            entries.Add(cached);
+        }
+        return entries.ToArray();
+    }
+
+    private static IEnumerable<bool> Synchronize<T>(ObservableCollection<T> target, IReadOnlyList<T> wanted) where T : class
+    {
+        var retained = wanted.ToHashSet();
+        for (var index = target.Count - 1; index >= 0; index--)
+        {
+            if (retained.Contains(target[index])) continue;
+            target.RemoveAt(index);
+            yield return true;
+        }
+        var existing = target.ToHashSet();
+        for (var index = 0; index < wanted.Count; index++)
+        {
+            if (index < target.Count && ReferenceEquals(target[index], wanted[index])) continue;
+            if (existing.Add(wanted[index])) target.Insert(index, wanted[index]);
+            else target.Move(target.IndexOf(wanted[index]), index);
+            yield return true;
         }
     }
 
@@ -329,13 +507,6 @@ public sealed class ActionBrowserViewModel : ObservableObject
         _priceGroupNames.TryGetValue(key, out var name) ? name : DefaultGroupName(count);
 
     private static string DefaultGroupName(int count) => $"Шаблонов: {count}";
-
-    private bool MatchesFilter(object item) => item is ActionViewModel action &&
-        action.DisplayName.Contains(SearchText.Trim(), StringComparison.CurrentCultureIgnoreCase) &&
-        (SelectedCategory.Id == "all" ||
-         (HasCanonicalSpawnCategory(action.HandlerId) || string.IsNullOrWhiteSpace(action.Model.CategoryId)
-             ? CategoryFor(action.HandlerId)
-             : action.Model.CategoryId) == SelectedCategory.Id);
 
     private static bool HasCanonicalSpawnCategory(string handlerId) => handlerId is
         "spawn_npcs" or "spawn_mutants" or

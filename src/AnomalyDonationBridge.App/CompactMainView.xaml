@@ -182,7 +182,7 @@
                                 <TextBlock Text="сек." VerticalAlignment="Center" Margin="6,0,0,0" />
                             </StackPanel>
                         </WrapPanel>
-                        <ItemsControl ItemsSource="{Binding Actions}" ItemTemplate="{StaticResource SmallActionRow}" />
+                        <ItemsControl ItemsSource="{Binding RenderedActions}" ItemTemplate="{StaticResource SmallActionRow}" />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -287,7 +287,7 @@
         </Grid>
         <Grid Grid.Row="4" Grid.Column="1" Visibility="{Binding ShowTemplateSearch, Converter={StaticResource BoolToVisibility}}">
             <ScrollViewer x:Name="ActionScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsControl x:Name="SmallActionsList" ItemsSource="{Binding VisibleItems, ElementName=CompactRoot}" Margin="0,0,4,0" AlternationCount="2" /></ScrollViewer>
-            <TextBlock Text="Ничего не найдено" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding ElementName=SmallActionsList, Path=HasItems}" Value="False"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+            <TextBlock Text="Ничего не найдено" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding ElementName=SmallActionsList, Path=HasItems}" Value="False"><Setter Property="Visibility" Value="Visible" /></DataTrigger><DataTrigger Binding="{Binding IsTemplateBrowserUpdating}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
         </Grid>
         <Grid Grid.Row="3" Grid.RowSpan="2" Grid.Column="1" Visibility="{Binding IsHistorySection, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" Margin="0,6,0,0">
             <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>

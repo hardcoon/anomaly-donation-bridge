@@ -25,11 +25,13 @@ internal static class SearchQueueVisibilityTests
             Check(vm.ShowTemplateSearch && vm.TemplateSearchText == "скорость",
                 "A donation/countdown hid the typed search.");
             vm.TemplateSearchText = "no such template 138953";
+            TemplateSearchUiChecks.WaitForSearch(vm, System.Windows.Threading.Dispatcher.CurrentDispatcher);
             var browser = section switch { 0 => vm.ActiveBrowser, 1 => vm.UserPresetBrowser, _ => vm.PresetBrowser };
             Check(browser.VisibleActions.IsEmpty, "The typed query stopped filtering during the countdown.");
             Queue("Следующий эффект через 00:19 · в очереди: 2");
             Check(vm.ShowTemplateSearch, "A countdown tick hid the search.");
             vm.ClearTemplateSearch();
+            TemplateSearchUiChecks.WaitForSearch(vm, System.Windows.Threading.Dispatcher.CurrentDispatcher);
             Check(vm.TemplateSearchText == "" && vm.ShowTemplateSearch && browser.VisibleActions.Cast<object>().Count() == 2,
                 "The clear action hid the field or left a stale filter.");
             Queue(string.Empty);
