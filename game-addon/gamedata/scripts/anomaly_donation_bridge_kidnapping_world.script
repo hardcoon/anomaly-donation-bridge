@@ -1,0 +1,315 @@
+-- Native hostage support. The captive is the ORIGINAL server object: no NPC
+-- replacement, inventory transfer, visual replacement or global faction edits.
+local function companions() return anomaly_donation_bridge_relife_companions end
+local function named() return anomaly_donation_bridge_named_companion end
+local CAPTIVE_LOGIC="scripts\\anomaly_donation_bridge_kidnapping.ltx"
+local CAPTIVE_SECTION="adb_kidnapping_logic"
+function server(id) return id and alife():object(id,true) end
+function same(se,r)
+    return se and r and se.id==r.id and se:name()==r.internal and se:section_name()==r.section
+end
+local function row(se) return {id=se.id,internal=se:name(),section=se:section_name()} end
+local function point(se)
+    return {x=se.position.x,y=se.position.y,z=se.position.z,lvid=se.m_level_vertex_id,gvid=se.m_game_vertex_id}
+end
+local function vec(p) return vector():set(p.x,p.y,p.z) end
+local function teleport(id,p)
+    alife():teleport_object(id,p.gvid,p.lvid,vec(p))
+    -- motivator:net_destroy caches the OLD level vertex during switch_offline.
+    -- Let net_spawn use the server's new point, including on another map.
+    if db.offline_objects and db.offline_objects[id] then db.offline_objects[id].level_vertex_id=nil end
+    if db.spawned_vertex_by_id then db.spawned_vertex_by_id[id]=nil end
+end
+local function map(gvid) return game_graph():vertex(gvid):level_id() end
+local function save(se,k,v) se_save_var(se.id,se:name(),k,v) end
+local function squad(r) local s=r and server(r.id);return same(s,r) and s or nil end
+function ui_free()
+    if db.actor:is_talking() then return false end
+    if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return false end
+    if type(Check_UI)=="function" and Check_UI() then return false end
+    if type(_GUIs)=="table" and next(_GUIs) then return false end
+    if type(level.main_input_receiver)=="function" and level.main_input_receiver() then return false end
+    return true
+end
+function available()
+    return companions().available() and axr_task_manager and axr_task_manager.hostages_by_id and
+        sim_offline_combat and sim_offline_combat.task_squads and xr_logic and
+        type(xr_logic.configure_schemes)=="function" and type(xr_logic.activate_by_section)=="function" and
+        modules and modules.stype_stalker and ini_file~=nil and
+        dialogs and type(dialogs.rescue_hostage)=="function" and
+        type(alife().teleport_object)=="function" and utils_data and type(utils_data.CTime_to_table)=="function"
+end
+function choose_companion()
+    local rows=companions().capture({})
+    local candidates={}
+    for _,r in ipairs(rows) do
+        local s=server(r.id)
+        local n=s and level.object_by_id(s.id)
+        if same(s,{id=r.id,internal=r.internal,section=s:section_name()}) and n and
+            map(s.m_game_vertex_id)==map(db.actor:game_vertex_id()) and
+            not axr_task_manager.hostages_by_id[s.id] and type(n.invulnerable)=="function" then
+            candidates[#candidates+1]=s.id
+        end
+    end
+    if #candidates==0 then return nil end
+    local s=server(candidates[math.random(#candidates)])
+    local n=level.object_by_id(s.id)
+    local r=row(s)
+    r.group=s.group_id;r.origin=point(s);r.faction=s:community();r.nickname=n:character_name()
+    r.invulnerable=n:invulnerable()
+    local g=server(r.group);r.old_group=g and row(g) or nil
+    r.registration=named().snapshot_registration(s)
+    r.flags={}
+    for _,k in ipairs({"companion","companion_cannot_dismiss","companion_cannot_teleport"}) do
+        r.flags[k]=se_load_var(s.id,s:name(),k)
+    end
+    return r
+end
+-- Same camp restrictions as stock assault/hostage tasks: real smart terrain,
+-- no faction base, locked/story camp, or camp already holding a hostage.
+local forbidden={l13_generators=true,l12_stancia_2=true,l12_stancia=true,l11_pripyat=true,l10_radar=true,
+    l11_hospital=true,jupiter_underground=true,labx8=true,l03u_agr_underground=true,l04u_labx18=true,
+    l08u_brainlab=true,l10u_bunker=true,l12u_control_monolith=true,l12u_sarcofag=true,l13u_warlab=true,fake_start=true}
+function choose_camp(anywhere)
+    local candidates={}
+    local here=map(db.actor:game_vertex_id())
+    local p=db.actor:position()
+    for _,sm in pairs(SIMBOARD.smarts_by_names) do
+        local name=sm:name()
+        local mid=map(sm.m_game_vertex_id)
+        local level_name=alife():level_name(mid)
+        local used=false
+        for npc_id,id in pairs(axr_task_manager.hostages_by_id) do
+            if id==sm.id and not anomaly_donation_bridge_kidnapping.owns_captive(npc_id) then used=true;break end
+        end
+        local dx,dz=sm.position.x-p.x,sm.position.z-p.z
+        if SIMBOARD.smarts[sm.id] and not sm.locked and not used and not forbidden[level_name] and
+            not (simulation_objects.base_smarts[name]==true) and
+            (anywhere or mid==here) and (mid~=here or dx*dx+dz*dz>=150*150) and
+            sm.m_level_vertex_id~=4294967295 and sm.m_game_vertex_id~=65535 then
+            local r=row(sm);r.point=point(sm);candidates[#candidates+1]=r
+        end
+    end
+    table.sort(candidates,function(a,b) return a.id<b.id end)
+    return #candidates>0 and candidates[math.random(#candidates)] or nil
+end
+local function new_group(r,key,faction)
+    local existing=squad(r[key]);if existing then return existing end
+    assert(not r[key],"kidnap_squad_identity_changed")
+    local p=r.camp.point
+    local g=assert(alife():create("online_offline_group",vec(p),p.lvid,p.gvid),"kidnap_squad_create_failed")
+    r[key]=row(g) -- journal immediately; a save/load must reuse this group
+    g.player_id=faction
+    if key=="hostage_group" then g.scripted_target=nil else g.scripted_target=r.camp.id end
+    sim_offline_combat.task_squads[g.id]=true
+    SIMBOARD:assign_squad_to_smart(g,r.camp.id)
+    return g
+end
+function stage_victim(r)
+    local s=server(r.victim.id);assert(same(s,r.victim) and s:alive(),"kidnap_companion_missing")
+    local g=new_group(r,"hostage_group",r.victim.faction)
+    if s.group_id~=g.id then
+        local smart=server(s.m_smart_terrain_id)
+        if smart and type(smart.unregister_npc)=="function" then smart:unregister_npc(s) end
+        companions().detach(s)
+        named().release_following(s,false)
+        g:register_member(s.id)
+        SIMBOARD:setup_squad_and_group(s)
+    end
+    -- Captive is temporarily OUT of the actor's party. On a saved-game spawn,
+    -- stock setup_companion_logic(loaded=true) hardcodes beh_companion.ltx;
+    -- it cannot load our private beh@adb_kidnapped section. The ordinary
+    -- initialize_obj path instead restores our saved INI/section correctly.
+    save(s,"companion",nil);save(s,"companion_cannot_dismiss",true);save(s,"companion_cannot_teleport",true)
+    axr_companions.companion_squads[g.id]=nil
+    axr_task_manager.hostages_by_id[s.id]=r.camp.id
+    if not r.moved then
+        r.moved=true
+        local p=r.camp.point
+        -- teleport_object replaces the online object. Never access s/n after it.
+        teleport(s.id,p)
+    end
+end
+function spawn_guard(r,index)
+    local g=new_group(r,"guard_group","arena_enemy")
+    local old=r.guards[index]
+    if old then return end -- never respawn a dead/missing guard after loading
+    local section=r.plan[index]
+    assert(anomaly_donation_bridge_catalog.is_spawn_safe(section,"npc"),"kidnap_guard_section_unsafe")
+    local p=r.camp.point
+    -- A smart's own vertex is valid on remote maps too. Online AI disperses
+    -- members around its camp; no current-map vertex lookup for a remote map.
+    local s=assert(alife():create(section,vec(p),p.lvid,p.gvid),"kidnap_guard_create_failed")
+    r.guards[index]=row(s)
+    g:register_member(s.id);SIMBOARD:setup_squad_and_group(s)
+    s:force_set_goodwill(-5000,db.actor:id())
+end
+function guards_alive(r)
+    for _,v in pairs(r.guards) do
+        local s=server(v.id)
+        if same(s,v) and s:alive() then return true end
+    end
+    return false
+end
+local function restore_flags(s,r)
+    for _,k in ipairs({"companion","companion_cannot_dismiss","companion_cannot_teleport"}) do save(s,k,r.victim.flags[k]) end
+end
+local function release_hostage(r)
+    local s=server(r.victim.id)
+    if same(s,r.victim) then
+        axr_task_manager.hostages_by_id[s.id]=nil
+        local n=level.object_by_id(s.id)
+        if n then n:invulnerable(r.victim.invulnerable==true) end
+        restore_flags(s,r)
+        -- A corpse keeps the captive's saved INI. Do not route its next
+        -- net_spawn through the stock companion loader with a private section.
+        if not s:alive() then save(s,"companion",nil) end
+    end
+    local g=squad(r.hostage_group)
+    if g then axr_companions.companion_squads[g.id]=nil;sim_offline_combat.task_squads[g.id]=nil end
+end
+function restore_companion(r,rollback)
+    local s=server(r.victim.id);assert(same(s,r.victim),"kidnap_companion_identity_changed")
+    if not s:alive() then release_hostage(r);return end
+    if rollback and r.moved and not r.return_moved then
+        r.return_moved=true
+        local p=r.victim.origin
+        teleport(s.id,p)
+        return false
+    end
+    local n=level.object_by_id(s.id)
+    -- The rescue callback only records a request. Actual scheme/squad changes
+    -- happen here, after talking/loot/trade windows have closed.
+    if n and r.hostage_group and s.group_id==r.hostage_group.id and squad(r.hostage_group) then
+        dialogs.rescue_hostage(db.actor,n)
+    end
+    release_hostage(r)
+    local group=squad(r.victim.old_group)
+    if not group then
+        if not r.return_group then
+            local p=point(s)
+            local g=assert(alife():create("online_offline_group",vec(p),p.lvid,p.gvid))
+            r.return_group=row(g)
+        end
+        group=assert(squad(r.return_group),"kidnap_return_squad_missing")
+    end
+    if s.group_id~=group.id then
+        local old=server(s.group_id)
+        if old then old:unregister_member(s.id) end
+        group:register_member(s.id);SIMBOARD:setup_squad_and_group(s)
+    end
+    group.player_id=r.victim.faction;group.scripted_target="actor"
+    axr_companions.companion_squads[group.id]=group;axr_companions.non_task_companions[s.id]=true
+    save(s,"companion",true)
+    if n then
+        if not r.victim.flags.companion_cannot_dismiss then n:disable_info_portion("npcx_beh_cannot_dismiss") end
+        axr_companions.add_to_actor_squad(n);n:invulnerable(r.victim.invulnerable==true)
+    end
+    restore_flags(s,r)
+    named().restore_registration(s,r.victim.registration)
+    local old=squad(r.hostage_group)
+    if old and old:npc_count()==0 then SIMBOARD:remove_squad(old) end
+    return true
+end
+function expire(r)
+    local s=server(r.victim.id)
+    if not same(s,r.victim) then release_hostage(r);return true end
+    if not s:alive() then release_hostage(r);return true end
+    local n=level.object_by_id(s.id)
+    if n then n:invulnerable(false);n:kill(n) else s:kill() end
+    release_hostage(r)
+    return true
+end
+function finish_guards(r)
+    local g=squad(r.guard_group)
+    if g then sim_offline_combat.task_squads[g.id]=nil end
+end
+local function guard_relation(n)
+    n:set_character_community("arena_enemy",0,0)
+    game_relations.set_npcs_relation(n,db.actor,"enemy")
+    n:force_set_goodwill(-5000,db.actor)
+end
+local function captive_logic(r,s,n)
+    -- setup_companion_logic ALWAYS gives npcx_is_companion and activates the
+    -- actor-following base. Never use it while the NPC is a captive.
+    axr_companions.non_task_companions[s.id]=nil
+    save(s,"companion",nil)
+    if n:has_info("npcx_is_companion") then n:disable_info_portion("npcx_is_companion") end
+    if n:has_info("npcx_beh_cannot_dismiss") then n:disable_info_portion("npcx_beh_cannot_dismiss") end
+    local storage=assert(db.storage[s.id],"kidnap_npc_storage_unavailable")
+    if storage.ini_filename~=CAPTIVE_LOGIC or storage.section_logic~=CAPTIVE_SECTION or
+        storage.active_section~="beh@adb_kidnapped" then
+        local smart=server(s.m_smart_terrain_id)
+        if smart and type(smart.unregister_npc)=="function" then smart:unregister_npc(s) end
+        local ini=assert(ini_file(CAPTIVE_LOGIC),"kidnap_captive_ini_unavailable")
+        n:inactualize_patrol_path()
+        xr_logic.configure_schemes(n,ini,CAPTIVE_LOGIC,modules.stype_stalker,CAPTIVE_SECTION,"")
+        xr_logic.activate_by_section(n,ini,"beh@adb_kidnapped","",false)
+    end
+end
+function net_spawn(r,n)
+    if not r then return end
+    if n:id()==r.victim.id and same(server(n:id()),r.victim) and server(n:id()):alive() and r.moved and
+        r.phase~="rescued" and r.phase~="failed" and r.phase~="cancelled" then
+        captive_logic(r,server(n:id()),n)
+        return
+    end
+    for _,v in pairs(r.guards) do
+        if n:id()==v.id and same(server(v.id),v) then guard_relation(n);return end
+    end
+end
+function maintain(r,configured)
+    local victim=server(r.victim.id)
+    if same(victim,r.victim) and victim:alive() and r.moved then
+        -- Repair an active local.1 captive already brought back by the old
+        -- companion helper. Keep the same NPC, quest and original deadline.
+        if not r.captive_fixed_v2 then
+            local p=r.camp.point
+            local dx,dz=victim.position.x-p.x,victim.position.z-p.z
+            if r.phase=="captive" and (map(victim.m_game_vertex_id)~=map(p.gvid) or dx*dx+dz*dz>60*60) then
+                if not ui_free() then return end
+                r.captive_fixed_v2=true;configured[victim.id]=nil
+                teleport(victim.id,p)
+                return
+            end
+            r.captive_fixed_v2=true
+        end
+        axr_task_manager.hostages_by_id[victim.id]=r.camp.id
+        local g=squad(r.hostage_group)
+        if g then
+            axr_companions.companion_squads[g.id]=nil
+            -- Leave scripted_target nil: stock get_script_target consults
+            -- hostages_by_id BEFORE its general companion-following branch.
+            sim_offline_combat.task_squads[g.id]=true;g.scripted_target=nil
+        end
+        local n=level.object_by_id(victim.id)
+        if n then
+            captive_logic(r,victim,n)
+            configured[victim.id]=true
+        end
+    end
+    local g=squad(r.guard_group)
+    if g then sim_offline_combat.task_squads[g.id]=true;g.player_id="arena_enemy";g.scripted_target=r.camp.id end
+    for _,v in pairs(r.guards) do
+        local s=server(v.id)
+        if same(s,v) and s:alive() then
+            local n=level.object_by_id(v.id)
+            if n and not configured[v.id] then
+                guard_relation(n)
+                configured[v.id]=true
+            end
+        end
+    end
+end
+function enemy_eval(r,object,enemy,flags)
+    if not r or not object or not enemy or type(flags)~="table" then return end
+    local id,eid=object:id(),enemy:id()
+    if id==r.victim.id and same(server(id),r.victim) then
+        flags.override=true;flags.result=false;return
+    end
+    for _,v in pairs(r.guards) do
+        if id==v.id and same(server(id),v) then
+            flags.override=true;flags.result=eid==db.actor:id();return
+        end
+    end
+end

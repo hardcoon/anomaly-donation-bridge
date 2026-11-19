@@ -1,0 +1,19 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.companion_kidnap",
+  "displayName":"Похищение напарника",
+  "description":"После альтернативного сна на один игровой час похищает одного человеческого напарника. Это тот же NPC с прежними именем, внешностью и вещами. Можно похищать следующих напарников, пока они есть: для каждого выдаётся отдельное задание и сохраняется свой таймер. Пленник полностью открепляется от игрока и ждёт в лагере. Уничтожьте его охрану и выберите штатную реплику «Хочешь жить — идём со мной!», чтобы вернуть его в отряд. Охрана — враждебная группировка «Участник», секции NPC выбираются случайно из отмеченных. Выкуп не требуется. По истечении срока напарник погибает. Без подходящего напарника или лагеря эффект ждёт в очереди.",
+  "category":"npc_mutants",
+  "cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"npc_sections","displayName":"NPC охраны (случайно из отмеченных)","kind":"MultiChoice","catalogKind":"Npc","minimumSelections":1,"defaultValue":""},
+    {"key":"enemy_count","displayName":"Количество врагов","kind":"Integer","minimum":1,"maximum":99,"defaultValue":"12"},
+    {"key":"deadline_hours","displayName":"Время на спасение, игровых часов","kind":"Integer","minimum":1,"maximum":168,"defaultValue":"24"},
+    {"key":"any_location","displayName":"На любой локации","kind":"Choice","options":["false","true"],"defaultValue":"false"}
+  ],
+  "parameters":{"npc_sections":"","enemy_count":"12","deadline_hours":"24","any_location":"false"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+function on_game_start() anomaly_donation_bridge_kidnapping.register() end

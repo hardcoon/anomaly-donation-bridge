@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.187",
+  "addonVersion": "1.0.190",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
     {
       "path": "gamedata/configs/gameplay/dialogs_anomaly_donation_bridge.xml",
-      "sha256": "2C1A367F2FA251BD6A3F45058346AD647A0C5225406844BCAC4C42596EA9A339"
+      "sha256": "AF6E5DC97EF46160B835C6D3E90ABABC954D0C281C25C4E4BFF9669B7273326D"
     },
     {
       "path": "gamedata/configs/misc/task/tm_anomaly_donation_bridge.ltx",
-      "sha256": "C09EE815F1C317A39DE20E39C2F89D108D0516CF5B0AE82F409913466B34D043"
+      "sha256": "D6D6CC8B05DB6037EE1872D3E47B3D7160C69B5B20EC4F936EF8D5D260070D57"
     },
     {
       "path": "gamedata/configs/misc/trade/anomaly_donation_bridge_wandering_trader.ltx",
@@ -155,7 +155,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "9A2C0384891D5E9FD29B38A86EB6DC5B62EB4ED8FA2F3A60347C0D06925250E5"
+      "sha256": "512B6E06005A3FA81BEF53EE2B42689C0E7CAD5781846919E0C73A91FF141A6D"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",
@@ -224,6 +224,18 @@
     {
       "path": "gamedata/textures/ui/anomaly_donation_bridge_voting_material.dds",
       "sha256": "9EB070B8C06DFF3D855BB7F5BDF469E408EDF899D3F44A755DFD33CD14850A3B"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_kidnapping.script",
+      "sha256": "EADDEFB588822AC8D0698C2410012E7B2C416180ABB2D951DB6939C1A86A6739"
+    },
+    {
+      "path": "gamedata/scripts/anomaly_donation_bridge_kidnapping_world.script",
+      "sha256": "975C2D282D79F9D5097A8B40B5300A9ACFEF83168DA2FDE071BF2DD796F93709"
+    },
+    {
+      "path": "gamedata/configs/scripts/anomaly_donation_bridge_kidnapping.ltx",
+      "sha256": "CC5A6BB3D6EA07BD5B46DBE4CBDC06F0FF574CCACA43D7C1D899BDAF4B33C5EF"
     }
   ]
 }

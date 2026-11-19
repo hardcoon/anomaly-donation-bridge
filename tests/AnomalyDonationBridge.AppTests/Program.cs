@@ -755,7 +755,9 @@ internal static class Program
         Assert(coreFiles.Count(name => name!.StartsWith("anomaly_donation_bridge_roulette", StringComparison.Ordinal)) == 5 &&
             !Directory.EnumerateFiles(game, "hc_upgrader*", SearchOption.AllDirectories).Any(),
             "Roulette integration must ship five private modules without replacing the standalone addon.");
-        Assert(coreFiles.Count == 29 && coreFiles.Contains("anomaly_donation_bridge_props.script") &&
+        Assert(coreFiles.Count == 31 && coreFiles.Contains("anomaly_donation_bridge_props.script") &&
+            coreFiles.Contains("anomaly_donation_bridge_kidnapping.script") &&
+            coreFiles.Contains("anomaly_donation_bridge_kidnapping_world.script") &&
             coreFiles.Contains("anomaly_donation_bridge_btr_ai.script") &&
             coreFiles.Contains("anomaly_donation_bridge_reincarnation.script") &&
             coreFiles.Contains("anomaly_donation_bridge_relife_companions.script") &&
@@ -791,10 +793,25 @@ internal static class Program
             !sharedSource.Contains("register_builtin", StringComparison.Ordinal),
             "Direct-spawn shared logic unexpectedly registered a preset itself.");
         var effectRoot = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
-        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 72,
-            "The application delivery must contain 72 one-file templates, excluding the archived chimera and psy-dog.");
+        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 73,
+            "The application delivery must contain 73 one-file templates, excluding the archived chimera and psy-dog.");
         var taskSource = await File.ReadAllTextAsync(Path.Combine(packageRoot,
             "gamedata", "configs", "misc", "task", "tm_anomaly_donation_bridge.ltx"));
+        Assert(System.Text.RegularExpressions.Regex.Matches(taskSource,
+                @"(?m)^\[adb_companion_kidnap_\d{2}\]").Count == 32 &&
+            taskSource.Contains("status_functor = adb_companion_kidnap_status"),
+            "Kidnapping must retain native slots for existing local.1 quests.");
+        var captiveLogic = await File.ReadAllTextAsync(Path.Combine(packageRoot,
+            "gamedata", "configs", "scripts", "anomaly_donation_bridge_kidnapping.ltx"));
+        Assert(captiveLogic.Contains("#include \"beh_companion.ltx\"") &&
+            captiveLogic.Contains("[beh@adb_kidnapped]:beh@hostage_1") &&
+            captiveLogic.Contains("[adb_kidnapping_logic]") && captiveLogic.Contains("active = beh@adb_kidnapped") &&
+            captiveLogic.Contains("meet_dialog = anomaly_donation_bridge_kidnapping_dialog") &&
+            !captiveLogic.Contains("[logic]"),
+            "Captivity must inherit stock hostage behavior without redefining its logic section.");
+        Assert(System.Text.RegularExpressions.Regex.IsMatch(taskSource,
+                @"(?ms)^\[adb_companion_kidnap_template\]\r?\nicon = ui_inGame2_V_poiskah_Soroki\r?\n"),
+            "Kidnapping must use the stock hostage quest texture ID.");
         Assert(System.Text.RegularExpressions.Regex.Matches(taskSource,
                 @"(?m)^\[adb_donor_thief_\d{2}\]").Count == 32 &&
             System.Text.RegularExpressions.Regex.Matches(taskSource,

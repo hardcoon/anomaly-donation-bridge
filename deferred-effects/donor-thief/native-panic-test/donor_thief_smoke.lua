@@ -880,6 +880,24 @@ assert(combat.additions == 2 and combat.actions[sprint_action_id].retreat == nat
 npc.current_position = vector():set(-1, 0, 0)
 npc.companion_flag = true
 current_time = robbed_at + 5700
+-- Every F9/load grants five READY seconds, even if catchable was saved true
+-- and the native online transition puts the thief right beside the actor.
+handler.update(current_time)
+assert(not npc.killed,'loaded thief died immediately beside the actor')
+for i=1,24 do current_time=current_time+200;handler.update(current_time) end
+assert(not npc.killed,'load capture grace ended before five ready seconds')
+handler.on_game_load() -- loading another save must rearm the entire protection
+handler.update(current_time)
+local original_device=rawget(_G,'device')
+device=function() return {is_paused=function() return true end,precache_frame=0} end
+current_time=current_time+30000;handler.update(current_time)
+assert(not npc.killed,'paused/loading time consumed thief protection')
+device=original_device
+current_time=current_time+100;handler.update(current_time)
+for i=1,24 do current_time=current_time+200;handler.update(current_time) end
+assert(not npc.killed and saved.adb_donor_thief_01.phase=='flee','repeated load did not reset capture grace')
+current_time = current_time+200
+npc.companion_flag = true -- another NPC system can reapply it during the grace
 if arg[3] == "capture-flag-failure" then
 	local saved_disable_info = npc.disable_info_portion
 	npc.disable_info_portion = function() error("simulate unavailable flag cleanup") end

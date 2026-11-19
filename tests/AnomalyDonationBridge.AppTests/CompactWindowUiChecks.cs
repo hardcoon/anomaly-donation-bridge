@@ -44,7 +44,7 @@ internal static class CompactWindowUiChecks
             foreach (var file in Directory.EnumerateFiles(Path.Combine(effects, "gamedata", "scripts"), "*.script"))
                 File.Copy(file, Path.Combine(gameScripts, Path.GetFileName(file)));
             var presets = new FilePresetLoader(effects).Load(game).Presets;
-            Check(presets.Count == 72, "The renderer did not load the 72 actual shipped template headers.");
+            Check(presets.Count == 73, "The renderer did not load the 73 actual shipped template headers.");
             foreach (var preset in presets) model.Presets.Add(new ActionViewModel(preset.Clone(), isPreset: true));
             string[] ids = ["god_mode", "hardcoon.adb.helicopter_companion", "hardcoon.adb.equipment_ammo", "hardcoon.adb.new_life"];
             var amounts = new[] { 31m, 500m, 100m, 1000m };

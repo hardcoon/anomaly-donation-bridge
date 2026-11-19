@@ -30,11 +30,11 @@ internal static class FilePresetTests
             Assert(loader.Load(gameRoot).Presets.Count == 0, "Empty effects folder showed presets.");
             var shipped = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
             var shippedFiles = Directory.EnumerateFiles(shipped, "*.script").OrderBy(path => path).ToList();
-            Assert(shippedFiles.Count == 72 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 72,
-                "The app must ship 72 separate effect scripts; archived chimera and psy-dog must not return.");
+            Assert(shippedFiles.Count == 73 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 73,
+                "The app must ship 73 separate effect scripts; archived chimera and psy-dog must not return.");
             var optionalRoot = FindOptionalRoot();
             var optional = new FilePresetLoader(optionalRoot).Load(null);
-            Assert(optional.SourcePaths.Count == 68 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
+            Assert(optional.SourcePaths.Count == 69 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
                 "Each additional Lua effect must have a valid self-describing header.");
             Assert(Directory.EnumerateFiles(Path.Combine(optionalRoot, "gamedata", "scripts"), "*.script")
                     .All(path => shippedFiles.Any(shipped => Path.GetFileName(shipped) == Path.GetFileName(path))),
@@ -43,7 +43,7 @@ internal static class FilePresetTests
                 File.Copy(file, Path.Combine(effectsScripts, Path.GetFileName(file)));
 
             var candidates = loader.Load(gameRoot);
-            Assert(candidates.SourcePaths.Count == 72 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
+            Assert(candidates.SourcePaths.Count == 73 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
                 "Uninstalled scripts produced visible presets or invalid headers.");
             var v2Path = Path.Combine(effectsScripts, "anomaly_donation_bridge_effect_hardcoon_adb_mutant_companion_v2.script");
             var v2Text = await File.ReadAllTextAsync(v2Path);
@@ -76,13 +76,21 @@ internal static class FilePresetTests
 
             var manager = new EffectScriptManager(new AppPaths(Path.Combine(root, "data")), loader);
             var before = await manager.InspectAsync(gameRoot);
-            Assert(before.CanInstall && before.SourceCount == 72 && before.InstalledCount == 0,
+            Assert(before.CanInstall && before.SourceCount == 73 && before.InstalledCount == 0,
                 "Effect installer did not identify missing scripts.");
             await manager.PreflightAsync(gameRoot);
             var after = await manager.InstallAllAsync(gameRoot);
-            Assert(after.InstalledCount == 72 && loader.Load(gameRoot).Presets.Count == 72,
-                "Installing all effects did not reveal all 72 templates.");
+            Assert(after.InstalledCount == 73 && loader.Load(gameRoot).Presets.Count == 73,
+                "Installing all effects did not reveal all 73 templates.");
             var squads = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.show_squads");
+            var kidnap = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.companion_kidnap");
+            var kidnapNpcs = kidnap.ParameterDefinitions.Single(p => p.Key == "npc_sections");
+            Assert(kidnap.DisplayName == "Похищение напарника" && kidnap.ParameterDefinitions.Count == 4 &&
+                kidnapNpcs.Kind == ParameterKind.MultiChoice && kidnapNpcs.CatalogKind == CatalogEntryKind.Npc &&
+                kidnapNpcs.MinimumSelections == 1 && kidnap.Parameters["enemy_count"] == "12" &&
+                kidnap.Parameters["deadline_hours"] == "24" && kidnap.Parameters["any_location"] == "false" &&
+                new ActionViewModel(kidnap).Parameters.Single(p => p.Definition.Key == "any_location").IsBooleanChoice,
+                "Kidnapping must expose an NPC multiselect, 12 guards, 24 game hours and opt-in remote locations.");
             var kick = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.kick");
             var kickHeight = kick.ParameterDefinitions.Single();
             Assert(kick.DisplayName == "Дать пинка" && kickHeight.Key == "height_meters" &&
@@ -988,9 +996,9 @@ internal static class FilePresetTests
                     "The unified button is disabled when core and effect scripts are missing.");
                 await settings.InstallBridgeAsync();
                 Assert((await runtime.InspectAddonAsync(unifiedGameRoot)).State == AddonInstallState.Current &&
-                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 72 &&
+                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 73 &&
                     !settings.CanInstallBridge,
-                    "The unified operation did not install both core and all 72 effect scripts.");
+                    "The unified operation did not install both core and all 73 effect scripts.");
                 Assert(!(await runtime.InspectBridgeAsync(unifiedGameRoot, string.Empty)).CanInstall,
                     "Header update button must be hidden for a verified current installation.");
                 await runtime.AddCatalogExclusionsAsync([new CatalogEntry

@@ -1,0 +1,16 @@
+; Inherit the STOCK hostage posture, movement and interaction rules. Use our
+; own rescue dialogue/transition so stock hostage quests remain independent.
+#include "beh_companion.ltx"
+
+[adb_kidnapping_logic]
+active = beh@adb_kidnapped
+post_combat_time = 0,0
+trade = items\trade\trade_companion.ltx
+
+[beh@adb_kidnapped]:beh@hostage_1
+on_info1 =
+meet = meet@adb_kidnapped
+
+[meet@adb_kidnapped]:meet@hostage_companion_task_1
+meet_dialog = anomaly_donation_bridge_kidnapping_dialog
+trade_enable = false

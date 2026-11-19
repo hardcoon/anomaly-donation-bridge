@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "handlerId": "hardcoon.adb.donor_thief",
   "displayName": "Данат-воришка",
-  "description": "Создаёт за спиной героя NPC его группировки. По умолчанию ждёт закрытия игровых окон, включая инвентарь, диалог, торговлю, обыск и КПК. Герой получает эффект удара с выбиванием оружия; вещи из рюкзака передаются воришке. Он убегает спринтом на указанную дистанцию, затем трусцой. Приблизьтесь к нему на 2 метра, чтобы он погиб и оставил украденное на теле.",
+  "description": "Создаёт за спиной героя NPC его группировки. По умолчанию ждёт закрытия игровых окон, включая инвентарь, диалог, торговлю, обыск и КПК. Герой получает эффект удара с выбиванием оружия; вещи из рюкзака передаются воришке. Он убегает спринтом на указанную дистанцию, затем трусцой. Приблизьтесь к нему на 2 метра, чтобы он погиб и оставил украденное на теле. После каждой загрузки сохранения эта проверка смерти отключена на первые 5 секунд игрового процесса: воришка успевает отбежать, кража не повторяется.",
   "category": "npc_mutants",
   "cooldownSeconds": 3,
   "parameterDefinitions": [
@@ -27,6 +27,7 @@ local SPRINT_ACTION_ID = 19991031
 local ROBBERY_INPUT_LOCK_SECONDS = 5
 local ROBBERY_ENGINE_INPUT_LOCK_SECONDS = 3600
 local CATCH_DISTANCE = 2.0
+local LOAD_CATCH_GRACE_MS = 5000
 local ESCAPE_DISTANCE = 5.0
 local DEFAULT_SPRINT_METERS = 200
 local MAX_SPRINT_METERS = 10000
@@ -887,6 +888,24 @@ local function self_destruct(id, managed, record, npc)
 	return true
 end
 
+local function catch_grace_elapsed(managed,current)
+    if not managed.catch_grace_ms or managed.catch_grace_ms<=0 then return true end
+    local ready=true
+    if type(device)=="function" then
+        local d=device()
+        if d and (type(d.is_paused)=="function" and d:is_paused() or (tonumber(d.precache_frame) or 0)>0) then ready=false end
+    end
+    if type(app_ready)=="function" and not app_ready() then ready=false end
+    if not ready then managed.catch_grace_tick=nil;return false end
+    if managed.catch_grace_tick then
+        -- Do not consume the protection in a loading/menu stall or at a
+        -- reset time_global(). Only ready gameplay contributes to the delay.
+        local delta=math.min(250,math.max(0,current-managed.catch_grace_tick))
+        managed.catch_grace_ms=math.max(0,managed.catch_grace_ms-delta)
+    end
+    managed.catch_grace_tick=current
+    return managed.catch_grace_ms<=0
+end
 local function update_thief(id, managed, record, actor, current)
 	local server = server_object(id)
 	if server == nil then
@@ -974,7 +993,7 @@ local function update_thief(id, managed, record, actor, current)
 			record.catchable = true
 			save_record(managed.slot, record)
 		end
-		if record.catchable == true and actor_distance <= CATCH_DISTANCE then
+        if catch_grace_elapsed(managed,current) and record.catchable == true and actor_distance <= CATCH_DISTANCE then
 			self_destruct(id, managed, record, npc)
 			return
 		end
@@ -1025,7 +1044,7 @@ local function rebuild_runtime()
 					record.panic_commanded = false
 				end
 				save_record(slot, record)
-				state.thieves[id] = { slot = slot }
+                    state.thieves[id] = { slot = slot, catch_grace_ms = LOAD_CATCH_GRACE_MS }
 				force_online(id)
 			elseif server ~= nil then
 				record.invalid = true

@@ -62,11 +62,11 @@ $effects = @(Get-ChildItem -LiteralPath $effectRoot -Filter 'anomaly_donation_br
 $optionalEffects = @(Get-ChildItem -LiteralPath $optionalRoot -Filter 'anomaly_donation_bridge_effect_*.script' -File | Sort-Object Name)
 $fixtures = @(Get-ChildItem -LiteralPath $fixtureRoot -Filter '*_smoke.lua' -File | Sort-Object Name)
 
-if ($scripts.Count -ne 29) { throw "Expected 29 installable core scripts, found $($scripts.Count)." }
+if ($scripts.Count -ne 31) { throw "Expected 31 installable core scripts, found $($scripts.Count)." }
 if ($legacyScripts.Count -ne 3) { throw "Expected three archived regression modules, found $($legacyScripts.Count)." }
 if ($effects.Count -ne 4) { throw "Expected four starter effect scripts, found $($effects.Count)." }
-if ($optionalEffects.Count -ne 68) { throw "Expected 68 optional effect scripts, found $($optionalEffects.Count)." }
-if ($fixtures.Count -ne 54) { throw "Expected 54 Lua smoke fixtures, found $($fixtures.Count)." }
+if ($optionalEffects.Count -ne 69) { throw "Expected 69 optional effect scripts, found $($optionalEffects.Count)." }
+if ($fixtures.Count -ne 55) { throw "Expected 55 Lua smoke fixtures, found $($fixtures.Count)." }
 
 foreach ($script in @($scripts) + @($legacyScripts) + @($effects) + @($optionalEffects)) {
     # Forward slashes and Lua single quotes avoid the MinGW CRT stripping the

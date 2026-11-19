@@ -6,4 +6,7 @@
     <dialog id="anomaly_donation_bridge_wandering_trader_dialog">
         <init_func>anomaly_donation_bridge_wandering_trader.init_dialog</init_func>
     </dialog>
+    <dialog id="anomaly_donation_bridge_kidnapping_dialog">
+        <init_func>anomaly_donation_bridge_kidnapping.init_dialog</init_func>
+    </dialog>
 </game_dialogs>

@@ -47,7 +47,7 @@ internal static class CardPresentationUiChecks
             File.Copy(file, Path.Combine(scripts, Path.GetFileName(file)), overwrite: true);
         runtime.Settings.GamePath = game;
         runtime.RefreshActionManifest();
-        Check(runtime.Presets.Count == 72, "The card fixture must use all shipped presets.");
+        Check(runtime.Presets.Count == 73, "The card fixture must use all shipped presets.");
         runtime.Settings.Actions = runtime.Presets.Take(24).Select((preset, index) =>
         {
             var action = preset.CloneAsNewInstance();

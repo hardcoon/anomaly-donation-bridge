@@ -1,0 +1,387 @@
+-- A private task instance around stock beh@hostage_1 / task_target_hostage /
+-- dialogs.rescue_hostage. No stock quest IDs, infoportions or handlers replaced.
+local ID="hardcoon.adb.companion_kidnap"
+local MODULE="anomaly_donation_bridge_kidnapping"
+local KEY="adb_companion_kidnapping_v1"
+local PREFIX="adb_companion_kidnap_"
+local LIVE_PREFIX="adb_companion_kidnap_live_"
+local TASK_ICON="ui_inGame2_V_poiskah_Soroki"
+local MAP_SPOT="secondary_task_location"
+local PP,FALL,WAKE=192901,192902,192903
+local cinema,input_owned,registered,last_error,ready_frame
+local configured={}
+local task_icons={}
+local owners={}
+local function ongoing(r) return r and r.phase~="rescued" and r.phase~="failed" and r.phase~="cancelled" end
+local function world() return anomaly_donation_bridge_kidnapping_world end
+local function common() return anomaly_donation_bridge_common end
+local function now() return time_global() end
+local function text(s) return common().game_text_cp1251_lossy(s,"?") end
+-- Names returned by the engine are already CP1251; keep their bytes intact.
+local function golden_name(s) return "%c[255,238,153,26]"..tostring(s or "").."%c[default]" end
+local function log(s) if type(printf)=="function" then pcall(printf,"[ADB] companion kidnapping: %s",tostring(s)) end end
+local function data()
+    local s=alife_storage_manager.get_state()
+    if type(s)~="table" then return end
+    if not s[KEY] then s[KEY]={version=1,records={},sequence=0} end
+    assert(s[KEY].version==1 and type(s[KEY].records)=="table","kidnap_storage_invalid")
+    local d=s[KEY]
+    if not d.ongoing then
+        d.ongoing={}
+        for id,r in pairs(d.records) do
+            if ongoing(r) then
+                d.ongoing[id]=true
+                if r.phase=="out" or r.phase=="stage" or r.phase=="in" then d.scene=id end
+            end
+        end
+        d.active=nil -- local.1 allowed only a single quest
+    end
+    return d
+end
+local function scene()
+    local d=data();return d and d.scene and d.records[d.scene]
+end
+local function index(r)
+    owners[r.victim.id]=r.task
+    for _,g in pairs(r.guards) do owners[g.id]=r.task end
+end
+local function owner(id)
+    local d=data();if not d then return end
+    local r=owners[id] and d.records[owners[id]]
+    if ongoing(r) then return r end
+    for task_id in pairs(d.ongoing) do
+        r=d.records[task_id];index(r)
+        if owners[id]==task_id then return r end
+    end
+end
+function owns_captive(id)
+    local r=owner(id)
+    return r and r.victim.id==id and world().same(world().server(id),r.victim) or false
+end
+local function stamp() return utils_data.CTime_to_table(game.get_game_time()) end
+local function elapsed(s) return game.get_game_time():diffSec(utils_data.CTime_from_table(s)) end
+local function expired(r) return r.started and elapsed(r.started)>=r.hours*3600 end
+local function input_state() return db and db.actor and db.storage[db.actor:id()] end
+local function cleanup()
+    local c=cinema;cinema=nil
+    if c and db and db.actor and level.present() then
+        if c.camera then pcall(level.remove_cam_effector,c.camera) end
+        if c.pp then pcall(level.remove_pp_effector,PP) end
+        if c.hidden then pcall(level.show_weapon,true);pcall(level.show_indicators) end
+    end
+    local s=input_state()
+    if input_owned and s and not s.disable_input_time and not s.disable_input_idle then pcall(level.enable_input) end
+    input_owned=nil
+end
+local function cinema_supported()
+    if type(getFS)~="function" then return false end
+    for _,k in ipairs({"add_pp_effector","set_pp_effector_factor","remove_pp_effector","add_cam_effector",
+        "remove_cam_effector","disable_input","enable_input","show_weapon","hide_indicators_safe","show_indicators"}) do
+        if type(level[k])~="function" then return false end
+    end
+    local fs=getFS()
+    return fs:exist("$game_anims$","black_infinite_2.ppe") and
+        fs:exist("$game_anims$","camera_effects\\surge_02.anm") and
+        fs:exist("$game_anims$","camera_effects\\surge_01.anm")
+end
+-- Completion callbacks only acknowledge. Native effector removal / world
+-- transfers always run later in update(), outside C++ destruction callbacks.
+function fall_finished() if cinema then cinema.completed=true;cinema.camera=nil end end
+function wake_finished() if cinema then cinema.completed=true;cinema.camera=nil end end
+local function animate(r,mode)
+    if r.skip_cinema then return true end
+    local ok,result=pcall(function()
+        if not cinema then
+            if not cinema_supported() then r.skip_cinema=true;return true end
+            local s=input_state()
+            assert(s and not s.disable_input_time and not s.disable_input_idle,"foreign_input_lock")
+            input_owned=true;level.disable_input()
+            cinema={pp=true,hidden=true}
+            level.add_pp_effector("black_infinite_2.ppe",PP,true)
+            level.show_weapon(false);level.hide_indicators_safe()
+        end
+        local c=cinema
+        if c.mode~=mode then
+            if c.camera then level.remove_cam_effector(c.camera);c.camera=nil end
+            c.mode=mode;c.started=now();c.completed=false
+            c.camera=mode=="out" and FALL or WAKE
+            level.set_pp_effector_factor(PP,mode=="out" and 0.01 or 1)
+            level.add_cam_effector(mode=="out" and "camera_effects\\surge_02.anm" or "camera_effects\\surge_01.anm",
+                c.camera,false,MODULE..(mode=="out" and ".fall_finished" or ".wake_finished"))
+        end
+        local sec=math.max(0,now()-c.started)/1000
+        local t=math.min(1,sec/0.6);local smooth=t*t*(3-2*t)
+        level.set_pp_effector_factor(PP,math.max(0.01,mode=="out" and smooth or 1-smooth))
+        if sec<0.6 or not c.completed and sec<6 then return false end
+        if c.camera then local id=c.camera;c.camera=nil;level.remove_cam_effector(id) end
+        return true
+    end)
+    if ok then return result end
+    log("sleep visuals unavailable; continuing: "..tostring(result));r.skip_cinema=true;cleanup();return true
+end
+local function record(id) local d=data();return d and d.records[id] end
+local function task_text(id,field,_,tsk)
+    local r=record(id)
+    if not r then return text("Похищение напарника") end
+    if tsk and not r.started then tsk.wait_time=r.hours*3600 end
+    if tsk and r.started then tsk.wait_time=math.max(1,r.hours*3600-elapsed(r.started)) end
+    if field=="title" then return text("Вызволить из плена ")..r.victim.nickname end
+    return text("Вот чёрт, ")..golden_name(r.victim.nickname)..text(" был похищен. У меня "..r.hours..
+        " часов чтобы его вытащить, нужно поторопиться.")
+end
+local function task_target(id)
+    local r=record(id);if not r then return end
+    local s=world().server(r.victim.id)
+    return world().same(s,r.victim) and r.victim.id or nil
+end
+local function task_status(_,id)
+    local r=record(id)
+    if not r or r.phase=="failed" or r.phase=="cancelled" then return "fail" end
+    if r.phase=="rescued" then return "complete" end
+end
+local function task_closed(_,_,p)
+    local r=p and record(p[1]);if not r then return end
+    if r.phase=="captive" or r.phase=="release" then
+        r.cancel_requested=not expired(r)
+    end
+end
+local function task_api()
+    if not task_functor or not task_status_functor or not xr_effects then return false end
+    task_functor.adb_companion_kidnap_text=task_text
+    task_functor.adb_companion_kidnap_target=task_target
+    task_status_functor.adb_companion_kidnap_status=task_status
+    xr_effects.adb_companion_kidnap_closed=task_closed
+    return true
+end
+local function free_slot()
+    local d=data();local serial=d.sequence+1
+    while d.records[LIVE_PREFIX..serial] or db.actor:get_task(LIVE_PREFIX..serial,false) do serial=serial+1 end
+    return LIVE_PREFIX..serial,serial
+end
+local function announce(r,timeout)
+    local key=timeout and "announced_expired" or "announced"
+    if r[key] then return end
+    local message=timeout and text("Ну ты внатуре с гнильцой орешек, твоего петушка в расход пустили.") or
+        db.actor:character_name()..text(", мы твоего голубка пригрели у себя под крылом. Приходи, обкашляем вопросики. У тебя "..
+            r.hours.." часов, иначе ")..golden_name(r.victim.nickname)..text(" в расход пустим.")
+    local ok,result=pcall(news_manager.send_tip,db.actor,message,0,nil,12000)
+    if ok and result~=false then r[key]=true else log("PDA message failed: "..tostring(result)) end
+end
+local function give_task(r)
+    local m=task_manager.get_task_manager()
+    local t=db.actor:get_task(r.task,true)
+    if t or m.task_info[r.task] then
+        if m.task_info[r.task] then m.task_info[r.task].icon=TASK_ICON;m.task_info[r.task].spot=MAP_SPOT end
+        if t and not task_icons[r.task] then
+            t:set_icon_name(TASK_ICON)
+            t:set_description(task_text(r.task,"descr"))
+            if t:get_map_location()~=MAP_SPOT then t:change_map_location(MAP_SPOT,r.victim.id) end
+            task_icons[r.task]=true
+        end
+        r.task_given=true;return
+    end
+    assert(not r.task_given,"kidnap_quest_missing_after_issue")
+    if r.direct_task then
+        -- Native tasks have unique IDs and survive saves without an arbitrary
+        -- pool of LTX slots. The stock captive AI/dialogue is unchanged.
+        local t=CGameTask();t:set_id(r.task);t:set_type(task.additional)
+        t:set_title(task_text(r.task,"title"));t:set_description(task_text(r.task,"descr"))
+        t:set_icon_name(TASK_ICON);t:set_priority(85)
+        t:set_map_location(MAP_SPOT);t:set_map_object_id(r.victim.id)
+        t:add_complete_func(MODULE..".native_complete");t:add_fail_func(MODULE..".native_fail")
+        t:add_on_fail_func(MODULE..".native_failed")
+        local remaining=math.max(1,math.floor(r.hours*3600-elapsed(r.started)))
+        db.actor:give_task(t,remaining,false,remaining)
+        if type(level.map_add_object_spot)=="function" then level.map_add_object_spot(r.victim.id,"ui_secondary_task_blink","") end
+    else
+        m:give_task(r.task,r.victim.id) -- existing local.1 quest
+    end
+    assert(db.actor:get_task(r.task,true) or m.task_info[r.task],"kidnap_quest_issue_failed")
+    r.task_given=true
+end
+local function terminal(r,phase)
+    r.phase=phase
+    world().finish_guards(r)
+    local d=data();d.ongoing[r.task]=nil
+    if d.scene==r.task then d.scene=nil;cleanup() end
+    owners[r.victim.id]=nil
+    for _,g in pairs(r.guards) do owners[g.id]=nil end
+end
+local function ready()
+    return db and db.actor and db.actor:alive() and level.present() and
+        (type(app_ready)~="function" or app_ready()) and not device():is_paused() and device().precache_frame==0
+end
+local function run_record(r)
+    if r.phase=="rollback" then
+        if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
+        if world().ui_free() and world().restore_companion(r,true) then terminal(r,"cancelled") end
+        return
+    end
+    if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
+    if r.phase=="out" then
+        if not cinema and not world().ui_free() then return end
+        if animate(r,"out") then r.phase="stage" end
+    elseif r.phase=="stage" then
+        if not r.sleep_done then
+            -- Journal BEFORE the native time change; never replay on F9/load.
+            r.sleep_done=true
+            level.change_game_time(0,1,0)
+            if type(SendScriptCallback)=="function" then pcall(SendScriptCallback,"actor_on_sleep",1) end
+        end
+        world().stage_victim(r)
+        for _=1,2 do
+            if r.spawn_cursor>#r.plan then break end
+            local index=r.spawn_cursor
+            world().spawn_guard(r,index)
+            r.spawn_cursor=index+1
+        end
+        index(r)
+        world().maintain(r,configured)
+        if r.spawn_cursor>#r.plan then r.phase="in" end
+    elseif r.phase=="in" then
+        world().maintain(r,configured)
+        if animate(r,"in") then
+            cleanup();r.phase="captive";r.started=stamp()
+            local d=data();if d.scene==r.task then d.scene=nil end
+        end
+    elseif r.phase=="captive" or r.phase=="release" then
+        world().maintain(r,configured)
+        local s=world().server(r.victim.id)
+        if not s:alive() then world().expire(r);terminal(r,"failed");return end
+        if expired(r) then
+            if world().ui_free() then world().expire(r);announce(r,true);terminal(r,"failed") end
+            return
+        end
+        if r.cancel_requested then r.phase="rollback";return end
+        give_task(r);announce(r,false)
+        if r.phase=="release" and world().ui_free() and not world().guards_alive(r) then
+            if world().restore_companion(r,false) then terminal(r,"rescued") end
+        end
+    end
+end
+local function update()
+    if not ready() then cleanup();configured={};return end
+    if ready_frame and device().frame<ready_frame then return end
+    local d=data();if not d then return end
+    local ids={};for id in pairs(d.ongoing) do ids[#ids+1]=id end;table.sort(ids)
+    for _,id in ipairs(ids) do
+        local r=d.records[id]
+        local ok,why=pcall(run_record,r)
+        if not ok then
+            if tostring(why)~=last_error then log(why);last_error=tostring(why) end
+            if d.scene==r.task then cleanup();d.scene=nil end
+            if r.phase=="out" or r.phase=="stage" or r.phase=="in" then r.error=tostring(why);r.phase="rollback" end
+        end
+    end
+end
+local function check(context,params)
+    local ok,why=common().params_only(params,{npc_sections=true,enemy_count=true,deadline_hours=true,
+        any_location=true,catalog_revision=true,donor_name=true})
+    if not ok then return false,"rejected",why end
+    if not ready() or not world().available() or not task_api() then return false,"deferred","kidnap_game_not_ready" end
+    if CGameTask==nil or not task then return false,"deferred","kidnap_native_task_api_unavailable" end
+    if scene() then return false,"deferred","kidnap_sleep_in_progress" end
+    if not world().ui_free() then return false,"deferred","kidnap_waiting_for_ui_close" end
+    local lock=input_state()
+    if not lock or lock.disable_input_time or lock.disable_input_idle then return false,"deferred","kidnap_foreign_input_lock" end
+    local options={}
+    options.count,why=common().parse_integer(params.enemy_count,12,1,99,"kidnap_enemy_count_invalid")
+    if not options.count then return false,"rejected",why end
+    options.hours,why=common().parse_integer(params.deadline_hours,24,1,168,"kidnap_deadline_invalid")
+    if not options.hours then return false,"rejected",why end
+    if params.any_location~=nil and params.any_location~="true" and params.any_location~="false" then
+        return false,"rejected","kidnap_any_location_invalid"
+    end
+    local entries;entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"npc_sections","npc")
+    if not entries or #entries==0 then return false,"rejected",why or "kidnap_select_guard_npcs" end
+    options.sections={}
+    for _,e in ipairs(entries) do options.sections[#options.sections+1]=e.section_id end
+    options.victim=world().choose_companion()
+    if not options.victim then return false,"deferred","kidnap_no_eligible_companion" end
+    options.camp=world().choose_camp(params.any_location=="true")
+    if not options.camp then return false,"deferred","kidnap_no_eligible_camp" end
+    options.task,options.serial=free_slot()
+    context.options=options;return true
+end
+local function execute(context)
+    local p=context.options
+    if not p or scene() or not world().ui_free() then return "deferred","kidnap_waiting_for_ui_close" end
+    local s=world().server(p.victim.id)
+    if not world().same(s,p.victim) or not s:alive() then return "deferred","kidnap_companion_changed" end
+    local d=assert(data(),"kidnap_storage_unavailable")
+    local r={task=p.task,direct_task=true,captive_fixed_v2=true,victim=p.victim,camp=p.camp,hours=p.hours,phase="out",plan={},guards={},spawn_cursor=1}
+    for i=1,p.count do r.plan[i]=p.sections[math.random(#p.sections)] end
+    d.records[r.task]=r;d.ongoing[r.task]=true;d.scene=r.task;d.sequence=p.serial;index(r)
+    return "executed","companion_kidnapping_started"
+end
+local function after_load()
+    cleanup();configured={};task_icons={};owners={};ready_frame=device().frame+3
+    task_api()
+end
+local function before_save() cleanup() end
+local function own_npc(a,b,r)
+    for _,n in ipairs({a,b}) do
+        if n and n:id()==r.victim.id and world().same(world().server(n:id()),r.victim) then return n end
+    end
+end
+local function speaker_record(a,b)
+    for _,n in ipairs({a,b}) do
+        if n then local r=owner(n:id());if r and own_npc(a,b,r) then return r end end
+    end
+end
+function dialog_text(a,b)
+    local r=speaker_record(a,b)
+    if r and world().guards_alive(r) then return text("Сначала избавься от охраны, потом поговорим.") end
+    return game.translate_string("hostage_companion_task_1_start_dialog_1")
+end
+function answer_text() return game.translate_string("hostage_companion_task_1_actor_reply") end
+function request_rescue(a,b)
+    local r=speaker_record(a,b)
+    if not r or r.phase~="captive" or expired(r) or not own_npc(a,b,r) or world().guards_alive(r) then return end
+    r.phase="release" -- only intent in the dialog; no destructive native calls
+end
+-- The engine invokes task functors from native code. Validation stays inside
+-- pcall and callbacks only record intent; NPC changes remain in update().
+function native_complete(id)
+    local ok,result=pcall(function() local r=record(id);return r and r.phase=="rescued" end)
+    return ok and result==true
+end
+function native_fail(id)
+    local ok,result=pcall(function() local r=record(id);return r and (r.phase=="failed" or r.phase=="cancelled") end)
+    return ok and result==true
+end
+function native_failed(id)
+    local ok,why=pcall(function()
+        local r=record(id)
+        if ongoing(r) and not expired(r) then r.cancel_requested=true end
+    end)
+    if not ok then log(why) end
+    return true
+end
+function init_dialog(dialog)
+    local a=dialog:AddPhrase(MODULE..".dialog_text","0","",-10000)
+    a:GetPhraseScript():SetScriptText(MODULE..".dialog_text")
+    local b=dialog:AddPhrase(MODULE..".answer_text","1","0",-10000)
+    b:GetPhraseScript():SetScriptText(MODULE..".answer_text")
+    b:GetPhraseScript():AddAction(MODULE..".request_rescue")
+end
+function register()
+    if registered then return end
+    task_api()
+    local ok,why=anomaly_donation_bridge_registry.register(ID,{can_execute=check,execute=execute,update=update,
+        on_game_load=after_load,on_level_changing=after_load,
+        on_effect_save=function(stage) if stage=="before" then before_save() end;return true end,
+        is_blocking=function() local r=scene();return r and (r.phase=="out" or r.phase=="stage" or r.phase=="in") or false end,
+        allow_while_blocking={[ID]=true},is_supported=function() return true end})
+    if not ok then log(why);return end
+    RegisterScriptCallback("on_before_save_input",before_save)
+    RegisterScriptCallback("on_before_load_input",before_save)
+    RegisterScriptCallback("save_state",before_save)
+    RegisterScriptCallback("main_menu_on_quit",before_save)
+    RegisterScriptCallback("npc_on_net_spawn",function(n)
+        configured[n:id()]=nil -- apply on update, after motivator initialization
+        world().net_spawn(owner(n:id()),n) -- faction/relation before the first AI evaluation
+    end)
+    RegisterScriptCallback("on_enemy_eval",function(n,e,f) if n then world().enemy_eval(owner(n:id()),n,e,f) end end)
+    registered=true
+end
