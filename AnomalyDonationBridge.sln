@@ -28,6 +28,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{C651A422-496
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.YouTubeChat", "src\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj", "{09608A58-6E82-4AC9-8476-BB3D44653134}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AnomalyDonationBridge.ViewerChat", "src\AnomalyDonationBridge.ViewerChat\AnomalyDonationBridge.ViewerChat.csproj", "{B5D7D9AE-99A9-47FD-8DD1-639A478602C0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -78,10 +80,15 @@ Global
 		{09608A58-6E82-4AC9-8476-BB3D44653134}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{09608A58-6E82-4AC9-8476-BB3D44653134}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{09608A58-6E82-4AC9-8476-BB3D44653134}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B5D7D9AE-99A9-47FD-8DD1-639A478602C0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B5D7D9AE-99A9-47FD-8DD1-639A478602C0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B5D7D9AE-99A9-47FD-8DD1-639A478602C0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B5D7D9AE-99A9-47FD-8DD1-639A478602C0}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{6DC3C45A-8C22-493C-BE66-712B7457874C} = {71AD1747-9E8E-4FBB-BB46-53C6BB7D0CD3}
 		{875CF12F-8E89-4746-BA65-C11344C3F7CA} = {71AD1747-9E8E-4FBB-BB46-53C6BB7D0CD3}
 		{09608A58-6E82-4AC9-8476-BB3D44653134} = {C651A422-4966-40C8-B2D9-8EE09337FA48}
+		{B5D7D9AE-99A9-47FD-8DD1-639A478602C0} = {C651A422-4966-40C8-B2D9-8EE09337FA48}
 	EndGlobalSection
 EndGlobal

@@ -194,20 +194,23 @@ public sealed partial class VotingView
         commands.Margin = new Thickness(16, 12, 15, 10);
         commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        commands.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         commands.RowDefinitions.Add(new RowDefinition());
+        commands.Children.Add(BuildGenerationToggle());
+        var generation = BuildGenerationForm();
+        Grid.SetRow(generation, 1); commands.Children.Add(generation);
 
         var heading = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-        ButtonVisual.SetGlyph(_add, "\uE710");
-        _add.ToolTip = "Добавить команду. Шаблон также можно добавить из его меню.";
-        DockPanel.SetDock(_add, Dock.Right);
-        heading.Children.Add(_add);
         var title = Heading("Команды");
         title.VerticalAlignment = VerticalAlignment.Center;
         heading.Children.Add(title);
-        commands.Children.Add(heading);
+        _commandHeading = heading;
+        Grid.SetRow(heading, 2); commands.Children.Add(heading);
 
         var labels = (Grid)FindResource("VotingCommandHeadings");
-        Grid.SetRow(labels, 1);
+        _commandLabels = labels;
+        Grid.SetRow(labels, 3);
         commands.Children.Add(labels);
 
         _commandList.Style = (Style)FindResource("VotingCommandListStyle");
@@ -235,6 +238,7 @@ public sealed partial class VotingView
                 _testMessage.Text = _rows.FirstOrDefault(row => row.Enabled && row.Command.Length > 0)?.Command ?? "";
         };
         tools.Children.Add(_testPanelToggle);
+        _commandTools = tools;
         _testFields = BuildTestFields();
         _testFields.Visibility = Visibility.Collapsed;
         _status.SetResourceReference(TextBlock.ForegroundProperty, "MutedBrush");
@@ -252,7 +256,7 @@ public sealed partial class VotingView
         System.Windows.Input.KeyboardNavigation.SetTabIndex(_commandList, 0);
         System.Windows.Input.KeyboardNavigation.SetTabIndex(tools, 1);
         System.Windows.Input.KeyboardNavigation.SetTabIndex(_testFields, 2);
-        Grid.SetRow(entries, 2);
+        Grid.SetRow(entries, 4);
         commands.Children.Add(entries);
         return commands;
     }
@@ -312,10 +316,10 @@ public sealed partial class VotingView
         fields.Children.Add(_donationVotes);
         fields.Children.Add(_youTubeVotes);
 
-        var weightLabel = SecondaryText("Вес голоса YouTube");
+        var weightLabel = SecondaryText("Вес голоса чата");
         weightLabel.Margin = new Thickness(0, 6, 0, 3);
         fields.Children.Add(weightLabel);
-        CompactInput(_youTubeWeight, "Вес голоса YouTube");
+        CompactInput(_youTubeWeight, "Вес голоса чата");
         var weight = new StackPanel { Orientation = Orientation.Horizontal };
         weight.Children.Add(_youTubeWeight);
         weight.Children.Add(_youTubeCurrency);

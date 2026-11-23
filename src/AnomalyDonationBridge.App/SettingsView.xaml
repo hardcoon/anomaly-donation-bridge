@@ -473,9 +473,16 @@
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
-                    <TabItem x:Name="YouTubeChatTab" Header="Чат YouTube" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+                    <TabItem x:Name="YouTubeChatTab" Header="YouTube API" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                             <StackPanel Margin="1,2,8,2">
+                                <Border Style="{StaticResource SettingsCardStyle}" Background="{DynamicResource InfoPanelBrush}">
+                                    <StackPanel>
+                                        <TextBlock Text="Резервное подключение YouTube" Style="{StaticResource SectionTitleStyle}" />
+                                        <TextBlock Text="Эта интеграция необязательна. Основное подключение находится в разделе «Чат зрителей» и работает анонимно — без аккаунта и своего API-ключа. Здесь можно настроить резервный способ через YouTube API."
+                                                   Foreground="{DynamicResource InfoTextBrush}" TextWrapping="Wrap" Margin="0,5,0,0" />
+                                    </StackPanel>
+                                </Border>
                                 <Border Style="{StaticResource SettingsCardStyle}">
                                     <StackPanel>
                                         <TextBlock Text="Ключ API YouTube" Style="{StaticResource SectionTitleStyle}" />

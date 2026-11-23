@@ -3,6 +3,79 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:AnomalyDonationBridge.App">
     <UserControl.Resources>
+        <Style x:Key="VotingAutoFormationButtonStyle" TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+            <Setter Property="Background" Value="{DynamicResource PanelAltBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3" Padding="{TemplateBinding Padding}">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="17"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Border x:Name="Box" Width="17" Height="17" VerticalAlignment="Center" CornerRadius="2"
+                                        BorderThickness="1" BorderBrush="{DynamicResource BorderStrongBrush}" Background="{DynamicResource InputBrush}">
+                                    <Path x:Name="Check" Data="M 1 5 L 4 8 L 10 1" Width="11" Height="9" StrokeThickness="2"
+                                          Stroke="{DynamicResource AccentTextBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+                                </Border>
+                                <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                  HorizontalAlignment="Center" RecognizesAccessKey="True"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource ControlHoverBrush}"/>
+                                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource ControlHoverBorderBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <DataTemplate x:Key="VotingGenerationChoiceTemplate">
+            <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" Margin="7,5" HorizontalAlignment="Stretch">
+                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/>
+            </CheckBox>
+        </DataTemplate>
+        <DataTemplate x:Key="VotingGeneratedCommandRowTemplate">
+            <Border Tag="VotingGeneratedCommandRow" MinHeight="48" Margin="0,0,0,6"
+                    Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">
+                <Grid>
+                    <Grid Margin="9,5,9,7">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="99"/><ColumnDefinition Width="*"/><ColumnDefinition Width="72"/><ColumnDefinition Width="28"/></Grid.ColumnDefinitions>
+                        <Border Grid.Column="1" Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                                BorderThickness="1" CornerRadius="2" Padding="7,5" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Command}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Command}"
+                                       Foreground="{DynamicResource TextBrush}"/>
+                        </Border>
+                        <TextBlock Grid.Column="2" Text="{Binding BindingTitle}" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding BindingTitle}" Foreground="{DynamicResource TextBrush}"/>
+                        <StackPanel Grid.Column="3" Margin="5,0,6,0" VerticalAlignment="Center" ToolTip="{Binding ContributionText}">
+                            <TextBlock Text="{Binding ShareText}" FontWeight="SemiBold" FontSize="12" TextAlignment="Right"
+                                       Foreground="{DynamicResource TextBrush}"/>
+                            <TextBlock Text="{Binding ContributionText}" FontSize="11" TextAlignment="Right"
+                                       TextTrimming="CharacterEllipsis" Foreground="{DynamicResource MutedBrush}"/>
+                        </StackPanel>
+                    </Grid>
+                    <ProgressBar Height="2" VerticalAlignment="Bottom" Style="{DynamicResource VotingTrackStyle}"
+                                 AutomationProperties.Name="Доля голосов" Value="{Binding Percentage, Mode=OneWay}"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
         <DataTemplate x:Key="VotingDisclosureContentTemplate">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsHitTestVisible="False">
                 <local:VectorIcon Glyph="{Binding Path=(local:ButtonVisual.Glyph), RelativeSource={RelativeSource AncestorType=Button}}"
@@ -27,11 +100,11 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TextBox">
-                        <Border x:Name="Input" CornerRadius="3" Padding="{TemplateBinding Padding}"
+                        <Border x:Name="Input" CornerRadius="3"
                                 Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
                             <Grid>
                                 <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" Focusable="False" />
-                                <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" VerticalAlignment="Center"
+                                <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"
                                            Foreground="{DynamicResource SubtleBrush}" Visibility="Collapsed" IsHitTestVisible="False" />
                             </Grid>
                         </Border>

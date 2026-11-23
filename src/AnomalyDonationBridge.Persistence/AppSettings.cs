@@ -34,6 +34,11 @@ public sealed class AppSettings
     public DateTimeOffset? LastDonateXDonationCreatedAt { get; set; }
     public string YouTubeChatVideoUrl { get; set; } = string.Empty;
     public bool YouTubeChatEnabled { get; set; }
+    public bool YouTubeChatAnonymous { get; set; }
+    public string TwitchChatChannel { get; set; } = string.Empty;
+    public bool TwitchChatEnabled { get; set; }
+    public string VkVideoLiveChatChannel { get; set; } = string.Empty;
+    public bool VkVideoLiveChatEnabled { get; set; }
     public QueuePolicy QueuePolicy { get; set; } = new();
     public int GlobalCooldownSeconds { get; set; } = 5;
     public int FortuneWheelIdleMinutes { get; set; }
@@ -166,6 +171,8 @@ public static class SettingsNormalizer
         settings.DonateXAccountName ??= string.Empty;
         settings.LastDonateXDonationId ??= string.Empty;
         settings.YouTubeChatVideoUrl ??= string.Empty;
+        settings.TwitchChatChannel ??= string.Empty;
+        settings.VkVideoLiveChatChannel ??= string.Empty;
         settings.GlobalCooldownSeconds = Math.Clamp(settings.GlobalCooldownSeconds, 0, 300);
         settings.FortuneWheelIdleMinutes = Math.Clamp(settings.FortuneWheelIdleMinutes, 0, 10_080);
         settings.EffectSaveRetentionCount = Math.Clamp(settings.EffectSaveRetentionCount, 0, 10_000);
@@ -286,6 +293,11 @@ public static class SettingsNormalizer
             LastDonateXDonationCreatedAt = settings.LastDonateXDonationCreatedAt,
             YouTubeChatVideoUrl = settings.YouTubeChatVideoUrl,
             YouTubeChatEnabled = settings.YouTubeChatEnabled,
+            YouTubeChatAnonymous = settings.YouTubeChatAnonymous,
+            TwitchChatChannel = settings.TwitchChatChannel,
+            TwitchChatEnabled = settings.TwitchChatEnabled,
+            VkVideoLiveChatChannel = settings.VkVideoLiveChatChannel,
+            VkVideoLiveChatEnabled = settings.VkVideoLiveChatEnabled,
             QueuePolicy = settings.QueuePolicy.Clone(),
             GlobalCooldownSeconds = settings.GlobalCooldownSeconds,
             FortuneWheelIdleMinutes = settings.FortuneWheelIdleMinutes,

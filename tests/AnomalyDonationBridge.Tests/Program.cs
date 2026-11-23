@@ -18,7 +18,10 @@ internal static class Program
         var tests = new (string Name, Func<Task> Run)[]
         {
             ("YouTube chat protocol, reconnect, quotas, isolation and protected settings", YouTubeChatTests.RunAsync),
+            ("viewer chat identity, parsing, moderation, concurrent bounded feed and cancellation", ViewerChatTests.RunAsync),
+            ("anonymous YouTube discovery, website context, history, native identity and safe errors", AnonymousYouTubeChatTests.RunAsync),
             ("voting conditions, accounting, atomic persistence and outbox", VotingTests.RunAsync),
+            ("per-vote generation, template selection, unique commands, relaunch, persistence and sequence", VotingGenerationTests.RunAsync),
             ("YouTube voting sources, identity, atomic batches, round boundaries and HUD formats", YouTubeVotingTests.RunAsync),
             ("default catalog", TestDefaultCatalogAsync),
             ("dynamic catalog fixtures", TestDynamicCatalogFixturesAsync),

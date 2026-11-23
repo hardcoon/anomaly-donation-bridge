@@ -1,6 +1,6 @@
 {
   "product": "Anomaly Donation Bridge",
-  "appVersion": "1.4.9",
+  "appVersion": "1.5.0",
   "addonVersion": "1.0.190",
   "protocolVersion": 1,
   "pipeName": "AnomalyDonationBridge.v1",

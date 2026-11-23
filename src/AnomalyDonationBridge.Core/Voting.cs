@@ -66,6 +66,8 @@ public sealed class VotingRound
     public int DurationSeconds { get; set; } = 600;
     public VotingCondition Condition { get; set; } = VotingCondition.Any;
     public bool AcceptDonationVotes { get; set; } = true;
+    // The persisted YouTube field names now cover all viewer chat sources.
+    // Retaining them preserves existing rounds, preferences and deduplication.
     public bool AcceptYouTubeVotes { get; set; }
     public decimal YouTubeVoteWeight { get; set; } = 1m;
     public bool AllowYouTubeVoteChange { get; set; }
@@ -80,6 +82,7 @@ public sealed class VotingRound
     public bool SuccessorStarted { get; set; }
     public List<VotingInterval> Intervals { get; set; } = [];
     public List<VotingOption> Options { get; set; } = [];
+    public VotingGenerationSettings Generation { get; set; } = new();
     public string WinnerOptionId { get; set; } = string.Empty;
     public decimal WinnerFraction { get; set; }
     public VotingOption? FrozenWinner { get; set; }
@@ -112,6 +115,7 @@ public sealed class VotingRound
         ProfileId = ProfileId, Deadline = Deadline, PausedAt = PausedAt, ClosedAt = ClosedAt,
         Intervals = Intervals.Select(interval => interval.Clone()).ToList(),
         Options = Options.Select(option => option.Clone()).ToList(), WinnerOptionId = WinnerOptionId,
+        Generation = Generation.Clone(),
         WinnerFraction = WinnerFraction, DeliveryAccepted = DeliveryAccepted, DeliveryCancelled = DeliveryCancelled,
         GamePresentationRequired = GamePresentationRequired, GamePresentationCompleted = GamePresentationCompleted,
         GamePresentationAutomaticEffect = GamePresentationAutomaticEffect,
@@ -182,6 +186,7 @@ public static class VotingRules
 
     public static void ValidateSettings(VotingRound round)
     {
+        VotingGeneration.ValidateConfiguration(round.Generation);
         if (string.IsNullOrWhiteSpace(round.Title) || round.Title.Length > 120)
             throw new InvalidOperationException("Заголовок: от 1 до 120 символов.");
         if (!Money.TryNormalizeCurrency(round.Currency, out _))
@@ -196,7 +201,7 @@ public static class VotingRules
         if (!round.AcceptDonationVotes && !round.AcceptYouTubeVotes)
             throw new InvalidOperationException("Включите хотя бы один источник голосов.");
         if (round.YouTubeVoteWeight is <= 0 or > 1_000_000_000m || Money.ToMinor(round.YouTubeVoteWeight, round.Currency.Trim().ToUpperInvariant()) <= 0)
-            throw new InvalidOperationException("Вес голоса YouTube: положительная сумма в валюте голосования, не более 1 000 000 000.");
+            throw new InvalidOperationException("Вес голоса чата: положительная сумма в валюте голосования, не более 1 000 000 000.");
         if (round.Options.Count > 200) throw new InvalidOperationException("Допускается не более 200 команд.");
         if (round.Options.Any(option => string.IsNullOrWhiteSpace(option.Id) || option.Command is null || option.Command.Length > 80) ||
             round.Options.Select(option => option.Id).Distinct(StringComparer.Ordinal).Count() != round.Options.Count)
@@ -234,7 +239,8 @@ public static class VotingRules
 /// <summary>Each mutation is saved on an isolated copy before it becomes visible.
 /// A failed disk write can neither count money nor publish an unpersisted winner.</summary>
 public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeOffset>? utcNow = null,
-    Func<long, long>? randomBelow = null)
+    Func<long, long>? randomBelow = null,
+    Func<string, VotingTemplateSource, IReadOnlyList<ActionDefinition>>? templateProvider = null)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Func<DateTimeOffset> _now = utcNow ?? (() => DateTimeOffset.UtcNow);
@@ -321,6 +327,9 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         if (document.SchemaVersion < 3 && current.Phase == VotingPhase.Collecting) document.Automation.Enabled = true;
         foreach (var round in AllCollections(document).Concat(document.PreviousRounds))
         {
+            try { VotingGeneration.ValidateConfiguration(round.Generation); }
+            catch (InvalidOperationException error)
+            { throw new InvalidDataException("Повреждены параметры формирования голосования. Автоматический сброс запрещён.", error); }
             ValidateYouTubeAccounting(round);
             if (round.Phase == VotingPhase.Drawn && round.FrozenWinner is null) FreezeResult(round);
             if (round.Phase == VotingPhase.Drawn && (round.FrozenWinner?.Preset is null || round.FrozenOptions is null || round.FrozenTotal <= 0))
@@ -373,7 +382,9 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         VotingRules.ValidateSettings(draft);
         var now = _now();
         var currency = draft.Currency.Trim().ToUpperInvariant();
-        var options = draft.Options.Select(option =>
+        // Generated entries belong to this running round. Editing its next-run
+        // configuration must not replace votes or restore stale generated rows.
+        var options = (draft.Generation.Enabled ? round.Options : draft.Options).Select(option =>
         {
             var next = option.Clone();
             // Never trust stale UI amounts: donations may arrive during editing.
@@ -399,6 +410,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         round.AcceptDonationVotes = draft.AcceptDonationVotes; round.AcceptYouTubeVotes = draft.AcceptYouTubeVotes;
         round.YouTubeVoteWeight = Money.FromMinor(Money.ToMinor(draft.YouTubeVoteWeight, currency), currency);
         round.AllowYouTubeVoteChange = draft.AllowYouTubeVoteChange;
+        round.Generation = draft.Generation.Clone();
         // The participant registry belongs to the runtime, never to a UI draft.
         if (round.Phase is VotingPhase.Ready or VotingPhase.Failed)
         {
@@ -516,15 +528,17 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             document.Automation.Enabled = false;
         }
         else if ((AllCollections(document).FirstOrDefault(round => round.IsActive) ??
-            AllCollections(document).FirstOrDefault(round => (round.ProfileId.Length == 0 || round.ProfileId == profileId) && VotingRules.CanStart(round))) is { } target)
+            AllCollections(document).FirstOrDefault(round => (round.ProfileId.Length == 0 || round.ProfileId == profileId) && CanStartCollection(round))) is { } target)
             ActivateOnly(document, target, profileId, now);
         return true;
     }, token);
 
-    private static void ActivateOnly(VotingDocument document, VotingRound target, string profileId, DateTimeOffset now)
+    private void ActivateOnly(VotingDocument document, VotingRound target, string profileId, DateTimeOffset now)
     {
         if (target.ProfileId.Length > 0 && target.ProfileId != profileId)
             throw new InvalidOperationException("Продолжить голосование можно только в исходном профиле.");
+        if (target.Generation.Enabled && target.Phase is not (VotingPhase.Collecting or VotingPhase.Paused))
+            target = PrepareGeneratedRound(document, target, profileId);
         foreach (var round in AllCollections(document))
         { round.IsActive = round == target; if (!round.IsActive) Pause(round, now); }
         document.Automation.Enabled = true;
@@ -746,7 +760,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
                 (round.DrawnAt is null || now >= round.DrawnAt.Value.AddSeconds(7))));
     }
 
-    private static IEnumerable<VotingRound> SequenceCandidates(VotingDocument document, string profileId,
+    private IEnumerable<VotingRound> SequenceCandidates(VotingDocument document, string profileId,
         string? currentCollectionId, bool skipCurrent)
     {
         if (document.ActiveProfileId.Length > 0 && document.ActiveProfileId != profileId) return [];
@@ -759,7 +773,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
                 var index = document.CollectionOrder.IndexOf(round.CollectionId);
                 return index > currentIndex ? index : index + document.CollectionOrder.Count;
             })
-            .Where(VotingRules.CanStart);
+            .Where(CanStartCollection);
     }
 
     private VotingRound? PickSequenceCollection(VotingDocument document, string profileId, string? currentCollectionId, bool skipCurrent)
@@ -770,8 +784,14 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         return available.Count == 0 ? null : available[(int)_random(available.Count)];
     }
 
-    private static void ActivateSequenceCollection(VotingDocument document, VotingRound target, string profileId, DateTimeOffset now, string notice)
+    private void ActivateSequenceCollection(VotingDocument document, VotingRound target, string profileId, DateTimeOffset now, string notice)
     {
+        if (target.Generation.Enabled)
+        {
+            ActivateOnly(document, target, profileId, now);
+            FindCollection(document, target.CollectionId).Notice = notice;
+            return;
+        }
         if (target.Phase is VotingPhase.Draft or VotingPhase.Paused or VotingPhase.Ready)
         {
             ActivateOnly(document, target, profileId, now);

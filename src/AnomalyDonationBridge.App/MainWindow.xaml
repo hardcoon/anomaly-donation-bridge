@@ -1868,7 +1868,7 @@
                                     <Style TargetType="StackPanel">
                                         <Setter Property="Visibility" Value="Collapsed" />
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding ElementName=HistoryGrid, Path=HasItems}" Value="False">
+                                            <DataTrigger Binding="{Binding History.Count}" Value="0">
                                                 <Setter Property="Visibility" Value="Visible" />
                                             </DataTrigger>
                                         </Style.Triggers>
@@ -1894,7 +1894,7 @@
                 </TabItem.Header>
                 <ContentControl x:Name="WideSettingsHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
             </TabItem>
-            <TabItem x:Name="VotingNavigationTab" DockPanel.Dock="Bottom" Style="{StaticResource SidebarTabItemStyle}"
+            <TabItem x:Name="VotingNavigationTab" DockPanel.Dock="Top" Tag="SectionBreak" Style="{StaticResource SidebarTabItemStyle}"
                      ToolTip="Голосования" AutomationProperties.Name="Голосования">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
@@ -1904,6 +1904,17 @@
                     </StackPanel>
                 </TabItem.Header>
                 <ContentControl x:Name="WideVotingHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+            </TabItem>
+            <TabItem x:Name="ViewerChatNavigationTab" DockPanel.Dock="Top" Style="{StaticResource SidebarTabItemStyle}"
+                     ToolTip="Чат зрителей" AutomationProperties.Name="Чат зрителей">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <local:VectorIcon Glyph="&#xE8F2;" Width="16" Height="16" VerticalAlignment="Center" />
+                        <TextBlock Text="Чат зрителей" Margin="8,0,0,0"
+                                   Visibility="{Binding IsSidebarExpanded, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                </TabItem.Header>
+                <ContentControl x:Name="WideViewerChatHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
             </TabItem>
         </TabControl>
     </Grid>

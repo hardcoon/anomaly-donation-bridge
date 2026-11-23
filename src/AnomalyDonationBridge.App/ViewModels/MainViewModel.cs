@@ -9,6 +9,7 @@ using AnomalyDonationBridge.DonationAlerts;
 using AnomalyDonationBridge.GameIpc;
 using AnomalyDonationBridge.Persistence;
 using AnomalyDonationBridge.YouTubeChat;
+using AnomalyDonationBridge.ViewerChat;
 
 namespace AnomalyDonationBridge.App.ViewModels;
 
@@ -186,6 +187,7 @@ public sealed class MainViewModel : ObservableObject
     public bool HasQueueStatus => !string.IsNullOrWhiteSpace(QueueStatusText);
     public const int SettingsSectionIndex = 4;
     public const int VotingSectionIndex = 5;
+    public const int ViewerChatSectionIndex = 6;
     public bool ShowTemplateSearch => SelectedSectionIndex is >= 0 and < 3;
     public bool ShowSectionStatus => SelectedSectionIndex is >= 0 and < SettingsSectionIndex;
     public bool ShowVotingPlayer => SelectedSectionIndex == VotingSectionIndex;
@@ -401,27 +403,24 @@ public sealed class MainViewModel : ObservableObject
     public bool IsBlueTheme => ThemeColor == "blue";
     public bool IsYellowTheme => ThemeColor == "yellow";
     public bool CanArm => _runtime.CanArmDonationProcessing;
-    public string ProcessingStatus => (Armed ? "Эффекты донатов включены" : "Эффекты донатов отключены") + "\n" + YouTubeVotingStatus;
-    private string YouTubeVotingStatus
+    public string ProcessingStatus => (Armed ? "Эффекты донатов включены" : "Эффекты донатов отключены") + "\n" + ChatVotingStatus;
+    private string ChatVotingStatus
     {
         get
         {
-            if (_runtime.VotingError.Length > 0) return "Голоса YouTube: ошибка голосования";
-            if (!_runtime.Voting.Automation.Enabled || _runtime.Voting.YouTubeRoundId(_runtime.Settings.ActiveProfileId) is null)
-                return "Голоса YouTube: приём в голосовании выключен";
-            return _runtime.YouTubeChat.State switch
-            {
-                YouTubeChatState.Connected => "Голоса YouTube обрабатываются",
-                YouTubeChatState.Connecting or YouTubeChatState.Retrying => "Голоса YouTube: ожидание подключения",
-                YouTubeChatState.Ended => "Голоса YouTube: трансляция завершена",
-                YouTubeChatState.Error => "Голоса YouTube: ошибка подключения",
-                _ => "Голоса YouTube: чат не подключён"
-            };
+            if (_runtime.VotingError.Length > 0) return "Голоса чата: ошибка голосования";
+            if (!_runtime.Voting.Automation.Enabled || _runtime.Voting.ChatRoundId(_runtime.Settings.ActiveProfileId) is null)
+                return "Голоса чата: приём в голосовании выключен";
+            var states = Enum.GetValues<ChatPlatform>().Select(platform => _runtime.ViewerConnection(platform).State).ToArray();
+            if (states.Contains(ViewerChatState.Connected)) return "Голоса чата обрабатываются";
+            if (states.Any(state => state is ViewerChatState.Connecting or ViewerChatState.Retrying))
+                return "Голоса чата: ожидание подключения";
+            return states.Contains(ViewerChatState.Error) ? "Голоса чата: ошибка подключения" : "Голоса чата: чаты не подключены";
         }
     }
     public bool CanRefreshCatalog => GameConnected && _runtime.CanRefreshCatalog && !IsCatalogSynchronizing;
     public string ArmHint => !_runtime.ProcessingIntegrationConfigured
-        ? "Сначала подключите DonationAlerts, DonateX или чат YouTube в настройках"
+        ? "Сначала подключите DonationAlerts, DonateX или откройте «Чат зрителей»"
         : !_runtime.CanArmDonationProcessing
             ? $"Подключён аккаунт {_runtime.Settings.DonationAlertsAccountCode}, ожидался {_runtime.Settings.ExpectedAccountCode}"
             : "Включить или приостановить обычные эффекты донатов. Голосования работают независимо.";
@@ -434,7 +433,7 @@ public sealed class MainViewModel : ObservableObject
             if (_runtime.Settings.Armed == value) return;
             if (value && !_runtime.ProcessingIntegrationConfigured)
             {
-                ShowError("Сначала подключите DonationAlerts, DonateX или чат YouTube в настройках.");
+                ShowError("Сначала подключите DonationAlerts, DonateX или откройте «Чат зрителей».");
                 RaisePropertyChanged();
                 return;
             }

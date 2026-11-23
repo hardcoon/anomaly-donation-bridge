@@ -136,7 +136,7 @@ public partial class MainWindow : Window
 
     private IReadOnlyList<CatalogEntry>? SelectCatalogExclusions(IReadOnlyList<CatalogEntry> candidates)
     {
-        var dialog = new CatalogExclusionPickerWindow(candidates) { Owner = this };
+        var dialog = new CatalogExclusionPickerWindow(candidates) { Owner = SectionDialogOwner };
         return AppDialogs.ShowModal(dialog) == true ? dialog.SelectedEntries : null;
     }
 

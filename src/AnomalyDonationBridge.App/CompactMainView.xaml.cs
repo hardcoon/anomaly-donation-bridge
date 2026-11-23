@@ -64,6 +64,20 @@ public partial class CompactMainView : UserControl
     }
 
     internal void SetApplicationLogo(ImageSource logo) => SmallLogo.Source = logo;
+    internal (ContentControl Host, FrameworkElement View) CreateHistoryHost()
+    {
+        var view = (FrameworkElement)SmallHistoryList.Parent;
+        var parent = (Panel)view.Parent;
+        var position = parent.Children.IndexOf(view);
+        var host = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+        Grid.SetRow(host, Grid.GetRow(view)); Grid.SetRowSpan(host, Grid.GetRowSpan(view)); Grid.SetColumn(host, Grid.GetColumn(view));
+        var visibility = BindingOperations.GetBindingBase(view, VisibilityProperty);
+        BindingOperations.ClearBinding(view, VisibilityProperty); view.Visibility = Visibility.Visible;
+        parent.Children.Remove(view); parent.Children.Insert(position, host);
+        if (visibility is not null) host.SetBinding(VisibilityProperty, visibility);
+        host.Content = view;
+        return (host, view);
+    }
     private ScrollViewer? ActionScroll => SmallActionsList.Template.FindName("ActionScroll", SmallActionsList) as ScrollViewer;
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e) => OwnerWindow?.ToggleSidebar();
     internal void FocusSearch()
@@ -94,7 +108,7 @@ public partial class CompactMainView : UserControl
             section == 0 ? browser.VisibleEntries : browser.VisibleActions);
         SetValue(IsHistorySectionProperty, section == 3);
         SetValue(IsActiveSectionProperty, section == 0);
-        var tabs = new[] { ActiveTab, UserTab, TemplatesTab, HistoryTab, SettingsNavigationTab, VotingNavigationTab };
+        var tabs = new[] { ActiveTab, UserTab, TemplatesTab, HistoryTab, SettingsNavigationTab, VotingNavigationTab, ViewerChatNavigationTab };
         for (var index = 0; index < tabs.Length; index++) tabs[index].IsChecked = index == section;
         ActionScroll?.ScrollToTop();
     }

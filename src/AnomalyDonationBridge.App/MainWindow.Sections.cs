@@ -10,15 +10,19 @@ public partial class MainWindow
 {
     private VotingView? _votingView;
     private SettingsView? _settingsView;
+    private ViewerChatView? _viewerChatView;
     private int _previousSection, _sectionBeforeSettings;
 
     private void InitializeSections()
     {
+        InitializeDetachedSections();
         _viewModel.PropertyChanged += SectionChanged;
         Closed += (_, _) =>
         {
             _viewModel.PropertyChanged -= SectionChanged;
+            CloseDetachedSections();
             _votingView?.Dispose();
+            _viewerChatView?.Dispose();
             _votingObs.Dispose();
             DiscardSettingsView();
         };
@@ -48,19 +52,35 @@ public partial class MainWindow
         }
         else if (section == MainViewModel.VotingSectionIndex)
             _votingView ??= new VotingView(_runtime, _votingObs, hostPlayerSeparately: true);
+        else if (section == MainViewModel.ViewerChatSectionIndex)
+            _viewerChatView ??= new ViewerChatView(_runtime);
         _previousSection = section;
         PlaceEmbeddedViews();
     }
 
     private void PlaceEmbeddedViews()
     {
-        PlaceView(WideVotingHost, CompactShell.VotingHost, _votingView);
         PlaceView(WideSettingsHost, CompactShell.SettingsHost, _settingsView);
-        if (_votingView is null) return;
+        PlaceSectionView(WideViewerChatHost, CompactShell.ViewerChatHost, _viewerChatView, MainViewModel.ViewerChatSectionIndex);
+        PlaceHistorySection();
+        if (_votingView is null)
+        {
+            PlaceView(WideVotingHost, CompactShell.VotingHost, null);
+            return;
+        }
 
         MainSections.ApplyTemplate();
         var playerHost = (ContentControl)MainSections.Template.FindName("WideVotingPlayerHost", MainSections);
-        PlaceView(playerHost, CompactShell.VotingPlayerHost, _votingView.Player);
+        if (_detachedSections.ContainsKey(MainViewModel.VotingSectionIndex))
+        {
+            playerHost.Content = null; CompactShell.VotingPlayerHost.Content = null;
+            PlaceSectionView(WideVotingHost, CompactShell.VotingHost, _votingView, MainViewModel.VotingSectionIndex, _votingView.Player);
+        }
+        else
+        {
+            PlaceView(WideVotingHost, CompactShell.VotingHost, _votingView);
+            PlaceView(playerHost, CompactShell.VotingPlayerHost, _votingView.Player);
+        }
     }
 
     private void PlaceView(ContentControl wide, ContentControl compact, FrameworkElement? view)
@@ -93,6 +113,7 @@ public partial class MainWindow
     private async Task ShowVotingAsync(ActionDefinition action, string collectionId)
     {
         _viewModel.SelectedSectionIndex = MainViewModel.VotingSectionIndex;
+        if (_detachedSections.TryGetValue(MainViewModel.VotingSectionIndex, out var window)) window.ShowSection();
         if (_votingView is not null) await _votingView.AddTemplateAsync(action, collectionId);
     }
 

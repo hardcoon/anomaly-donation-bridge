@@ -12,6 +12,7 @@
     <ProjectReference Include="..\..\src\AnomalyDonationBridge.DonationAlerts\AnomalyDonationBridge.DonationAlerts.csproj" />
     <ProjectReference Include="..\..\src\AnomalyDonationBridge.DonateX\AnomalyDonationBridge.DonateX.csproj" />
     <ProjectReference Include="..\..\src\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj" />
+    <ProjectReference Include="..\..\src\AnomalyDonationBridge.ViewerChat\AnomalyDonationBridge.ViewerChat.csproj" />
     <ProjectReference Include="..\..\src\AnomalyDonationBridge.GameIpc\AnomalyDonationBridge.GameIpc.csproj" />
   </ItemGroup>
   <ItemGroup>

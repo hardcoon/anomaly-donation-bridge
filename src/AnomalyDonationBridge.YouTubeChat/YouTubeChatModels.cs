@@ -31,6 +31,7 @@ public sealed class YouTubeChatException(string code, string message, bool retry
 
 public interface IYouTubeChatTransport
 {
+    bool RequiresApiKey => true;
     Task<YouTubeBroadcast> ResolveAsync(string apiKey, string videoId, CancellationToken cancellationToken);
     IAsyncEnumerable<YouTubeChatBatch> ReadAsync(string apiKey, string chatId, string? pageToken,
         CancellationToken cancellationToken);

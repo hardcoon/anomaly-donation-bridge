@@ -74,7 +74,7 @@ public sealed partial class SettingsViewModel
         YouTubeBusy = true;
         try
         {
-            await _runtime.ConnectYouTubeChatAsync(YouTubeVideoUrl);
+            await _runtime.ConnectYouTubeChatAsync(YouTubeVideoUrl, anonymous: false);
             YouTubeVideoUrl = _runtime.Settings.YouTubeChatVideoUrl;
             RefreshYouTubeChat();
             Status = "Подключение YouTube сохранено.";

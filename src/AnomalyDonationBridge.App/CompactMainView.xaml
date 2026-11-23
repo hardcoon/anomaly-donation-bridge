@@ -240,9 +240,7 @@
                     <ToggleButton x:Name="UserTab" Tag="1" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="Пользовательские шаблоны" AutomationProperties.Name="Пользовательские шаблоны"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><local:VectorIcon Glyph="&#xE734;" Width="16" Height="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Пользовательские" Margin="8,0,0,0" TextTrimming="CharacterEllipsis" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding UserPresets.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
                     <ToggleButton x:Name="TemplatesTab" Tag="2" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="Шаблоны" AutomationProperties.Name="Шаблоны"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><local:VectorIcon Glyph="&#xE8F1;" Width="16" Height="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Шаблоны" Margin="8,0,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding Presets.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
                     <ToggleButton x:Name="HistoryTab" Tag="3" Click="Section_Click" Style="{StaticResource CompactNavigationStyle}" ToolTip="История" AutomationProperties.Name="История"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><local:VectorIcon Glyph="&#xE81C;" Width="16" Height="16" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="История" Margin="8,0,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /><TextBlock Grid.Column="2" Text="{Binding History.Count}" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="6,1,0,0" Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" /></Grid></ToggleButton>
-                </StackPanel>
-                <StackPanel Grid.Row="2" Margin="0,5,0,0">
-                    <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="4,0,4,4" />
+                    <Border x:Name="ViewerSectionsDivider" Height="1" Background="{DynamicResource BorderBrush}" Margin="4,7,4,7" />
                     <ToggleButton x:Name="VotingNavigationTab" Tag="{x:Static vm:MainViewModel.VotingSectionIndex}"
                                   Click="Section_Click" Style="{StaticResource CompactNavigationStyle}"
                                   ToolTip="Голосования" AutomationProperties.Name="Голосования">
@@ -252,6 +250,17 @@
                                        Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" />
                         </StackPanel>
                     </ToggleButton>
+                    <ToggleButton x:Name="ViewerChatNavigationTab" Tag="{x:Static vm:MainViewModel.ViewerChatSectionIndex}"
+                                  Click="Section_Click" Style="{StaticResource CompactNavigationStyle}"
+                                  ToolTip="Чат зрителей" AutomationProperties.Name="Чат зрителей">
+                        <StackPanel Orientation="Horizontal">
+                            <local:VectorIcon Glyph="&#xE8F2;" Width="16" Height="16" VerticalAlignment="Center" />
+                            <TextBlock Text="Чат зрителей" Margin="8,0,0,0"
+                                       Visibility="{Binding IsSidebarExpanded, ElementName=CompactRoot, Converter={StaticResource BoolToVisibility}}" />
+                        </StackPanel>
+                    </ToggleButton>
+                </StackPanel>
+                <StackPanel Grid.Row="2" Margin="0,5,0,0">
                     <ToggleButton x:Name="SettingsNavigationTab" Tag="{x:Static vm:MainViewModel.SettingsSectionIndex}"
                                   Click="Section_Click" Style="{StaticResource CompactNavigationStyle}"
                                   ToolTip="Настройки" AutomationProperties.Name="Настройки">
@@ -348,6 +357,15 @@
             <ContentControl.Style><Style TargetType="ContentControl">
                 <Setter Property="Visibility" Value="Collapsed" />
                 <Style.Triggers><DataTrigger Binding="{Binding SelectedSectionIndex}" Value="{x:Static vm:MainViewModel.VotingSectionIndex}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger></Style.Triggers>
+            </Style></ContentControl.Style>
+        </ContentControl>
+        <ContentControl x:Name="ViewerChatHost" Grid.Row="3" Grid.RowSpan="2" Grid.Column="1"
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+            <ContentControl.Style><Style TargetType="ContentControl">
+                <Setter Property="Visibility" Value="Collapsed" />
+                <Style.Triggers><DataTrigger Binding="{Binding SelectedSectionIndex}" Value="{x:Static vm:MainViewModel.ViewerChatSectionIndex}">
                     <Setter Property="Visibility" Value="Visible" />
                 </DataTrigger></Style.Triggers>
             </Style></ContentControl.Style>

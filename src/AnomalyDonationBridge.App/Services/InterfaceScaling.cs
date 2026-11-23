@@ -26,13 +26,15 @@ internal static class InterfaceScaling
     }
 
     public static void ApplyToDialog(Window dialog, MainWindow main)
+        => ApplyToDialog(dialog, main, main.InterfaceScale);
+
+    internal static void ApplyToDialog(Window dialog, Window context, double scale)
     {
-        var scale = main.InterfaceScale;
         if (dialog.Content is not FrameworkElement content) return;
         ConfigureRendering(content, scale);
         if (scale == 1) return;
 
-        var area = GetWorkArea(main);
+        var area = GetWorkArea(context);
         content.LayoutTransform = new ScaleTransform(scale, scale);
         dialog.MinWidth = Math.Min(dialog.MinWidth * scale, area.Width);
         dialog.MinHeight = Math.Min(dialog.MinHeight * scale, area.Height);

@@ -5,6 +5,10 @@ namespace AnomalyDonationBridge.Core;
 public sealed record YouTubeVotingMessage(string Id, string AuthorChannelId, string Text,
     DateTimeOffset? PublishedAt, bool IsHistorical = false);
 
+public enum VotingChatPlatform { YouTube, Twitch, VkVideoLive }
+public sealed record ChatVotingMessage(VotingChatPlatform Platform, string ChannelId, string Id,
+    string UserId, string Text, DateTimeOffset? PublishedAt, bool IsHistorical = false, bool IsMirrored = false);
+
 public sealed class YouTubeVotingParticipant
 {
     public string OptionId { get; set; } = string.Empty;
@@ -19,12 +23,19 @@ public sealed partial class VotingCoordinator
 {
     // Capture before awaiting disk/locks. A late batch must never be reassigned
     // to the next round, even if automatic drawing/reset runs in the meantime.
-    public string? YouTubeRoundId(string profileId) => AllCollections(Volatile.Read(ref _document))
+    public string? YouTubeRoundId(string profileId) => ChatRoundId(profileId);
+    public string? ChatRoundId(string profileId) => AllCollections(Volatile.Read(ref _document))
         .FirstOrDefault(round => round.IsActive && round.AcceptYouTubeVotes && round.ProfileId == profileId &&
             round.Phase == VotingPhase.Collecting)?.Id;
 
-    public async Task<int> RecordYouTubeAsync(string roundId, string profileId,
-        IReadOnlyList<YouTubeVotingMessage> messages, CancellationToken token = default)
+    public Task<int> RecordYouTubeAsync(string roundId, string profileId,
+        IReadOnlyList<YouTubeVotingMessage> messages, CancellationToken token = default) =>
+        RecordChatAsync(roundId, profileId, messages.Select(message => new ChatVotingMessage(
+            VotingChatPlatform.YouTube, "", message.Id, message.AuthorChannelId, message.Text,
+            message.PublishedAt, message.IsHistorical)).ToArray(), token);
+
+    public async Task<int> RecordChatAsync(string roundId, string profileId,
+        IReadOnlyList<ChatVotingMessage> messages, CancellationToken token = default)
     {
         var counted = 0;
         await MutateAsync(document =>
@@ -43,19 +54,28 @@ public sealed partial class VotingCoordinator
             {
                 // Strict live boundary: donation recovery deliberately has
                 // different rules. Old chat never fills a newly opened round.
-                if (message.IsHistorical || message.PublishedAt is not { } at || at < interval.Start || at > now.AddSeconds(30) ||
-                    string.IsNullOrWhiteSpace(message.Id) || string.IsNullOrWhiteSpace(message.AuthorChannelId) ||
-                    round.SeenYouTubeMessageIds.Contains(message.Id)) continue;
+                if (message.IsHistorical || message.IsMirrored || message.PublishedAt is not { } at ||
+                    at < interval.Start || at > now.AddSeconds(30) || !Enum.IsDefined(message.Platform) ||
+                    string.IsNullOrWhiteSpace(message.Id) || string.IsNullOrWhiteSpace(message.UserId) ||
+                    message.Platform != VotingChatPlatform.YouTube && string.IsNullOrWhiteSpace(message.ChannelId)) continue;
+                // Keep native YouTube keys so an existing saved round cannot grant
+                // the same account another vote after upgrading to the shared chat.
+                // Other sources have independent message and account namespaces.
+                var source = message.Platform == VotingChatPlatform.Twitch ? "twitch" : "vk-video-live";
+                var messageId = message.Platform == VotingChatPlatform.YouTube ? message.Id :
+                    $"{source}:{message.ChannelId.Length}:{message.ChannelId}:{message.Id}";
+                var userId = message.Platform == VotingChatPlatform.YouTube ? message.UserId : $"{source}:{message.UserId}";
+                if (round.SeenYouTubeMessageIds.Contains(messageId)) continue;
                 var matches = options.Where(option => VotingRules.ContainsCommand(message.Text, option.Command)).ToArray();
                 // Remember ambiguous/no-command messages too: editing commands
                 // later must not reinterpret a redelivered message as a new vote.
-                round.SeenYouTubeMessageIds.Add(message.Id); changed = true;
+                round.SeenYouTubeMessageIds.Add(messageId); changed = true;
                 if (matches.Length != 1) continue;
                 var selected = matches[0];
-                if (round.YouTubeParticipants.TryGetValue(message.AuthorChannelId, out var participant))
+                if (round.YouTubeParticipants.TryGetValue(userId, out var participant))
                 {
                     if (at <= participant.LastMessageAt) continue;
-                    participant.LastMessageAt = at; participant.LastMessageId = message.Id;
+                    participant.LastMessageAt = at; participant.LastMessageId = messageId;
                     if (!round.AllowYouTubeVoteChange || participant.OptionId == selected.Id) continue;
                     var previous = round.Options.FirstOrDefault(option => option.Id == participant.OptionId);
                     if (previous is not null) AddYouTubeWeight(previous, participant.Currency, -participant.Weight, round.Currency);
@@ -66,10 +86,10 @@ public sealed partial class VotingCoordinator
                 {
                     var weight = Money.FromMinor(Money.ToMinor(round.YouTubeVoteWeight, round.Currency), round.Currency);
                     AddYouTubeWeight(selected, round.Currency, weight, round.Currency);
-                    round.YouTubeParticipants.Add(message.AuthorChannelId, new YouTubeVotingParticipant
+                    round.YouTubeParticipants.Add(userId, new YouTubeVotingParticipant
                     {
                         OptionId = selected.Id, Weight = weight, Currency = round.Currency,
-                        LastMessageAt = at, LastMessageId = message.Id
+                        LastMessageAt = at, LastMessageId = messageId
                     });
                 }
                 counted++;
@@ -86,7 +106,7 @@ public sealed partial class VotingCoordinator
     {
         var old = currency == currentCurrency ? option.Amount : option.AmountsByCurrency.GetValueOrDefault(currency);
         var value = checked(old + delta);
-        if (value < 0) throw new InvalidDataException("Повреждён учёт голосов YouTube. Сброс не выполнен.");
+        if (value < 0) throw new InvalidDataException("Повреждён учёт голосов чата. Сброс не выполнен.");
         option.AmountsByCurrency[currency] = value;
         if (currency == currentCurrency) option.Amount = value;
     }
@@ -100,6 +120,6 @@ public sealed partial class VotingCoordinator
                 string.IsNullOrWhiteSpace(pair.Value.OptionId) || string.IsNullOrWhiteSpace(pair.Value.LastMessageId) ||
                 pair.Value.Weight is <= 0 or > 1_000_000_000m || pair.Value.LastMessageAt == default ||
                 !Money.TryNormalizeCurrency(pair.Value.Currency, out var code) || code != pair.Value.Currency))
-            throw new InvalidDataException("Повреждён учёт голосов YouTube в voting.json. Автоматический сброс запрещён.");
+            throw new InvalidDataException("Повреждён учёт голосов чата в voting.json. Автоматический сброс запрещён.");
     }
 }

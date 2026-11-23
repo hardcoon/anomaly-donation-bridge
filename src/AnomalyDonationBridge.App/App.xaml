@@ -994,15 +994,23 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="TabItem">
-                        <Grid Background="{TemplateBinding Background}">
+                        <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <Border x:Name="NavigationGroupDivider" Height="1" Margin="4,7,4,7"
+                                    Background="{DynamicResource BorderBrush}" Visibility="Collapsed" IsHitTestVisible="False"/>
+                            <Grid Grid.Row="1" Background="{TemplateBinding Background}">
                             <Border x:Name="SelectionEdge" Width="2" HorizontalAlignment="Left" Background="Transparent"
                                     CornerRadius="1" Margin="0,3" IsHitTestVisible="False" />
                             <Border x:Name="FocusEdge" BorderBrush="Transparent" BorderThickness="1" CornerRadius="3">
                                 <ContentPresenter ContentSource="Header" Margin="{TemplateBinding Padding}"
                                                   VerticalAlignment="Center" HorizontalAlignment="Stretch" RecognizesAccessKey="True" />
                             </Border>
+                            </Grid>
                         </Grid>
                         <ControlTemplate.Triggers>
+                            <Trigger Property="Tag" Value="SectionBreak">
+                                <Setter TargetName="NavigationGroupDivider" Property="Visibility" Value="Visible"/>
+                            </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter Property="Background" Value="{DynamicResource TabHoverBrush}" />
                                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />

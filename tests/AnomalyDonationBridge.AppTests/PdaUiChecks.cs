@@ -510,7 +510,7 @@ internal static class PdaUiChecks
             var integrationTabControl = Find<TabControl>(settingsRoot)
                 .Single(control => !ReferenceEquals(control, settingsTabControl));
             Check(integrationTabControl.Items.Cast<TabItem>().Select(tab => tab.Header as string)
-                    .SequenceEqual(["DonationAlerts", "DonateX", "Чат YouTube"]),
+                    .SequenceEqual(["DonationAlerts", "DonateX", "YouTube API"]),
                 "The integration tabs are missing DonationAlerts or DonateX.");
             integrationTabControl.SelectedIndex = 1;
             Layout(settingsRoot, 940, 650);

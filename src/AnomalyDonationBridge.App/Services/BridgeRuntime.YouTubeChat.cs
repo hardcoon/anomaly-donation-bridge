@@ -8,11 +8,13 @@ public sealed partial class BridgeRuntime
     private readonly SemaphoreSlim _youTubeGate = new(1, 1);
     private IYouTubeChatTransport? _youTubeTransport;
     internal Func<IYouTubeChatTransport> YouTubeTransportFactory { get; init; } = static () => new YouTubeChatTransport();
+    internal Func<IYouTubeChatTransport> AnonymousYouTubeTransportFactory { get; init; } = static () => new AnonymousYouTubeChatTransport();
+    private bool _youTubeTransportAnonymous;
     private YouTubeChatSession? _youTubeSession;
     private YouTubeChatSnapshot _youTubeIdle = YouTubeChatSnapshot.Empty;
     private Task? _youTubeStartup;
     private DateTimeOffset _youTubeConnectAfter;
-    private string _youTubeVotingError = string.Empty;
+    private DateTimeOffset _youTubeAnonymousConnectAfter;
 
     public YouTubeChatSnapshot YouTubeChat => _youTubeSession?.Snapshot ?? _youTubeIdle;
 
@@ -45,25 +47,31 @@ public sealed partial class BridgeRuntime
         finally { _youTubeGate.Release(); }
     }
 
-    public async Task ConnectYouTubeChatAsync(string videoUrl, CancellationToken cancellationToken = default)
+    public Task ConnectYouTubeChatAsync(string videoUrl, CancellationToken cancellationToken = default) =>
+        ConnectYouTubeChatAsync(videoUrl, Settings.YouTubeChatAnonymous, cancellationToken);
+
+    public async Task ConnectYouTubeChatAsync(string videoUrl, bool anonymous, CancellationToken cancellationToken = default)
     {
         var videoId = YouTubeVideoLink.Parse(videoUrl);
         await _youTubeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             _lifetime.Token.ThrowIfCancellationRequested();
-            if (!Secrets.HasYouTubeApiKey)
+            if (!anonymous && !Secrets.HasYouTubeApiKey)
                 throw new YouTubeChatException("key_missing", "Сначала сохраните ключ API в блоке «Ключ API YouTube».");
-            var key = YouTubeVideoLink.NormalizeKey(Secrets.YouTubeApiKey);
-            if (_youTubeSession?.RetryNotBefore is { } retry && retry > _youTubeConnectAfter)
-                _youTubeConnectAfter = retry;
-            if (DateTimeOffset.UtcNow < _youTubeConnectAfter)
+            var key = anonymous ? string.Empty : YouTubeVideoLink.NormalizeKey(Secrets.YouTubeApiKey);
+            var connectAfter = anonymous ? _youTubeAnonymousConnectAfter : _youTubeConnectAfter;
+            if (_youTubeTransportAnonymous == anonymous && _youTubeSession?.RetryNotBefore is { } retry && retry > connectAfter)
+                connectAfter = retry;
+            if (DateTimeOffset.UtcNow < connectAfter)
                 throw new YouTubeChatException("reconnect_wait",
-                    $"Повторное подключение будет доступно через {Math.Ceiling((_youTubeConnectAfter - DateTimeOffset.UtcNow).TotalSeconds):0} с.");
-            _youTubeConnectAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+                    $"Повторное подключение будет доступно через {Math.Ceiling((connectAfter - DateTimeOffset.UtcNow).TotalSeconds):0} с.");
+            if (anonymous) _youTubeAnonymousConnectAfter = DateTimeOffset.UtcNow.AddSeconds(5);
+            else _youTubeConnectAfter = DateTimeOffset.UtcNow.AddSeconds(5);
             await StopYouTubeSessionAsync().ConfigureAwait(false);
             Settings.YouTubeChatVideoUrl = YouTubeVideoLink.Canonical(videoId);
             Settings.YouTubeChatEnabled = true;
+            Settings.YouTubeChatAnonymous = anonymous;
             try
             {
                 await _settingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
@@ -83,8 +91,11 @@ public sealed partial class BridgeRuntime
         await _youTubeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_youTubeSession?.RetryNotBefore is { } retry && retry > _youTubeConnectAfter)
-                _youTubeConnectAfter = retry;
+            if (_youTubeSession?.RetryNotBefore is { } retry)
+            {
+                if (_youTubeTransportAnonymous && retry > _youTubeAnonymousConnectAfter) _youTubeAnonymousConnectAfter = retry;
+                else if (!_youTubeTransportAnonymous && retry > _youTubeConnectAfter) _youTubeConnectAfter = retry;
+            }
             await StopYouTubeSessionAsync().ConfigureAwait(false);
             Settings.YouTubeChatEnabled = false;
             if (!CanArmDonationProcessing) Settings.Armed = false;
@@ -105,7 +116,7 @@ public sealed partial class BridgeRuntime
         {
             if (_lifetime.IsCancellationRequested || !Settings.YouTubeChatEnabled) return;
             var videoId = YouTubeVideoLink.Parse(Settings.YouTubeChatVideoUrl);
-            StartYouTubeSession(YouTubeVideoLink.NormalizeKey(Secrets.YouTubeApiKey), videoId);
+            StartYouTubeSession(Settings.YouTubeChatAnonymous ? string.Empty : YouTubeVideoLink.NormalizeKey(Secrets.YouTubeApiKey), videoId);
         }
         catch (YouTubeChatException error)
         { _youTubeIdle = YouTubeChatSnapshot.Empty with { State = YouTubeChatState.Error, Status = error.Message }; }
@@ -114,40 +125,27 @@ public sealed partial class BridgeRuntime
 
     private void StartYouTubeSession(string key, string videoId)
     {
-        _youTubeTransport ??= YouTubeTransportFactory();
-        var session = new YouTubeChatSession(_youTubeTransport, key, videoId, _lifetime.Token, AcceptYouTubeVotesAsync);
+        if (_youTubeTransport is null || _youTubeTransportAnonymous != Settings.YouTubeChatAnonymous)
+        {
+            (_youTubeTransport as IDisposable)?.Dispose();
+            _youTubeTransportAnonymous = Settings.YouTubeChatAnonymous;
+            _youTubeTransport = _youTubeTransportAnonymous ? AnonymousYouTubeTransportFactory() : YouTubeTransportFactory();
+        }
+        var session = new YouTubeChatSession(_youTubeTransport, key, videoId, _lifetime.Token,
+            async (messages, token) =>
+            {
+                // Display is independent of a voting write retry. The existing
+                // consumer still owns acknowledgement/cursor advancement.
+                foreach (var message in messages)
+                    ViewerChat.Publish(new(AnomalyDonationBridge.ViewerChat.ChatPlatform.YouTube,
+                        videoId, message.Id, message.AuthorChannelId, message.Author, message.Text,
+                        message.PublishedAt, message.IsHistorical, message.IsOwner, message.IsModerator));
+                await AcceptChatVotesAsync(messages.Select(message => new ChatVotingMessage(VotingChatPlatform.YouTube,
+                    videoId, message.Id, message.AuthorChannelId, message.Text, message.PublishedAt,
+                    message.IsHistorical)).ToArray(), token).ConfigureAwait(false);
+            });
         _youTubeSession = session;
         session.Start();
-    }
-
-    private async Task AcceptYouTubeVotesAsync(IReadOnlyList<YouTubeChatMessage> messages, CancellationToken token)
-    {
-        if (!_votingLoaded) return;
-        var profileId = Settings.ActiveProfileId;
-        var roundId = Voting.YouTubeRoundId(profileId);
-        if (roundId is null) return;
-        var votes = messages.Where(message => !message.IsHistorical)
-            .Select(message => new YouTubeVotingMessage(message.Id, message.AuthorChannelId, message.Text, message.PublishedAt)).ToArray();
-        if (votes.Length == 0) return;
-        while (Settings.ActiveProfileId == profileId)
-        {
-            token.ThrowIfCancellationRequested();
-            try
-            {
-                await Voting.RecordYouTubeAsync(roundId, profileId, votes, token).ConfigureAwait(false);
-                _youTubeVotingError = string.Empty;
-                return;
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception)
-            {
-                // Retain this batch and its round ID. Do not advance the chat
-                // cursor or turn a disk failure into an authenticated API error.
-                _youTubeVotingError = "Не удалось сохранить голоса YouTube. Повтор через 5 с. Проверьте доступ к папке настроек.";
-                await Task.Delay(TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
-            }
-        }
-        _youTubeVotingError = string.Empty;
     }
 
     private async Task StopYouTubeSessionAsync()
@@ -156,7 +154,6 @@ public sealed partial class BridgeRuntime
         _youTubeSession = null;
         _youTubeIdle = YouTubeChatSnapshot.Empty;
         if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
-        _youTubeVotingError = string.Empty;
     }
 
     private async Task DisposeYouTubeChatAsync()

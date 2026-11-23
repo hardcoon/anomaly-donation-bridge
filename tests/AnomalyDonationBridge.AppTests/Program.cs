@@ -45,10 +45,14 @@ internal static class Program
         if (args is ["--render-trader", var traderOutput]) return WanderingTraderTests.Render(traderOutput);
         if (args is ["--render-theme-picker", var themeOutput]) return ThemePickerUiChecks.Run(themeOutput);
         if (args is ["--render-voting", var votingOutput]) return VotingUiChecks.Run(votingOutput);
+        if (args is ["--render-voting-generation", var generationOutput]) return VotingGenerationUiChecks.Run(generationOutput);
+        if (args is ["--render-detached-sections", var detachedOutput]) return DetachedSectionUiChecks.Run(detachedOutput);
         if (args is ["--render-dialogs", var dialogsOutput]) return DialogUiChecks.Run(dialogsOutput);
         if (args is ["--render-safe-zone", var safeZoneOutput]) return SafeZoneUiChecks.Run(safeZoneOutput);
         if (args is ["--render-youtube-chat", var youtubeOutput]) return YouTubeChatUiChecks.Run(youtubeOutput);
+        if (args is ["--render-viewer-chat", var viewerOutput]) return ViewerChatUiChecks.Run(viewerOutput);
         if (args is ["--youtube-chat-test"]) { YouTubeChatRuntimeTests.RunAsync().GetAwaiter().GetResult(); return 0; }
+        if (args is ["--viewer-chat-test"]) { ViewerChatRuntimeTests.RunAsync().GetAwaiter().GetResult(); return 0; }
         if (args is ["--safe-zone-test"]) { SafeZoneTests.RunAsync().GetAwaiter().GetResult(); return 0; }
         if (args is ["--wpf-layout-test"]) { WpfLayoutContractsAsync().GetAwaiter().GetResult(); return 0; }
         if (args is ["--addon-upgrade-test", var previousPackage, var hotfixes])
@@ -70,6 +74,8 @@ internal static class Program
     {
         var failures = new List<string>();
         await RunAsync("YouTube chat connect/disconnect, restore, key removal and game isolation", YouTubeChatRuntimeTests.RunAsync, failures);
+        await RunAsync("viewer chat shared feed, preferences, restore, cancellation and game isolation", ViewerChatRuntimeTests.RunAsync, failures);
+        await RunAsync("YouTube, Twitch and VK share voting, identity, deduplication and pause rules", ViewerChatVotingRuntimeTests.RunAsync, failures);
         await RunAsync("crash recovery stays hidden without activation; manual opening is preserved", StartupPresentationChecks.RunAsync, failures);
         await RunAsync("retired integration stays disabled and history is preserved", RetiredIntegrationChecks.RunAsync, failures);
         await RunAsync("safe-zone settings, scanned locations, wire guard and skip/wait queue", SafeZoneTests.RunAsync, failures);
@@ -1453,7 +1459,7 @@ internal static class Program
             .Select(element => element.Attribute("Header")?.Value)
             .ToList();
         Assert(settingsTabHeaders.SequenceEqual(new[] { "Игра и редактор", "Интеграция", "Исключения", "Очередь", "Общие настройки", "Горячие клавиши", "Безопасная зона", "О программе" }) &&
-            integrationTabs.SequenceEqual(new[] { "DonationAlerts", "DonateX", "Чат YouTube" }) &&
+            integrationTabs.SequenceEqual(new[] { "DonationAlerts", "DonateX", "YouTube API" }) &&
             integrationTab.Attribute("VerticalContentAlignment")?.Value == "Stretch" &&
             integrationTabControl.Attribute("VerticalContentAlignment")?.Value == "Stretch" &&
             integrationTabItems.All(element => element.Attribute("VerticalContentAlignment")?.Value == "Stretch") &&
@@ -1543,12 +1549,14 @@ internal static class Program
         var mainTabs = window.Descendants(presentation + "TabControl")
             .Single(element => element.Attribute(mainX + "Name")?.Value == "MainSections");
         var topLevelTabs = mainTabs.Elements(presentation + "TabItem").ToArray();
-        Assert(topLevelTabs.Length == 6 &&
+        Assert(topLevelTabs.Length == 7 &&
             topLevelTabs[MainViewModel.SettingsSectionIndex].Descendants(presentation + "ContentControl")
                 .Any(element => element.Attribute(mainX + "Name")?.Value == "WideSettingsHost") &&
             topLevelTabs[MainViewModel.VotingSectionIndex].Descendants(presentation + "ContentControl")
-                .Any(element => element.Attribute(mainX + "Name")?.Value == "WideVotingHost"),
-            "Voting and Settings must be tabs of the main window.");
+                .Any(element => element.Attribute(mainX + "Name")?.Value == "WideVotingHost") &&
+            topLevelTabs[MainViewModel.ViewerChatSectionIndex].Descendants(presentation + "ContentControl")
+                .Any(element => element.Attribute(mainX + "Name")?.Value == "WideViewerChatHost"),
+            "Voting, Settings and Viewer Chat must be tabs of the main window.");
 
         var profilesWindow = XDocument.Load(Path.Combine(
             projectRoot,

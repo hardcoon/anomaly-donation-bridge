@@ -2,7 +2,7 @@
 
 [← Первый запуск](../README.md)
 
-В `main` опубликованы исходники программы **1.4.9** и аддона **1.0.190**. Готовый комплект доступен в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
+В `main` опубликованы исходники программы **1.5.0** и аддона **1.0.190**. Готовый комплект доступен в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
 
 ## Требования
 
@@ -17,7 +17,7 @@
 
 | Каталог | Содержимое |
 | --- | --- |
-| `src` | Приложение, ядро, хранение данных, интеграции DonationAlerts, DonateX и YouTube, обмен с игрой, процесс восстановления после сбоя. |
+| `src` | Приложение, ядро, хранение данных, интеграции DonationAlerts и DonateX, чаты YouTube / Twitch / VK Видео Live, обмен с игрой, процесс восстановления после сбоя. |
 | `game-addon` | Аддон, манифест с контрольными суммами и необходимые ресурсы. |
 | `effects`, `optional-effects` | 73 поставляемых файловых шаблона; при сборке объединяются в одну папку эффектов. |
 | `tests` | Тесты C# и Lua, искусственные каталоги и данные для проверок. |
@@ -79,14 +79,14 @@ Lua-проверки выполняются с подставными игров
 
 ```powershell
 ./scripts/stage-minimal-release.ps1 `
-    -Version '1.4.9' `
+    -Version '1.5.0' `
     -ExpectedEffectCount 73 `
     -PublishedRoot './artifacts/portable-win-x64' `
     -ReadmePath './README.md' `
-    -ReleaseNotesPath './docs/RELEASE_1.4.9_RU.md'
+    -ReleaseNotesPath './docs/RELEASE_1.5.0_RU.md'
 ```
 
-ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.4.9`. Повторная подготовка архива заменяет эту локальную папку. Подробные инструкции из `docs` доступны в репозитории, а в ZIP входит README.
+ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.5.0`. Повторная подготовка архива заменяет эту локальную папку. Подробные инструкции из `docs` доступны в репозитории, а в ZIP входит README.
 
 ## Лицензия
 

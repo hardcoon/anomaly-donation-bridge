@@ -72,7 +72,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
     {
         _paths = paths ?? AppPaths.CreateDefault();
         _settingsStore = new JsonSettingsStore(_paths);
-        Voting = new VotingCoordinator(new JsonVotingStore(_paths));
+        Voting = new VotingCoordinator(new JsonVotingStore(_paths), templateProvider: VotingTemplates);
         _uiPreferencesStore = new JsonUiPreferencesStore(_paths);
         _secretStore = new DpapiSecretStore(_paths);
         _historyStore = new JsonLineHistoryStore(_paths);
@@ -110,7 +110,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
     internal string? VotingDrawingRoundId => _votingDrawingRoundId;
     public event Action<VotingRound>? VotingDrawStarted;
     private string _votingError = string.Empty;
-    public string VotingError { get => _votingError.Length > 0 ? _votingError : _youTubeVotingError; private set => _votingError = value; }
+    public string VotingError { get => _votingError.Length > 0 ? _votingError : ChatVotingError; private set => _votingError = value; }
     public UiPreferences UiPreferences { get; private set; } = new();
     public Task SaveUiPreferencesAsync(UiPreferences preferences) =>
         UpdateUiPreferencesAsync(_ => preferences);
@@ -152,11 +152,14 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         !string.IsNullOrWhiteSpace(Settings.DonateXUserId) &&
         !string.IsNullOrWhiteSpace(Settings.DonateXAccountName);
     public bool DonationAccountConfigured => DonationAlertsAccountConfigured || DonateXAccountConfigured;
-    public bool YouTubeChatConfigured => Secrets.HasYouTubeApiKey && Settings.YouTubeChatEnabled &&
+    public bool YouTubeChatConfigured => (Settings.YouTubeChatAnonymous || Secrets.HasYouTubeApiKey) && Settings.YouTubeChatEnabled &&
         !string.IsNullOrWhiteSpace(Settings.YouTubeChatVideoUrl);
-    public bool ProcessingIntegrationConfigured => DonationAccountConfigured || YouTubeChatConfigured;
+    public bool ViewerChatConfigured => YouTubeChatConfigured ||
+        Settings.TwitchChatEnabled && !string.IsNullOrWhiteSpace(Settings.TwitchChatChannel) ||
+        Settings.VkVideoLiveChatEnabled && !string.IsNullOrWhiteSpace(Settings.VkVideoLiveChatChannel);
+    public bool ProcessingIntegrationConfigured => DonationAccountConfigured || ViewerChatConfigured;
     public bool CanArmDonationProcessing => CanArmIntegrations(
-        DonationAlertsAccountConfigured, AccountMatchesExpected, DonateXAccountConfigured, YouTubeChatConfigured);
+        DonationAlertsAccountConfigured, AccountMatchesExpected, DonateXAccountConfigured, ViewerChatConfigured);
 
     internal static bool CanArmIntegrations(
         bool donationAlertsConfigured,
@@ -295,6 +298,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         }
 
         if (Settings.YouTubeChatEnabled) _youTubeStartup = ResumeYouTubeChatAsync();
+        ResumeViewerChat();
         return history;
     }
 
@@ -401,7 +405,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
     {
         if (armed && !ProcessingIntegrationConfigured)
         {
-            throw new InvalidOperationException("Сначала подключите DonationAlerts, DonateX или чат YouTube в настройках.");
+            throw new InvalidOperationException("Сначала подключите DonationAlerts, DonateX или откройте «Чат зрителей».");
         }
         if (armed && !CanArmDonationProcessing)
         {
@@ -504,7 +508,12 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         {
             if (_votingLoaded)
             {
-                if (copyVotings) await Voting.CopyProfileAsync(previousProfileId, profile.Id, cancellationToken).ConfigureAwait(false);
+                if (copyVotings)
+                {
+                    var copiedTemplates = previousUserPresets.Zip(profile.UserPresets)
+                        .ToDictionary(pair => pair.First.Id, pair => pair.Second.Id, StringComparer.Ordinal);
+                    await Voting.CopyProfileAsync(previousProfileId, profile.Id, cancellationToken, copiedTemplates).ConfigureAwait(false);
+                }
                 await Voting.EnterProfileAsync(profile.Id, cancellationToken).ConfigureAwait(false);
             }
             await SaveSettingsAsync(cancellationToken).ConfigureAwait(false);
@@ -1667,6 +1676,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
     {
         _lifetime.Cancel();
         await DisposeYouTubeChatAsync().ConfigureAwait(false);
+        await DisposeViewerChatAsync().ConfigureAwait(false);
         if (_settingsLoaded)
         {
             try { await SaveSettingsAsync().ConfigureAwait(false); }

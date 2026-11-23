@@ -57,6 +57,11 @@ internal static class AppDialogs
     {
         for (var owner = dialog.Owner; owner is not null; owner = owner.Owner)
         {
+            if (owner is DetachedSectionWindow detached)
+            {
+                InterfaceScaling.ApplyToDialog(dialog, detached, detached.InterfaceScale);
+                break;
+            }
             if (owner is not MainWindow main) continue;
             InterfaceScaling.ApplyToDialog(dialog, main);
             break;

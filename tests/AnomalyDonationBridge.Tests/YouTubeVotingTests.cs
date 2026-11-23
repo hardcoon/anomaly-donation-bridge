@@ -13,6 +13,7 @@ internal static class YouTubeVotingTests
         await Lifecycle();
         await AtomicBatchAndStaleEditor();
         await BoundariesAndMigration();
+        await SharedChatPlatforms();
         DisplayFormats();
     }
 
@@ -146,6 +147,45 @@ internal static class YouTubeVotingTests
         var migrated = new VotingCoordinator(store); await migrated.InitializeAsync();
         Check(migrated.Snapshot is { AcceptDonationVotes: true, AcceptYouTubeVotes: false, YouTubeVoteWeight: 1, AllowYouTubeVoteChange: false } && store.Data.SchemaVersion == 7,
             "Legacy defaults and migration");
+    }
+
+    private static async Task SharedChatPlatforms()
+    {
+        var f = await Fixture.Create();
+        await f.Edit(round => { round.AllowYouTubeVoteChange = true; round.Target = 1000; });
+        var roundId = f.Engine.ChatRoundId("profile")!;
+        Check(await f.Chat("same-message", "same-user", "!кров") == 1, "Legacy YouTube seed");
+        ChatVotingMessage Message(VotingChatPlatform platform, string id = "same-message", string user = "same-user", string text = "!кров") =>
+            new(platform, "room", id, user, text, f.Now = f.Now.AddMilliseconds(1));
+        var twitch = Message(VotingChatPlatform.Twitch);
+        var vk = Message(VotingChatPlatform.VkVideoLive);
+        var youtube = Message(VotingChatPlatform.YouTube);
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [youtube, twitch, vk]) == 2 && f.Engine.Snapshot.Total == 3,
+            "Platforms collided or the generic YouTube path forgot a legacy native ID");
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [youtube, twitch, vk]) == 0, "Shared redelivery added votes");
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [Message(VotingChatPlatform.Twitch, "move", text: "!псина")]) == 1 &&
+            f.Engine.Snapshot.Total == 3 && f.Engine.Snapshot.Options[1].Amount == 1,
+            "Changing a Twitch vote changed another platform or added weight");
+        var historical = Message(VotingChatPlatform.VkVideoLive, "history", "history-user") with { IsHistorical = true };
+        var mirrored = Message(VotingChatPlatform.VkVideoLive, "mirror", "mirror-user") with { IsMirrored = true };
+        var undated = Message(VotingChatPlatform.Twitch, "undated", "undated-user") with { PublishedAt = null };
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [historical, mirrored, undated]) == 0,
+            "History, cross-platform mirrors or missing timestamps counted");
+        var batches = Enum.GetValues<VotingChatPlatform>().Select(platform =>
+            Enumerable.Range(0, 20).Select(i => Message(platform, "parallel-" + i, "viewer-" + i)).ToArray()).ToArray();
+        await Task.WhenAll(batches.Select(batch => f.Engine.RecordChatAsync(roundId, "profile", batch)));
+        Check(f.Engine.Snapshot.Total == 63 && f.Engine.Snapshot.YouTubeParticipants.Count == 63, "Concurrent platforms lost votes");
+        var retry = Message(VotingChatPlatform.Twitch, "retry", "retry-user");
+        f.Store.FailNext = true;
+        await Throws(() => f.Engine.RecordChatAsync(roundId, "profile", [retry]));
+        Check(f.Engine.Snapshot.Total == 63, "Failed shared transaction changed live accounting");
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [retry]) == 1, "Failed shared transaction could not retry");
+        var restored = new VotingCoordinator(f.Store, () => f.Now); await restored.InitializeAsync();
+        Check(await restored.RecordChatAsync(roundId, "profile", [youtube, twitch, vk, retry]) == 0 && restored.Snapshot.Total == 64,
+            "Restart lost platform-scoped deduplication or existing YouTube accounting");
+        await f.Engine.ResetAmountsAsync();
+        Check(await f.Engine.RecordChatAsync(roundId, "profile", [Message(VotingChatPlatform.VkVideoLive, "late", "late-user")]) == 0,
+            "A batch captured for a previous round leaked across reset");
     }
 
     private static void DisplayFormats()

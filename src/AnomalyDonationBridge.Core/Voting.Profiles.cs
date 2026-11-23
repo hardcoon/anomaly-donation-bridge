@@ -35,7 +35,8 @@ public sealed partial class VotingCoordinator
         return true;
     }, token);
 
-    public Task CopyProfileAsync(string sourceProfileId, string targetProfileId, CancellationToken token = default) => MutateAsync(document =>
+    public Task CopyProfileAsync(string sourceProfileId, string targetProfileId, CancellationToken token = default,
+        IReadOnlyDictionary<string, string>? templateIdMap = null) => MutateAsync(document =>
     {
         if (string.IsNullOrWhiteSpace(targetProfileId) || sourceProfileId == targetProfileId)
             throw new InvalidOperationException("Для копирования нужен новый профиль.");
@@ -46,6 +47,12 @@ public sealed partial class VotingCoordinator
         foreach (var source in sources)
         {
             var copy = source.Clone();
+            if (templateIdMap is not null)
+            {
+                HashSet<string>? Remap(HashSet<string>? ids) => ids?.Select(id => templateIdMap.GetValueOrDefault(id, id)).ToHashSet(StringComparer.Ordinal);
+                copy.Generation.ActiveTemplateIds = Remap(copy.Generation.ActiveTemplateIds);
+                copy.Generation.UserTemplateIds = Remap(copy.Generation.UserTemplateIds);
+            }
             copy.Id = Guid.NewGuid().ToString("N"); copy.CollectionId = Guid.NewGuid().ToString("N");
             copy.ProfileId = targetProfileId; copy.IsActive = false; copy.Phase = VotingPhase.Draft;
             copy.YouTubeParticipants.Clear(); copy.SeenYouTubeMessageIds.Clear(); copy.Intervals.Clear();

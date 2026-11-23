@@ -56,7 +56,7 @@ public sealed partial class VotingView : UserControl, IDisposable
     private readonly CheckBox _money = new() { Content = "Набрать сумму" }, _time = new() { Content = "По времени" };
     private readonly TextBox _target = new(), _minutes = new();
     private readonly CheckBox _donationVotes = new() { Content = "Описание доната" };
-    private readonly CheckBox _youTubeVotes = new() { Content = "Чат YouTube" };
+    private readonly CheckBox _youTubeVotes = new() { Content = "Чат зрителей", ToolTip = "Голоса из подключённых чатов YouTube, Twitch и VK Видео Live." };
     private readonly TextBox _youTubeWeight = new() { Width = 88, MaxLength = 16 };
     private readonly TextBlock _youTubeCurrency = new() { Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
     private readonly CheckBox _youTubeChange = new();
@@ -144,6 +144,7 @@ public sealed partial class VotingView : UserControl, IDisposable
     {
         _runtime = runtime;
         _settingsCollapsed = runtime.UiPreferences.VotingSettingsPanelCollapsed;
+        _generationCollapsed = runtime.UiPreferences.VotingGenerationPanelCollapsed;
         _profileId = runtime.Settings.ActiveProfileId;
         var rounds = runtime.Voting.CollectionsFor(_profileId);
         var lastSelectedId = runtime.Voting.Snapshot.CollectionId;
@@ -254,6 +255,7 @@ public sealed partial class VotingView : UserControl, IDisposable
     {
         if (_closed) return;
         _closed = true;
+        _generationPopup.IsOpen = false; _generationTip.IsOpen = false;
         CancelSequenceDrag();
         _timer.Stop();
         _autosaveTimer.Stop();
@@ -331,7 +333,9 @@ public sealed partial class VotingView : UserControl, IDisposable
 
     private void ProfileChanged() => Dispatcher.BeginInvoke(async () =>
     {
-        if (_closed || _profileId == _runtime.Settings.ActiveProfileId) return;
+        if (_closed) return;
+        if (_profileId == _runtime.Settings.ActiveProfileId)
+        { RefreshGenerationChoices(); UpdateDisplay(); return; }
         try
         {
             // Finish any in-flight edit against its original collection before
@@ -582,6 +586,8 @@ public sealed partial class VotingView : UserControl, IDisposable
         return RunAsync(async () =>
         {
             if (ProfileCollections.All(round => round.CollectionId != collectionId)) throw new InvalidOperationException("Голосование больше не существует в этом профиле.");
+            if (_runtime.Voting.SnapshotFor(collectionId).Generation.Enabled)
+                throw new InvalidOperationException("Это голосование формируется автоматически. Отметьте шаблон в его списке.");
             await SaveSettingsAsync();
             _generalSelected = false; _selectedId = collectionId;
             await _runtime.Voting.SelectCollectionAsync(collectionId, _runtime.Settings.ActiveProfileId); LoadDraft();
@@ -650,6 +656,7 @@ public sealed partial class VotingView : UserControl, IDisposable
         _condition.SelectedIndex = round.Condition == VotingCondition.All ? 1 : 0;
         _donationVotes.IsChecked = round.AcceptDonationVotes; _youTubeVotes.IsChecked = round.AcceptYouTubeVotes;
         _youTubeWeight.Text = round.YouTubeVoteWeight.ToString(CultureInfo.CurrentCulture); _youTubeChange.IsChecked = round.AllowYouTubeVoteChange;
+        LoadGeneration(round);
         _rows.Clear(); foreach (var option in round.Options) AddRow(option);
         var automation = _runtime.Voting.Automation; _automaticDraw.IsChecked = automation.AutomaticDraw;
         _next.IsChecked = automation.AutoNextCollection; _order.SelectedIndex = automation.Order == VotingSequenceOrder.Random ? 1 : 0;
@@ -693,7 +700,8 @@ public sealed partial class VotingView : UserControl, IDisposable
                     if (draft.TimeGoal) draft.DurationSeconds = checked((int)(Parse(_minutes.Text, "Время в минутах") * 60));
                     draft.Currency = _currency.SelectedValue as string ?? "RUB"; draft.Condition = _conditionValue; draft.Options = _rows.Select(row => row.Model.Clone()).ToList();
                     draft.AcceptDonationVotes = _donationVotes.IsChecked == true; draft.AcceptYouTubeVotes = _youTubeVotes.IsChecked == true;
-                    draft.YouTubeVoteWeight = Parse(_youTubeWeight.Text, "Вес голоса YouTube"); draft.AllowYouTubeVoteChange = _youTubeChange.IsChecked == true;
+                    draft.YouTubeVoteWeight = Parse(_youTubeWeight.Text, "Вес голоса чата"); draft.AllowYouTubeVoteChange = _youTubeChange.IsChecked == true;
+                    draft.Generation = CaptureGeneration();
                     await _runtime.Voting.SaveSettingsAsync(draft);
                 }
                 if (session != _draftSession) return;
@@ -826,7 +834,7 @@ public sealed partial class VotingView : UserControl, IDisposable
 
         if (activate)
         {
-            if (target.Phase is VotingPhase.Draft or VotingPhase.Paused) VotingRules.Validate(target);
+            _runtime.Voting.ValidateCollectionStart(target, _profileId);
             if (ProfileCollections.FirstOrDefault(round => round.CollectionId != collectionId &&
                     round is { IsActive: true, Phase: VotingPhase.Collecting }) is { } active &&
                 !VotingConfirmationWindow.Confirm(HostWindow, "Переключить голосование?",
@@ -993,11 +1001,12 @@ public sealed partial class VotingView : UserControl, IDisposable
         _minutes.IsEnabled = canEdit && _time.IsChecked == true;
         _conditionRow.Visibility = _money.IsChecked == true && _time.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         _condition.IsEnabled = canEdit;
+        UpdateGeneration(round, canEdit);
         var amounts = round.Options.ToDictionary(option => option.Id, option => option.Amount);
         var total = _rows.Where(row => row.Enabled).Sum(row => amounts.GetValueOrDefault(row.Model.Id));
         foreach (var row in _rows)
         {
-            row.CanEdit = canEdit;
+            row.CanEdit = canEdit && _generationToggle.IsChecked != true;
             row.Update(amounts.GetValueOrDefault(row.Model.Id), total, round.Currency);
         }
         var summary = _settingsCollapsed ? CompactConditions(round, now) : GoalSummary(round);

@@ -20,7 +20,7 @@
     <PublishReadyToRun>false</PublishReadyToRun>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AnomalyDonationBridge.ico</ApplicationIcon>
-    <Version>1.4.9</Version>
+    <Version>1.5.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="..\..\third-party\youtube\*" Link="_internal\licenses\youtube\%(Filename)%(Extension)"
@@ -35,6 +35,7 @@
     <ProjectReference Include="..\AnomalyDonationBridge.DonationAlerts\AnomalyDonationBridge.DonationAlerts.csproj" />
     <ProjectReference Include="..\AnomalyDonationBridge.DonateX\AnomalyDonationBridge.DonateX.csproj" />
     <ProjectReference Include="..\AnomalyDonationBridge.YouTubeChat\AnomalyDonationBridge.YouTubeChat.csproj" />
+    <ProjectReference Include="..\AnomalyDonationBridge.ViewerChat\AnomalyDonationBridge.ViewerChat.csproj" />
     <ProjectReference Include="..\AnomalyDonationBridge.GameIpc\AnomalyDonationBridge.GameIpc.csproj" />
   </ItemGroup>
   <ItemGroup>

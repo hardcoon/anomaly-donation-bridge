@@ -37,7 +37,7 @@ public sealed class YouTubeChatSession : IAsyncDisposable
         Func<IReadOnlyList<YouTubeChatMessage>, CancellationToken, Task>? onMessages = null)
     {
         _transport = transport;
-        _apiKey = YouTubeVideoLink.NormalizeKey(apiKey);
+        _apiKey = transport.RequiresApiKey ? YouTubeVideoLink.NormalizeKey(apiKey) : string.Empty;
         _videoId = YouTubeVideoLink.Parse(videoId);
         _delay = delay;
         _onMessages = onMessages;
