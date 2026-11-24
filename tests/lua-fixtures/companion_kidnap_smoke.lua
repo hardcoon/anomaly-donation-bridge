@@ -11,7 +11,7 @@ local function clone(v)
 end
 local clock,ms,frame,state,objects,clients,vars,callbacks,descriptor,manager,messages,logs,ui,native_tasks,latest_task
 local next_id,creates,teleports,timejumps,kills,rescues,foreign_lock,resources,fail_guard,fail_camera
-local input,hud,cameras,pp,level_here
+local input,hud,cameras,pp,level_here,sleep_callbacks
 function vector() return {set=function(self,x,y,z) self.x,self.y,self.z=x,y,z;return self end} end
 function time_global() return ms end
 function device() return {frame=frame,precache_frame=0,is_paused=function() return false end} end
@@ -48,7 +48,10 @@ end
 utils_data={CTime_to_table=function(t) return {seconds=t.seconds} end,CTime_from_table=function(t) return t end}
 game_graph=function() return {vertex=function(_,id) return {level_id=function() return id end} end} end
 function getFS() return {exist=function() return resources end} end
-function SendScriptCallback() end
+function SendScriptCallback(name)
+    check(name=="actor_on_sleep","unexpected script callback")
+    sleep_callbacks=sleep_callbacks+1
+end
 local function client(s)
     local n={sid=s.id,valid=true}
     local function live(self) assert(self.valid,"stale client userdata") end
@@ -138,6 +141,7 @@ local W,M
 local function reset()
     clock,ms,frame=100000,0,100;state={};objects={};clients={};vars={};callbacks={};messages={};logs={};ui=false
     native_tasks={};latest_task=nil
+    sleep_callbacks=0
     next_id,creates,teleports,timejumps,kills,rescues=1000,0,0,0,0,0
     foreign_lock,resources,fail_guard,fail_camera=false,true,false,false
     input,hud,cameras,pp,level_here=true,true,{},nil,1
@@ -224,14 +228,15 @@ local function job()
     local d=state.adb_companion_kidnapping_v1
     return d and d.records[latest_task or d.scene or "adb_companion_kidnap_live_1"]
 end
-local function tick(count)
+local function tick(count,driver)
     for i=1,count or 1 do
         ms=ms+1000;frame=frame+1
         for id in pairs(cameras) do
             cameras[id]=nil
             if id==192902 then M.fall_finished() else M.wake_finished() end
         end
-        descriptor.update(ms)
+        if driver~="actor" then descriptor.update(ms) end
+        if driver~="registry" and callbacks.actor_on_update then callbacks.actor_on_update() end
         for id,t in pairs(native_tasks) do
             if t.state==task.in_progress then
                 if clock>=t.deadline or t.fail and M.native_fail(id) then
@@ -256,6 +261,7 @@ reset();math.randomseed(4);start();local victim=clone(job().victim);captive()
 local r=job();local original=objects[victim.id]
 local original_items=clone(original.items)
 check(timejumps==1 and clock==103600,"sleep replayed or wrong duration")
+check(sleep_callbacks==1,"default mode must retain the stock modpack sleep callback")
 check(teleports==1 and #r.guards==12 and creates==14,"one captive move, two squads and twelve guards")
 check(original.visual=="custom.ogf" or original.section=="another_companion","victim model altered")
 check(original.nickname==victim.nickname,"victim nickname altered")
@@ -403,4 +409,74 @@ check(M.dialog_text(db.actor,n1)==game.translate_string("hostage_companion_task_
 M.request_rescue(db.actor,n1);tick(3)
 check(first.phase=="rescued" and second.phase=="captive" and M.native_complete(first.task) and not M.native_complete(second.task),
     "rescuing one captive completed another quest")
+
+-- Alternative startup is a separate actor-update driver, not an alias for the
+-- normal bridge registry. It keeps the camera/time passage and the same NPC.
+reset();start({alternative_start="true"})
+local alternate=job();local original=objects[alternate.victim.id]
+local visual,items,nickname=original.visual,clone(original.items),original.nickname
+tick(4,"registry")
+check(alternate.phase=="out" and timejumps==0 and creates==0,"registry advanced an alternative record")
+tick(25,"actor")
+check(alternate.phase=="captive" and alternate.task_given and #messages==1,
+    "actor-update driver could not issue quest/PDA message without registry updates")
+check(timejumps==1 and clock==103600 and sleep_callbacks==0 and input and hud and not pp,
+    "alternative startup changed sleep duration, called foreign sleep handlers or leaked controls")
+check(creates==14 and teleports==1 and #alternate.guards==12 and
+    original.visual==visual and original.nickname==nickname and original.items.knife==items.knife and original.items.wpn==items.wpn,
+    "alternative startup replaced the NPC/inventory or duplicated its guards")
+check(native_tasks[alternate.task].map_object_id==alternate.victim.id and
+    native_tasks[alternate.task].map_location=="secondary_task_location","alternative native task points at another object")
+local saved_creates,saved_jumps,started=creates,timejumps,alternate.started.seconds
+callbacks.actor_on_update();callbacks.actor_on_update();descriptor.update(ms)
+check(creates==saved_creates and timejumps==saved_jumps and #messages==1,"same-frame callbacks repeated work")
+state=clone(state);callbacks.on_game_load();tick(10,"actor");alternate=job()
+check(creates==saved_creates and timejumps==saved_jumps and alternate.started.seconds==started,
+    "independent load callback reset the quest/deadline or replayed sleep/spawn")
+for _,g in pairs(alternate.guards) do objects[g.id].living=false end
+clients[alternate.victim.id]=client(original)
+ui=true;M.request_rescue(db.actor,clients[alternate.victim.id]);tick(3,"actor")
+check(alternate.phase=="release" and rescues==0,"alternative rescue changed NPCs inside an active dialogue")
+ui=false;tick(3,"actor")
+check(alternate.phase=="rescued" and rescues==1 and original.group_id==5,"alternative captive was not restored to its squad")
+
+-- Save halfway through guard creation, then stop the main bridge update pump.
+reset();start({alternative_start="true"})
+while job().spawn_cursor<4 do tick(1,"actor") end
+local halfway=job();local spawned,jumped,moved=creates,timejumps,teleports
+local cursor=halfway.spawn_cursor
+callbacks.actor_on_update();descriptor.update(ms);callbacks.actor_on_update()
+check(creates==spawned and halfway.spawn_cursor==cursor,"duplicate frame callbacks advanced guard creation")
+callbacks.on_before_save_input();state=clone(state)
+callbacks.on_level_changing();tick(15,"actor")
+check(creates==spawned and timejumps==jumped and teleports==moved,"alternative driver ran during a level transition")
+callbacks.on_game_load();tick(30,"actor")
+check(job().phase=="captive" and creates==14 and timejumps==jumped and teleports==moved,
+    "saved alternative stages replayed transfer/sleep or lost the spawn cursor")
+
+-- A modded motivator may publish the native client before db.storage exists.
+reset();start({alternative_start="true"})
+while not job().victim_staged do tick(1,"actor") end
+local waiting=job();clients[waiting.victim.id]=client(objects[waiting.victim.id]);db.storage[waiting.victim.id]=nil
+local spawn_ok,spawn_error=pcall(callbacks.npc_on_net_spawn,clients[waiting.victim.id])
+check(spawn_ok,"alternative captive AI ran inside native net_spawn before motivator storage: "..tostring(spawn_error))
+tick(14,"actor")
+check(waiting.phase=="stage" and waiting.step=="waiting_for_captive_storage" and not waiting.error,
+    "alternative mode configured an uninitialized motivator or rolled back immediately")
+db.storage[waiting.victim.id]={};tick(15,"actor")
+check(waiting.phase=="captive" and waiting.task_given and creates==14 and teleports==1,
+    "motivator initialization did not resume the saved stage")
+
+reset();start({alternative_start="true"});fail_guard=true;tick(25,"actor")
+check(job().phase=="cancelled" and input and hud and objects[job().victim.id].group_id==5,
+    "alternative staging failure stranded the companion or camera")
+check(table.concat(logs,"\n"):find("phase=stage step=spawn_guard_1",1,true),"staging failure lost its task/phase/operation diagnosis")
+reset();local allowed,status,reason=descriptor.can_execute({}, {npc_sections="guard_a",alternative_start="invalid"})
+check(not allowed and status=="rejected" and reason=="kidnap_alternative_start_invalid","invalid alternative mode was accepted")
+
+reset();start();captive();local normal=job();start({alternative_start="true"});tick(28)
+local alternate=job();local quest_count=0;for _ in pairs(native_tasks) do quest_count=quest_count+1 end
+check(quest_count==2 and normal.phase=="captive" and alternate.phase=="captive" and
+    normal.victim.id~=alternate.victim.id and timejumps==2 and sleep_callbacks==1,
+    "normal and alternative quests interfered or changed default sleep handlers")
 io.write("PASS companion kidnapping: "..checks.." checks\n")

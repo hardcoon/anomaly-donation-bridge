@@ -85,12 +85,14 @@ internal static class FilePresetTests
             var squads = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.show_squads");
             var kidnap = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.companion_kidnap");
             var kidnapNpcs = kidnap.ParameterDefinitions.Single(p => p.Key == "npc_sections");
-            Assert(kidnap.DisplayName == "Похищение напарника" && kidnap.ParameterDefinitions.Count == 4 &&
+            Assert(kidnap.DisplayName == "Похищение напарника" && kidnap.ParameterDefinitions.Count == 5 &&
                 kidnapNpcs.Kind == ParameterKind.MultiChoice && kidnapNpcs.CatalogKind == CatalogEntryKind.Npc &&
                 kidnapNpcs.MinimumSelections == 1 && kidnap.Parameters["enemy_count"] == "12" &&
                 kidnap.Parameters["deadline_hours"] == "24" && kidnap.Parameters["any_location"] == "false" &&
-                new ActionViewModel(kidnap).Parameters.Single(p => p.Definition.Key == "any_location").IsBooleanChoice,
-                "Kidnapping must expose an NPC multiselect, 12 guards, 24 game hours and opt-in remote locations.");
+                new ActionViewModel(kidnap).Parameters.Single(p => p.Definition.Key == "any_location").IsBooleanChoice &&
+                kidnap.Parameters["alternative_start"] == "false" &&
+                new ActionViewModel(kidnap).Parameters.Single(p => p.Definition.Key == "alternative_start").IsBooleanChoice,
+                "Kidnapping must expose NPC selection, defaults and opt-in remote locations/alternative startup.");
             var kick = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.kick");
             var kickHeight = kick.ParameterDefinitions.Single();
             Assert(kick.DisplayName == "Дать пинка" && kickHeight.Key == "height_meters" &&

@@ -2,9 +2,9 @@
 
 Донаты **DonationAlerts** и **DonateX** запускают настроенные эффекты в S.T.A.L.K.E.R. Anomaly. Встроенный **«Чат зрителей»** объединяет **YouTube, Twitch и VK Видео Live**; сообщения со всех трёх площадок могут участвовать в голосованиях.
 
-**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.5.0](docs/RELEASE_1.5.0_RU.md)
+**[Скачать программу](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest)** · [Изменения 1.5.1](docs/RELEASE_1.5.1_RU.md)
 
-Windows x64 · Anomaly 1.5.3 · Программа **1.5.0** · Аддон **1.0.190** · 73 файловых шаблона
+Windows x64 · Anomaly 1.5.3 · Программа **1.5.1** · Аддон **1.0.191** · 73 файловых шаблона
 
 ## Инструкции
 

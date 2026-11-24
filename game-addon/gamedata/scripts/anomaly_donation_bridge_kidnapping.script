@@ -9,6 +9,8 @@ local TASK_ICON="ui_inGame2_V_poiskah_Soroki"
 local MAP_SPOT="secondary_task_location"
 local PP,FALL,WAKE=192901,192902,192903
 local cinema,input_owned,registered,last_error,ready_frame
+local alternate_suspended,last_alternate_frame,alternate_next_ms
+local storage_waits={}
 local configured={}
 local task_icons={}
 local owners={}
@@ -20,6 +22,10 @@ local function text(s) return common().game_text_cp1251_lossy(s,"?") end
 -- Names returned by the engine are already CP1251; keep their bytes intact.
 local function golden_name(s) return "%c[255,238,153,26]"..tostring(s or "").."%c[default]" end
 local function log(s) if type(printf)=="function" then pcall(printf,"[ADB] companion kidnapping: %s",tostring(s)) end end
+local function step(r,name)
+    r.operation=name
+    if r.step~=name then r.step=name;log(r.task.." phase="..r.phase.." step="..name) end
+end
 local function data()
     local s=alife_storage_manager.get_state()
     if type(s)~="table" then return end
@@ -211,6 +217,17 @@ local function ready()
     return db and db.actor and db.actor:alive() and level.present() and
         (type(app_ready)~="function" or app_ready()) and not device():is_paused() and device().precache_frame==0
 end
+local function captive_storage_ready(r)
+    -- Modpacks may expose the respawned client before its motivator storage.
+    -- Wait outside native callbacks; never configure the old client userdata.
+    if not r.alternative_start then return true end
+    local n=level.object_by_id(r.victim.id)
+    if not n or db.storage[r.victim.id] then storage_waits[r.task]=nil;return true end
+    local since=storage_waits[r.task] or now();storage_waits[r.task]=since
+    assert(now()-since<10000,"kidnap_captive_storage_timeout")
+    step(r,"waiting_for_captive_storage")
+    return false
+end
 local function run_record(r)
     if r.phase=="rollback" then
         if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
@@ -219,32 +236,47 @@ local function run_record(r)
     end
     if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
     if r.phase=="out" then
+        step(r,"fall")
         if not cinema and not world().ui_free() then return end
         if animate(r,"out") then r.phase="stage" end
     elseif r.phase=="stage" then
         if not r.sleep_done then
             -- Journal BEFORE the native time change; never replay on F9/load.
             r.sleep_done=true
+            step(r,"advance_one_hour")
             level.change_game_time(0,1,0)
-            if type(SendScriptCallback)=="function" then pcall(SendScriptCallback,"actor_on_sleep",1) end
+            if not r.alternative_start and type(SendScriptCallback)=="function" then pcall(SendScriptCallback,"actor_on_sleep",1) end
+            if r.alternative_start then return end
         end
-        world().stage_victim(r)
-        for _=1,2 do
+        if not r.alternative_start or not r.victim_staged then
+            step(r,"transfer_companion")
+            world().stage_victim(r)
+            if r.alternative_start then r.victim_staged=true;return end
+        end
+        for _=1,r.alternative_start and 1 or 2 do
             if r.spawn_cursor>#r.plan then break end
             local index=r.spawn_cursor
+            step(r,"spawn_guard_"..index)
             world().spawn_guard(r,index)
             r.spawn_cursor=index+1
         end
         index(r)
+        if r.alternative_start and r.spawn_cursor<=#r.plan then return end
+        if not captive_storage_ready(r) then return end
+        step(r,"configure_hostage")
         world().maintain(r,configured)
         if r.spawn_cursor>#r.plan then r.phase="in" end
     elseif r.phase=="in" then
+        if not captive_storage_ready(r) then return end
+        step(r,"wake")
         world().maintain(r,configured)
         if animate(r,"in") then
             cleanup();r.phase="captive";r.started=stamp()
             local d=data();if d.scene==r.task then d.scene=nil end
         end
     elseif r.phase=="captive" or r.phase=="release" then
+        if not captive_storage_ready(r) then return end
+        r.operation="maintain_hostage"
         world().maintain(r,configured)
         local s=world().server(r.victim.id)
         if not s:alive() then world().expire(r);terminal(r,"failed");return end
@@ -253,30 +285,43 @@ local function run_record(r)
             return
         end
         if r.cancel_requested then r.phase="rollback";return end
-        give_task(r);announce(r,false)
+        if r.alternative_start and not world().ui_free() then return end
+        step(r,"issue_quest")
+        give_task(r);r.operation="pda_message";announce(r,false)
         if r.phase=="release" and world().ui_free() and not world().guards_alive(r) then
+            r.operation="restore_companion"
             if world().restore_companion(r,false) then terminal(r,"rescued") end
         end
     end
 end
-local function update()
+local function update(alternative)
+    if alternative and alternate_suspended then return end
     if not ready() then cleanup();configured={};return end
     if ready_frame and device().frame<ready_frame then return end
+    if alternative then
+        local frame=device().frame
+        local ms=now()
+        if frame==last_alternate_frame or ms<(alternate_next_ms or 0) then return end
+        last_alternate_frame=frame;alternate_next_ms=ms+100
+    end
     local d=data();if not d then return end
     local ids={};for id in pairs(d.ongoing) do ids[#ids+1]=id end;table.sort(ids)
     for _,id in ipairs(ids) do
         local r=d.records[id]
-        local ok,why=pcall(run_record,r)
-        if not ok then
-            if tostring(why)~=last_error then log(why);last_error=tostring(why) end
-            if d.scene==r.task then cleanup();d.scene=nil end
-            if r.phase=="out" or r.phase=="stage" or r.phase=="in" then r.error=tostring(why);r.phase="rollback" end
+        if (r.alternative_start==true)==alternative then
+            local ok,why=pcall(run_record,r)
+            if not ok then
+                local detail=r.task.." phase="..r.phase.." step="..tostring(r.operation or r.step)..": "..tostring(why)
+                if detail~=last_error then log(detail);last_error=detail end
+                if d.scene==r.task then cleanup();d.scene=nil end
+                if r.phase=="out" or r.phase=="stage" or r.phase=="in" then r.error=tostring(why);r.phase="rollback" end
+            end
         end
     end
 end
 local function check(context,params)
     local ok,why=common().params_only(params,{npc_sections=true,enemy_count=true,deadline_hours=true,
-        any_location=true,catalog_revision=true,donor_name=true})
+        any_location=true,alternative_start=true,catalog_revision=true,donor_name=true})
     if not ok then return false,"rejected",why end
     if not ready() or not world().available() or not task_api() then return false,"deferred","kidnap_game_not_ready" end
     if CGameTask==nil or not task then return false,"deferred","kidnap_native_task_api_unavailable" end
@@ -292,6 +337,10 @@ local function check(context,params)
     if params.any_location~=nil and params.any_location~="true" and params.any_location~="false" then
         return false,"rejected","kidnap_any_location_invalid"
     end
+    if params.alternative_start~=nil and params.alternative_start~="true" and params.alternative_start~="false" then
+        return false,"rejected","kidnap_alternative_start_invalid"
+    end
+    options.alternative_start=params.alternative_start=="true"
     local entries;entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"npc_sections","npc")
     if not entries or #entries==0 then return false,"rejected",why or "kidnap_select_guard_npcs" end
     options.sections={}
@@ -309,14 +358,20 @@ local function execute(context)
     local s=world().server(p.victim.id)
     if not world().same(s,p.victim) or not s:alive() then return "deferred","kidnap_companion_changed" end
     local d=assert(data(),"kidnap_storage_unavailable")
-    local r={task=p.task,direct_task=true,captive_fixed_v2=true,victim=p.victim,camp=p.camp,hours=p.hours,phase="out",plan={},guards={},spawn_cursor=1}
+    local r={task=p.task,direct_task=true,captive_fixed_v2=true,victim=p.victim,camp=p.camp,hours=p.hours,phase="out",plan={},guards={},spawn_cursor=1,
+        alternative_start=p.alternative_start}
     for i=1,p.count do r.plan[i]=p.sections[math.random(#p.sections)] end
     d.records[r.task]=r;d.ongoing[r.task]=true;d.scene=r.task;d.sequence=p.serial;index(r)
+    log(r.task.." driver="..(r.alternative_start and "actor_on_update" or "registry"))
     return "executed","companion_kidnapping_started"
 end
 local function after_load()
     cleanup();configured={};task_icons={};owners={};ready_frame=device().frame+3
+    alternate_suspended=false;last_alternate_frame=nil;alternate_next_ms=nil;storage_waits={}
     task_api()
+end
+local function level_changing()
+    after_load();alternate_suspended=true
 end
 local function before_save() cleanup() end
 local function own_npc(a,b,r)
@@ -368,19 +423,28 @@ end
 function register()
     if registered then return end
     task_api()
-    local ok,why=anomaly_donation_bridge_registry.register(ID,{can_execute=check,execute=execute,update=update,
-        on_game_load=after_load,on_level_changing=after_load,
+    local ok,why=anomaly_donation_bridge_registry.register(ID,{can_execute=check,execute=execute,update=function() update(false) end,
+        on_game_load=after_load,on_level_changing=level_changing,
         on_effect_save=function(stage) if stage=="before" then before_save() end;return true end,
         is_blocking=function() local r=scene();return r and (r.phase=="out" or r.phase=="stage" or r.phase=="in") or false end,
         allow_while_blocking={[ID]=true},is_supported=function() return true end})
     if not ok then log(why);return end
+    -- Independent from the bridge/IPC update pump. Only opt-in records run
+    -- here; the registry never advances them a second time in the same frame.
+    RegisterScriptCallback("actor_on_update",function() update(true) end)
+    RegisterScriptCallback("on_game_load",after_load)
+    RegisterScriptCallback("on_level_changing",level_changing)
     RegisterScriptCallback("on_before_save_input",before_save)
     RegisterScriptCallback("on_before_load_input",before_save)
     RegisterScriptCallback("save_state",before_save)
     RegisterScriptCallback("main_menu_on_quit",before_save)
     RegisterScriptCallback("npc_on_net_spawn",function(n)
         configured[n:id()]=nil -- apply on update, after motivator initialization
-        world().net_spawn(owner(n:id()),n) -- faction/relation before the first AI evaluation
+        local r=owner(n:id())
+        -- Compatible startup configures the captive on a later actor update,
+        -- after modded motivators have finished publishing their storage.
+        if r and r.alternative_start and r.victim.id==n:id() then return end
+        world().net_spawn(r,n) -- guard faction/relation before the first AI evaluation
     end)
     RegisterScriptCallback("on_enemy_eval",function(n,e,f) if n then world().enemy_eval(owner(n:id()),n,e,f) end end)
     registered=true
