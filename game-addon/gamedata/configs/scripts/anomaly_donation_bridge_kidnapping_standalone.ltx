@@ -1,0 +1,27 @@
+[adb_kidnapping_logic]
+active = beh@adb_kidnapped
+post_combat_time = 0,0
+
+[beh@adb_kidnapped]
+target = cover_wait
+wait_anim = prisoner
+combat_ignore_cond = true
+combat_ignore_keep_when_attacked = true
+enemy_ignore_cond = true
+gather_items_enabled = false
+help_wounded_enabled = false
+corpse_detection_enabled = false
+use_camp = false
+invulnerable = true
+meet = meet@adb_kidnapped
+
+[meet@adb_kidnapped]
+close_distance = 3
+close_anim = nil
+far_distance = 0
+use = {=dist_to_actor_le(4)} true, false
+allow_break = true
+abuse = false
+meet_on_talking = false
+meet_dialog = anomaly_donation_bridge_kidnapping_dialog
+trade_enable = false

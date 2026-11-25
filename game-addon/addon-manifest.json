@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.196",
+  "addonVersion": "1.0.197",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
@@ -155,7 +155,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "CEEDD7C2E23E3A6BAD43E00761DC0ECA6386A51CF5488E0E685539035CC13E27"
+      "sha256": "E24C4D6B81B5ACC84CDA701F5AEDF90CDF23FCFFBC5D095423AB2CF5BE7531EA"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",
@@ -227,15 +227,19 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_kidnapping.script",
-      "sha256": "FA8A6407E010617F8173B075B310F9A974870A4EAEBD2430577A3EB572911CF4"
+      "sha256": "0561748461756ABB4B5095C776D521CA5DD16BE842531DD64B4F6EA5E5C6375D"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_kidnapping_world.script",
-      "sha256": "975C2D282D79F9D5097A8B40B5300A9ACFEF83168DA2FDE071BF2DD796F93709"
+      "sha256": "5BD8AC76DB2D6B1573D005E671F7731EC8242F0506C8834A555EF03F632A22A3"
     },
     {
       "path": "gamedata/configs/scripts/anomaly_donation_bridge_kidnapping.ltx",
       "sha256": "CC5A6BB3D6EA07BD5B46DBE4CBDC06F0FF574CCACA43D7C1D899BDAF4B33C5EF"
+    },
+    {
+      "path": "gamedata/configs/scripts/anomaly_donation_bridge_kidnapping_standalone.ltx",
+      "sha256": "87EDCE74A4FE3112CF82B249AAD71B565922AAED9DD09AC95B83FCF66E0CF808"
     }
   ]
 }

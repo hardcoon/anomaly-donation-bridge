@@ -1,5 +1,4 @@
--- A private task instance around stock beh@hostage_1 / task_target_hostage /
--- dialogs.rescue_hostage. No stock quest IDs, infoportions or handlers replaced.
+-- Saved stages shared by the standard and standalone kidnapping routes.
 local ID="hardcoon.adb.companion_kidnap"
 local MODULE="anomaly_donation_bridge_kidnapping"
 local KEY="adb_companion_kidnapping_v1"
@@ -9,7 +8,7 @@ local TASK_ICON="ui_inGame2_V_poiskah_Soroki"
 local MAP_SPOT="secondary_task_location"
 local PP,FALL,WAKE=192901,192902,192903
 local cinema,input_owned,registered,last_error,ready_frame
-local alternate_suspended,last_alternate_frame,alternate_next_ms
+local suspended,last_update_frame,next_update_ms
 local storage_waits={}
 local configured={}
 local task_icons={}
@@ -59,10 +58,6 @@ local function owner(id)
         r=d.records[task_id];index(r)
         if owners[id]==task_id then return r end
     end
-end
-function owns_captive(id)
-    local r=owner(id)
-    return r and r.victim.id==id and world().same(world().server(id),r.victim) or false
 end
 local function stamp() return utils_data.CTime_to_table(game.get_game_time()) end
 local function elapsed(s) return game.get_game_time():diffSec(utils_data.CTime_from_table(s)) end
@@ -151,7 +146,7 @@ local function task_closed(_,_,p)
         r.cancel_requested=not expired(r)
     end
 end
-local function task_api()
+local function install_legacy_task_hooks()
     if not task_functor or not task_status_functor or not xr_effects then return false end
     task_functor.adb_companion_kidnap_text=task_text
     task_functor.adb_companion_kidnap_target=task_target
@@ -173,24 +168,29 @@ local function announce(r,timeout)
     local ok,result=pcall(news_manager.send_tip,db.actor,message,0,nil,12000)
     if ok and result~=false then r[key]=true else log("PDA message failed: "..tostring(result)) end
 end
+local function repair_task_marker(r,t)
+    if not t or task_icons[r.task] then return end
+    t:set_icon_name(TASK_ICON)
+    t:set_description(task_text(r.task,"descr"))
+    if t:get_map_location()~=MAP_SPOT then t:change_map_location(MAP_SPOT,r.victim.id) end
+    task_icons[r.task]=true
+end
 local function give_task(r)
-    local m=task_manager.get_task_manager()
     local t=db.actor:get_task(r.task,true)
-    if t or m.task_info[r.task] then
-        if m.task_info[r.task] then m.task_info[r.task].icon=TASK_ICON;m.task_info[r.task].spot=MAP_SPOT end
-        if t and not task_icons[r.task] then
-            t:set_icon_name(TASK_ICON)
-            t:set_description(task_text(r.task,"descr"))
-            if t:get_map_location()~=MAP_SPOT then t:change_map_location(MAP_SPOT,r.victim.id) end
-            task_icons[r.task]=true
+    if not r.direct_task then
+        -- Only saves from the original LTX-slot implementation use this path.
+        assert(install_legacy_task_hooks() and task_manager,"kidnap_legacy_task_api_unavailable")
+        local m=task_manager.get_task_manager()
+        local previous=m.task_info[r.task]
+        if previous then previous.icon=TASK_ICON;previous.spot=MAP_SPOT end
+        if not t and not previous then
+            assert(not r.task_given,"kidnap_quest_missing_after_issue")
+            m:give_task(r.task,r.victim.id)
+            assert(m.task_info[r.task] or db.actor:get_task(r.task,true),"kidnap_quest_issue_failed")
         end
-        r.task_given=true;return
-    end
-    assert(not r.task_given,"kidnap_quest_missing_after_issue")
-    if r.direct_task then
-        -- Native tasks have unique IDs and survive saves without an arbitrary
-        -- pool of LTX slots. The stock captive AI/dialogue is unchanged.
-        local t=CGameTask();t:set_id(r.task);t:set_type(task.additional)
+    elseif not t then
+        assert(not r.task_given,"kidnap_quest_missing_after_issue")
+        t=CGameTask();t:set_id(r.task);t:set_type(task.additional)
         t:set_title(task_text(r.task,"title"));t:set_description(task_text(r.task,"descr"))
         t:set_icon_name(TASK_ICON);t:set_priority(85)
         t:set_map_location(MAP_SPOT);t:set_map_object_id(r.victim.id)
@@ -198,16 +198,18 @@ local function give_task(r)
         t:add_on_fail_func(MODULE..".native_failed")
         local remaining=math.max(1,math.floor(r.hours*3600-elapsed(r.started)))
         db.actor:give_task(t,remaining,false,remaining)
-        if type(level.map_add_object_spot)=="function" then level.map_add_object_spot(r.victim.id,"ui_secondary_task_blink","") end
-    else
-        m:give_task(r.task,r.victim.id) -- existing local.1 quest
+        t=assert(db.actor:get_task(r.task,true),"kidnap_quest_issue_failed")
+        task_icons[r.task]=true
+        if type(level.map_add_object_spot)=="function" then
+            pcall(level.map_add_object_spot,r.victim.id,"ui_secondary_task_blink","")
+        end
     end
-    assert(db.actor:get_task(r.task,true) or m.task_info[r.task],"kidnap_quest_issue_failed")
+    repair_task_marker(r,t)
     r.task_given=true
 end
 local function terminal(r,phase)
+    world().finish_guards(r,phase=="cancelled" or not r.task_given)
     r.phase=phase
-    world().finish_guards(r)
     local d=data();d.ongoing[r.task]=nil
     if d.scene==r.task then d.scene=nil;cleanup() end
     owners[r.victim.id]=nil
@@ -220,7 +222,6 @@ end
 local function captive_storage_ready(r)
     -- Modpacks may expose the respawned client before its motivator storage.
     -- Wait outside native callbacks; never configure the old client userdata.
-    if not r.alternative_start then return true end
     local n=level.object_by_id(r.victim.id)
     if not n or db.storage[r.victim.id] then storage_waits[r.task]=nil;return true end
     local since=storage_waits[r.task] or now();storage_waits[r.task]=since
@@ -231,7 +232,7 @@ end
 local function run_record(r)
     if r.phase=="rollback" then
         if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
-        if world().ui_free() and world().restore_companion(r,true) then terminal(r,"cancelled") end
+        if world().ui_free() and (not r.hostage_group or world().restore_companion(r,true)) then terminal(r,"cancelled") end
         return
     end
     if not world().same(world().server(r.victim.id),r.victim) then terminal(r,"failed");return end
@@ -245,13 +246,16 @@ local function run_record(r)
             r.sleep_done=true
             step(r,"advance_one_hour")
             level.change_game_time(0,1,0)
-            if not r.alternative_start and type(SendScriptCallback)=="function" then pcall(SendScriptCallback,"actor_on_sleep",1) end
-            if r.alternative_start then return end
+            if not r.alternative_start and type(SendScriptCallback)=="function" then
+                pcall(SendScriptCallback,"actor_on_sleep",1)
+            end
+            return
         end
-        if not r.alternative_start or not r.victim_staged then
+        if not r.victim_staged then
             step(r,"transfer_companion")
             world().stage_victim(r)
-            if r.alternative_start then r.victim_staged=true;return end
+            r.victim_staged=true
+            return
         end
         for _=1,r.alternative_start and 1 or 2 do
             if r.spawn_cursor>#r.plan then break end
@@ -261,10 +265,9 @@ local function run_record(r)
             r.spawn_cursor=index+1
         end
         index(r)
-        if r.alternative_start and r.spawn_cursor<=#r.plan then return end
         if not captive_storage_ready(r) then return end
         step(r,"configure_hostage")
-        world().maintain(r,configured)
+        if not world().maintain(r,configured) then return end
         if r.spawn_cursor>#r.plan then r.phase="in" end
     elseif r.phase=="in" then
         if not captive_storage_ready(r) then return end
@@ -277,7 +280,7 @@ local function run_record(r)
     elseif r.phase=="captive" or r.phase=="release" then
         if not captive_storage_ready(r) then return end
         r.operation="maintain_hostage"
-        world().maintain(r,configured)
+        if not world().maintain(r,configured) then return end
         local s=world().server(r.victim.id)
         if not s:alive() then world().expire(r);terminal(r,"failed");return end
         if expired(r) then
@@ -285,7 +288,7 @@ local function run_record(r)
             return
         end
         if r.cancel_requested then r.phase="rollback";return end
-        if r.alternative_start and not world().ui_free() then return end
+        if not r.task_given and not world().ui_free() then return end
         step(r,"issue_quest")
         give_task(r);r.operation="pda_message";announce(r,false)
         if r.phase=="release" and world().ui_free() and not world().guards_alive(r) then
@@ -295,14 +298,14 @@ local function run_record(r)
     end
 end
 local function update(alternative)
-    if alternative and alternate_suspended then return end
+    if suspended then return end
     if not ready() then cleanup();configured={};return end
-    if ready_frame and device().frame<ready_frame then return end
+    local frame=device().frame
+    if ready_frame and frame<ready_frame then return end
     if alternative then
-        local frame=device().frame
         local ms=now()
-        if frame==last_alternate_frame or ms<(alternate_next_ms or 0) then return end
-        last_alternate_frame=frame;alternate_next_ms=ms+100
+        if frame==last_update_frame or ms<(next_update_ms or 0) then return end
+        last_update_frame=frame;next_update_ms=ms+100
     end
     local d=data();if not d then return end
     local ids={};for id in pairs(d.ongoing) do ids[#ids+1]=id end;table.sort(ids)
@@ -314,7 +317,10 @@ local function update(alternative)
                 local detail=r.task.." phase="..r.phase.." step="..tostring(r.operation or r.step)..": "..tostring(why)
                 if detail~=last_error then log(detail);last_error=detail end
                 if d.scene==r.task then cleanup();d.scene=nil end
-                if r.phase=="out" or r.phase=="stage" or r.phase=="in" then r.error=tostring(why);r.phase="rollback" end
+                if r.phase=="out" or r.phase=="stage" or r.phase=="in" or not r.task_given or r.operation=="issue_quest" then
+                    r.error=tostring(why)
+                    r.phase="rollback"
+                end
             end
         end
     end
@@ -323,13 +329,18 @@ local function check(context,params)
     local ok,why=common().params_only(params,{npc_sections=true,enemy_count=true,deadline_hours=true,
         any_location=true,alternative_start=true,catalog_revision=true,donor_name=true})
     if not ok then return false,"rejected",why end
-    if not ready() or not world().available() or not task_api() then return false,"deferred","kidnap_game_not_ready" end
+    if params.alternative_start~=nil and params.alternative_start~="true" and params.alternative_start~="false" then
+        return false,"rejected","kidnap_alternative_start_invalid"
+    end
+    local options={alternative_start=params.alternative_start=="true"}
+    if not ready() or not world().available(options.alternative_start) or not data() then
+        return false,"deferred","kidnap_game_not_ready"
+    end
     if CGameTask==nil or not task then return false,"deferred","kidnap_native_task_api_unavailable" end
     if scene() then return false,"deferred","kidnap_sleep_in_progress" end
     if not world().ui_free() then return false,"deferred","kidnap_waiting_for_ui_close" end
     local lock=input_state()
     if not lock or lock.disable_input_time or lock.disable_input_idle then return false,"deferred","kidnap_foreign_input_lock" end
-    local options={}
     options.count,why=common().parse_integer(params.enemy_count,12,1,99,"kidnap_enemy_count_invalid")
     if not options.count then return false,"rejected",why end
     options.hours,why=common().parse_integer(params.deadline_hours,24,1,168,"kidnap_deadline_invalid")
@@ -337,17 +348,19 @@ local function check(context,params)
     if params.any_location~=nil and params.any_location~="true" and params.any_location~="false" then
         return false,"rejected","kidnap_any_location_invalid"
     end
-    if params.alternative_start~=nil and params.alternative_start~="true" and params.alternative_start~="false" then
-        return false,"rejected","kidnap_alternative_start_invalid"
-    end
-    options.alternative_start=params.alternative_start=="true"
     local entries;entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"npc_sections","npc")
     if not entries or #entries==0 then return false,"rejected",why or "kidnap_select_guard_npcs" end
     options.sections={}
     for _,e in ipairs(entries) do options.sections[#options.sections+1]=e.section_id end
-    options.victim=world().choose_companion()
+    local d=data()
+    local captives,camps={},{}
+    for id in pairs(d.ongoing) do
+        local r=d.records[id]
+        if ongoing(r) then captives[r.victim.id]=true;camps[r.camp.id]=true end
+    end
+    options.victim=world().choose_companion(captives,options.alternative_start)
     if not options.victim then return false,"deferred","kidnap_no_eligible_companion" end
-    options.camp=world().choose_camp(params.any_location=="true")
+    options.camp=world().choose_camp(params.any_location=="true",camps,captives,options.alternative_start)
     if not options.camp then return false,"deferred","kidnap_no_eligible_camp" end
     options.task,options.serial=free_slot()
     context.options=options;return true
@@ -358,20 +371,24 @@ local function execute(context)
     local s=world().server(p.victim.id)
     if not world().same(s,p.victim) or not s:alive() then return "deferred","kidnap_companion_changed" end
     local d=assert(data(),"kidnap_storage_unavailable")
-    local r={task=p.task,direct_task=true,captive_fixed_v2=true,victim=p.victim,camp=p.camp,hours=p.hours,phase="out",plan={},guards={},spawn_cursor=1,
+    local r={task=p.task,direct_task=true,captive_fixed_v2=true,world_migrated=p.alternative_start,
+        victim=p.victim,camp=p.camp,hours=p.hours,phase="out",plan={},guards={},spawn_cursor=1,
         alternative_start=p.alternative_start}
     for i=1,p.count do r.plan[i]=p.sections[math.random(#p.sections)] end
     d.records[r.task]=r;d.ongoing[r.task]=true;d.scene=r.task;d.sequence=p.serial;index(r)
-    log(r.task.." driver="..(r.alternative_start and "actor_on_update" or "registry"))
+    log(r.task.." driver="..(r.alternative_start and "actor_on_update" or "registry").." camp="..r.camp.target)
     return "executed","companion_kidnapping_started"
 end
 local function after_load()
     cleanup();configured={};task_icons={};owners={};ready_frame=device().frame+3
-    alternate_suspended=false;last_alternate_frame=nil;alternate_next_ms=nil;storage_waits={}
-    task_api()
+    suspended=false;last_update_frame=nil;next_update_ms=nil;storage_waits={}
+    local d=data()
+    for id in pairs(d and d.ongoing or {}) do
+        if not d.records[id].direct_task then install_legacy_task_hooks();break end
+    end
 end
 local function level_changing()
-    after_load();alternate_suspended=true
+    cleanup();suspended=true
 end
 local function before_save() cleanup() end
 local function own_npc(a,b,r)
@@ -387,9 +404,14 @@ end
 function dialog_text(a,b)
     local r=speaker_record(a,b)
     if r and world().guards_alive(r) then return text("Сначала избавься от охраны, потом поговорим.") end
+    if r and r.alternative_start then return text("Помоги мне выбраться отсюда!") end
     return game.translate_string("hostage_companion_task_1_start_dialog_1")
 end
-function answer_text() return game.translate_string("hostage_companion_task_1_actor_reply") end
+function answer_text(a,b)
+    local r=speaker_record(a,b)
+    if r and r.alternative_start then return text("Хочешь жить — идём со мной!") end
+    return game.translate_string("hostage_companion_task_1_actor_reply")
+end
 function request_rescue(a,b)
     local r=speaker_record(a,b)
     if not r or r.phase~="captive" or expired(r) or not own_npc(a,b,r) or world().guards_alive(r) then return end
@@ -422,15 +444,11 @@ function init_dialog(dialog)
 end
 function register()
     if registered then return end
-    task_api()
     local ok,why=anomaly_donation_bridge_registry.register(ID,{can_execute=check,execute=execute,update=function() update(false) end,
-        on_game_load=after_load,on_level_changing=level_changing,
         on_effect_save=function(stage) if stage=="before" then before_save() end;return true end,
         is_blocking=function() local r=scene();return r and (r.phase=="out" or r.phase=="stage" or r.phase=="in") or false end,
         allow_while_blocking={[ID]=true},is_supported=function() return true end})
     if not ok then log(why);return end
-    -- Independent from the bridge/IPC update pump. Only opt-in records run
-    -- here; the registry never advances them a second time in the same frame.
     RegisterScriptCallback("actor_on_update",function() update(true) end)
     RegisterScriptCallback("on_game_load",after_load)
     RegisterScriptCallback("on_level_changing",level_changing)
@@ -440,11 +458,6 @@ function register()
     RegisterScriptCallback("main_menu_on_quit",before_save)
     RegisterScriptCallback("npc_on_net_spawn",function(n)
         configured[n:id()]=nil -- apply on update, after motivator initialization
-        local r=owner(n:id())
-        -- Compatible startup configures the captive on a later actor update,
-        -- after modded motivators have finished publishing their storage.
-        if r and r.alternative_start and r.victim.id==n:id() then return end
-        world().net_spawn(r,n) -- guard faction/relation before the first AI evaluation
     end)
     RegisterScriptCallback("on_enemy_eval",function(n,e,f) if n then world().enemy_eval(owner(n:id()),n,e,f) end end)
     registered=true

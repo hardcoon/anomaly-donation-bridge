@@ -31,7 +31,7 @@ public sealed class AddonPackageManager
     public const string ProductId = "AnomalyDonationBridge";
     public const string ProtocolVersion = "1";
     public const string PipeName = "AnomalyDonationBridge.v1";
-    public const string ShippedAddonVersion = "1.0.196";
+    public const string ShippedAddonVersion = "1.0.197";
 
     private static readonly Regex ManagedPath = new(
         "^(?:gamedata/scripts/anomaly_donation_bridge_[a-z0-9_]+\\.script|" +
@@ -50,7 +50,7 @@ public sealed class AddonPackageManager
         "gamedata/configs/ui/textures_descr/anomaly_donation_bridge_burer_form\\.xml|" +
         "gamedata/textures/ui/anomaly_donation_bridge_burer_form\\.dds|" +
         "gamedata/configs/gameplay/dialogs_anomaly_donation_bridge\\.xml|" +
-        "gamedata/configs/scripts/anomaly_donation_bridge_kidnapping\\.ltx|" +
+        "gamedata/configs/scripts/anomaly_donation_bridge_kidnapping(?:_standalone)?\\.ltx|" +
         "gamedata/configs/scripts/anomaly_donation_bridge_wandering_trader\\.ltx|" +
         "gamedata/configs/misc/trade/anomaly_donation_bridge_wandering_trader\\.ltx|" +
         "gamedata/configs/scripts/anomaly_donation_bridge_annoying_fan\\.ltx|" +

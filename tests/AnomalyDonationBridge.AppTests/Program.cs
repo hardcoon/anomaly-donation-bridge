@@ -813,13 +813,14 @@ internal static class Program
             taskSource.Contains("status_functor = adb_companion_kidnap_status"),
             "Kidnapping must retain native slots for existing local.1 quests.");
         var captiveLogic = await File.ReadAllTextAsync(Path.Combine(packageRoot,
-            "gamedata", "configs", "scripts", "anomaly_donation_bridge_kidnapping.ltx"));
-        Assert(captiveLogic.Contains("#include \"beh_companion.ltx\"") &&
-            captiveLogic.Contains("[beh@adb_kidnapped]:beh@hostage_1") &&
+            "gamedata", "configs", "scripts", "anomaly_donation_bridge_kidnapping_standalone.ltx"));
+        Assert(!captiveLogic.Contains("#include", StringComparison.Ordinal) &&
+            !captiveLogic.Contains("task_target_hostage", StringComparison.Ordinal) &&
+            captiveLogic.Contains("[beh@adb_kidnapped]") && captiveLogic.Contains("target = cover_wait") &&
             captiveLogic.Contains("[adb_kidnapping_logic]") && captiveLogic.Contains("active = beh@adb_kidnapped") &&
             captiveLogic.Contains("meet_dialog = anomaly_donation_bridge_kidnapping_dialog") &&
             !captiveLogic.Contains("[logic]"),
-            "Captivity must inherit stock hostage behavior without redefining its logic section.");
+            "The packaged captive behavior must use its own sections and a generic engine target.");
         Assert(System.Text.RegularExpressions.Regex.IsMatch(taskSource,
                 @"(?ms)^\[adb_companion_kidnap_template\]\r?\nicon = ui_inGame2_V_poiskah_Soroki\r?\n"),
             "Kidnapping must use the stock hostage quest texture ID.");
