@@ -1,0 +1,849 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.explode_corpses",
+  "displayName":"Разорвать ближайшие трупы",
+  "description":"Последовательно разрывает прогруженные трупы штатным эффектом мясорубки, как способность контролёра «Разорвать внутренности». Штатный уборщик удаляет тело вместе с инвентарём. Не более трёх взрывов в секунду; остальные эффекты продолжают выполняться. Сюжетные, квестовые и защищённые тела пропускаются. Чекбокс урона NPC действует также на живых мутантов. Очередь тел и прогресс сохраняются: после загрузки продолжается оставшаяся часть серии.",
+  "category":"world","cooldownSeconds":3,
+  "parameterDefinitions":[
+    {"key":"radius_meters","displayName":"Дальность, м","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"100"},
+    {"key":"corpse_type","displayName":"Тип трупов","kind":"Choice","options":["npc","mutant","both"],"optionLabels":{"npc":"Только NPC","mutant":"Только мутанты","both":"NPC и мутанты"},"defaultValue":"both"},
+    {"key":"damage_actor","displayName":"Наносить урон игроку от взрыва","kind":"Choice","options":["false","true"],"defaultValue":"false"},
+    {"key":"damage_npcs","displayName":"Взрыв наносит урон NPC","kind":"Choice","options":["false","true"],"defaultValue":"true"}
+  ],
+  "parameters":{"radius_meters":"100","corpse_type":"both","damage_actor":"false","damage_npcs":"true"},
+  "itemSpawns":[],"spawnGroups":[]
+}
+ADB_PRESET_END]]
+
+local ID = "hardcoon.adb.explode_corpses"
+local SAVE = "adb_explode_corpses_v1"
+local SECTION = "adb_corpse_blast"
+local INTERVAL_MS, WAIT_MS, HELPER_LIFETIME_MS = 334, 5000, 10000
+local MAX_JOBS, MAX_ACTIVE, MAX_RECEIPTS, CHECKS_PER_FRAME = 32, 3, 128, 16
+local state, registered, invalid_saved
+local claims, active = {}, {}
+local last_clock, last_frame, ready_frames, loading = nil, nil, 0, false
+local pickup_flags_to_reset
+local rupture_fx, particle_names = {}, nil
+local TEAR = "anomaly2\\body_tear_00"
+local TEAR_SOUND = "anomaly\\anomaly_body_tear_1"
+local BLAST_RADIUS, BLAST_POWER, BLAST_IMPULSE = 5, 1.5, 100
+
+local function log(reason)
+    if type(printf)=="function" then pcall(printf,"[ADB corpse blast] %s",tostring(reason)) end
+end
+local function flush_log() if type(flush)=="function" then pcall(flush) end end
+local function integer(n,lo,hi)
+    return type(n)=="number" and n==n and n%1==0 and n>=lo and n<=hi
+end
+local function text(s,max) return type(s)=="string" and #s>0 and #s<=max end
+local function copy(value,depth)
+    if type(value)~="table" then return value end
+    assert((depth or 0)<12,"corpse_blast_save_depth")
+    local result={}
+    for k,v in pairs(value) do result[k]=copy(v,(depth or 0)+1) end
+    return result
+end
+local function fresh() return {version=1,jobs={},helpers={},receipts={},cooldown_ms=0} end
+local function storage() return alife_storage_manager and alife_storage_manager.get_state() end
+local function persist(data)
+    if invalid_saved then return end
+    data=data or storage()
+    if data then data[SAVE]=state end
+end
+local function life() return alife() end
+local function server(id)
+    local ok,s=pcall(function() return life():object(id) end)
+    return ok and s or nil
+end
+local function client(id)
+    local ok,o=pcall(level.object_by_id,id)
+    return ok and o or nil
+end
+local function identity(o,r,se)
+    if not o or not r then return false end
+    local ok,same=pcall(function()
+        return (se and o.id or o:id())==r.id and o:name()==r.name and
+            (se and o:section_name() or o:section())==r.section
+    end)
+    return ok and same==true
+end
+local function dead_identity(o,r,se)
+    if not identity(o,r,se) then return false end
+    local ok,dead=pcall(function() return o:alive()==false end)
+    return ok and dead==true
+end
+local function loaded_body(r)
+    -- For an online creature the client is the authoritative death state.
+    -- A modded CSE can still carry its last online health until net_Export.
+    -- Check the saved identity on BOTH sides, never substitute an alive client.
+    local o,s=client(r.id),server(r.id)
+    if not dead_identity(o,r,false) or not identity(s,r,true) then return end
+    return o,s
+end
+local function kind_of(o)
+    local ok,npc,mutant=pcall(function() return IsStalker(o),IsMonster(o) end)
+    return ok and (npc and "npc" or mutant and "mutant") or nil
+end
+local function protected(o)
+    local ok,keep=pcall(function()
+        local id=o:id()
+        if anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(id)) or
+            se_load_var(id,o:name(),"dont_release") or utils_item.has_quest_item(o) then return true end
+        local c=axr_companions
+        if c and c.non_task_companions and c.non_task_companions[id]~=nil then return true end
+        if c and c.companion_squads and type(get_object_squad)=="function" then
+            local squad=get_object_squad(o)
+            if squad and c.companion_squads[squad.id]~=nil then return true end
+        end
+        return release_body_manager.get_release_body_manager():can_release(o)~=true
+    end)
+    return not ok or keep==true
+end
+local function ref(o,se)
+    return {id=se and o.id or o:id(),name=o:name(),section=se and o:section_name() or o:section()}
+end
+local function claim_key(job,r) return job.level.."|"..r.id.."|"..r.section.."|"..r.name end
+local function terminal(r) return r.phase=="done" or r.phase=="skipped" or r.phase=="failed" end
+local function rebuild()
+    claims,active={},{}
+    for _,job in ipairs(state.jobs) do
+        for _,r in ipairs(job.targets) do
+            if not terminal(r) then
+                claims[claim_key(job,r)]=true
+                if r.phase~="queued" then active[#active+1]={job=job,body=r} end
+            end
+        end
+    end
+end
+local function valid_ref(r)
+    return type(r)=="table" and integer(r.id,0,65534) and text(r.name,512) and text(r.section,128)
+end
+local PHASES={queued=true,checking=true,helper_wait=true,
+    blast=true,release_wait=true,done=true,skipped=true,failed=true}
+local function valid_saved(s)
+    if type(s)~="table" or s.version~=1 or type(s.jobs)~="table" or #s.jobs>MAX_JOBS or
+        type(s.helpers)~="table" or type(s.receipts)~="table" or #s.receipts>MAX_RECEIPTS or
+        not integer(s.cooldown_ms,0,INTERVAL_MS) then return false end
+    local keys,targets,processing={}, {},{}
+    for _,job in ipairs(s.jobs) do
+        if type(job)~="table" or not text(job.key,128) or keys[job.key] or not text(job.level,128) or
+            type(job.damage_actor)~="boolean" or type(job.damage_npcs)~="boolean" or
+            type(job.targets)~="table" or #job.targets>65535 or not integer(job.cursor,1,#job.targets+1) then return false end
+        keys[job.key]=true
+        for _,key in ipairs({"blown","removed","skipped","failed"}) do
+            if not integer(job[key],0,10000000) then return false end
+        end
+        for _,r in ipairs(job.targets) do
+            if not valid_ref(r) or not PHASES[r.phase] or (r.kind~="npc" and r.kind~="mutant") or
+                not integer(r.wait_ms or 0,0,WAIT_MS) then return false end
+            if not terminal(r) then
+                local key=claim_key(job,r)
+                if targets[key] then return false end;targets[key]=true
+                if r.phase~="queued" then processing[job.level]=(processing[job.level] or 0)+1 end
+            end
+            if r.blasted~=nil and type(r.blasted)~="boolean" then return false end
+            if r.phase=="release_wait" and r.blasted~=true or
+                r.blasted==true and not terminal(r) and r.phase~="release_wait" then return false end
+            for _,key in ipairs({"offline_sent","release_sent","online_before","offline_before"}) do
+                if r[key]~=nil and type(r[key])~="boolean" then return false end
+            end
+            if r.loot~=nil then
+                if type(r.loot)~="table" or #r.loot>65535 or not integer(r.check_index or 1,1,#r.loot+1) then return false end
+                for _,item in ipairs(r.loot) do
+                    if not valid_ref(item) then return false end
+                end
+            end
+            if r.helper_id~=nil and (not integer(r.helper_id,0,65534) or not text(r.helper_name,512)) then return false end
+        end
+    end
+    for _,count in pairs(processing) do if count>MAX_ACTIVE then return false end end
+    local helpers=0
+    for key,r in pairs(s.helpers) do
+        helpers=helpers+1
+        if helpers>128 or not valid_ref(r) or r.section~=SECTION or tostring(r.id)~=key or not text(r.level,128) or
+            type(r.damage_actor)~="boolean" or type(r.damage_npcs)~="boolean" or type(r.fired)~="boolean" or
+            not integer(r.remaining_ms,0,HELPER_LIFETIME_MS) then return false end
+    end
+    for _,r in ipairs(s.receipts) do
+        if type(r)~="table" or not text(r.key,128) or not text(r.detail,240) then return false end
+    end
+    return true
+end
+local function finite(n) return type(n)=="number" and n==n and math.abs(n)<1e8 end
+local function exists(alias,path) return not not getFS():exist(alias,path) end
+local function ini(section,key) return anomaly_donation_bridge_common.ini_string(system_ini(),section,key) end
+local PARTICLES={tear=TEAR}
+local logged={}
+local function log_once(key,format,...)
+    if logged[key] then return end;logged[key]=true
+    if type(printf)=="function" then pcall(printf,format,...) end
+end
+local function particle_library_bytes(fs)
+    -- IReader*& in r_close has a broken Lua binding on supported builds:
+    -- calling it throws a C++ exception and can poison the Lua engine state.
+    -- Let native file_copy manage VFS reader/writer lifetimes inside C++;
+    -- then read its private temporary copy with ordinary Lua file handles.
+    if not io or type(io.open)~="function" or type(fs.update_path)~="function" then return nil,"file_api_unavailable" end
+    local source=fs:update_path("$game_data$","particles.xr")
+    local file=io.open(source,"rb")
+    local temporary
+    if not file then
+        local info=fs:exist("$game_data$","particles.xr")
+        if not info or type(fs.file_copy)~="function" or type(fs.file_delete)~="function" then return nil,"vfs_copy_unavailable" end
+        local ok,size=pcall(function() return info.size_real end)
+        if not ok or not finite(size) or size<=0 or size>32*1024*1024 then return nil,"library_size_invalid" end
+        temporary=fs:update_path("$app_data_root$","adb_corpse_particle_probe_"..time_global().."_"..math.random(100000,999999)..".tmp")
+        if fs:exist(temporary) then return nil,"probe_path_busy" end -- never overwrite an existing file
+        local previous=io.open(temporary,"rb")
+        if previous then previous:close();return nil,"probe_path_busy" end
+        local copied=pcall(function() fs:file_copy(source,temporary) end)
+        if copied then file=io.open(temporary,"rb") end
+    end
+    local ok,data=false,nil
+    if file then
+        ok,data=pcall(function() return file:read(32*1024*1024+1) end)
+        pcall(function() file:close() end)
+    end
+    -- Monolith deliberately sets os.remove=nil. An unguarded call here used
+    -- to discard a SUCCESSFUL read and mark every VFX resource unavailable.
+    -- Delete only our exact private copy via the engine's VFS API instead.
+    if temporary then
+        local removed=pcall(function() fs:file_delete(temporary) end)
+        if not removed then log_once("particle_cleanup","[ADB corpse blast] particle probe cleanup failed") end
+    end
+    if ok and type(data)=="string" and #data<=32*1024*1024 then return data end
+    return nil,"library_read_failed"
+end
+local function available_particles()
+    if particle_names then return particle_names end
+    particle_names={}
+    if particles_object==nil then return particle_names end
+    local fs=getFS()
+    -- A missing particle causes a native renderer assertion, not a Lua error.
+    -- Inspect the VFS library first; pcall(constructor) is NOT a safe probe.
+    if exists("$game_data$","particles.xr") then
+        local read_ok,data,why=pcall(particle_library_bytes,fs)
+        if read_ok and data then
+            local ok,names=pcall(function()
+                local found={}
+                local function u32(offset)
+                    local a,b,c,d=data:byte(offset+1,offset+4)
+                    return a+b*256+c*65536+d*16777216
+                end
+                local function chunks(first,last,visit)
+                    local cursor,count=first,0
+                    while cursor+8<=last and count<65536 do
+                        local id,size=u32(cursor),u32(cursor+4)
+                        local start,ending=cursor+8,cursor+8+size
+                        if ending>last or ending<start then error("controller_particle_library_invalid") end
+                        -- Compressed/unknown chunks are never read as plain data.
+                        if id<2147483648 then visit(id,start,ending) end
+                        cursor=ending;count=count+1
+                    end
+                end
+                chunks(0,#data,function(id,first,last)
+                    if id~=3 and id~=4 then return end -- effect/group containers
+                    chunks(first,last,function(_,entry_first,entry_last)
+                        chunks(entry_first,entry_last,function(key,name_first,name_last)
+                            if key~=2 then return end -- PED/PGD_CHUNK_NAME
+                            local name=data:sub(name_first+1,math.min(name_last,name_first+256)):match("^([^%z]*)%z")
+                            if name then found[name]=true end
+                        end)
+                    end)
+                end)
+                return found
+            end)
+            if ok then particle_names=names
+            else log_once("particle_library","[ADB corpse blast] particle library: invalid chunks") end
+        else
+            log_once("particle_library","[ADB corpse blast] particle library: %s",read_ok and tostring(why) or tostring(data))
+        end
+    end
+    for _,name in pairs(PARTICLES) do
+        if exists("$game_particles$",name..".pe") or exists("$game_particles$",name..".pg") then particle_names[name]=true end
+    end
+    return particle_names
+end
+local function tear_resource()
+    local names=available_particles()
+    if anomaly_donation_bridge_catalog and type(anomaly_donation_bridge_catalog.snapshot)=="function" then
+        local catalog=anomaly_donation_bridge_catalog.snapshot()
+        for _,entry in ipairs(catalog and catalog.entries or {}) do
+            if entry.kind=="anomaly" then
+                local class=ini(entry.section_id,"class")
+                local name=(class=="ZS_MINCE" or class=="ZS_GALAN") and ini(entry.section_id,"tearing_particles")
+                if type(name)=="string" and names[name] then return name end
+            end
+        end
+    end
+    if names[PARTICLES.tear] then return PARTICLES.tear end
+end
+
+local function stop_fx()
+    for _,fx in ipairs(rupture_fx) do
+        pcall(function() fx.particle:stop() end)
+        if fx.sound then pcall(function() fx.sound:stop() end) end
+    end
+    rupture_fx={}
+end
+local function update_fx(now)
+    for index=#rupture_fx,1,-1 do
+        local fx=rupture_fx[index]
+        if now>=fx.expires then
+            pcall(function() fx.particle:stop() end)
+            if fx.sound then pcall(function() fx.sound:stop() end) end
+            table.remove(rupture_fx,index)
+        end
+    end
+end
+local function spawn_rupture(object,now)
+    local resource=tear_resource()
+    if not resource then return nil,"tearing_particle_unavailable" end
+    if #rupture_fx>=12 then return nil,"tearing_fx_limit" end
+    local ok,fx=pcall(function()
+        local p=object:position()
+        local entry={particle=particles_object(resource),expires=now+3500}
+        rupture_fx[#rupture_fx+1]=entry -- retain before native playback
+        entry.particle:set_direction(vector():set(0,1,0))
+        entry.particle:play_at_pos(vector():set(p.x,p.y,p.z),false)
+        if sound_object and exists("$game_sounds$",TEAR_SOUND..".ogg") then
+            entry.sound=sound_object(TEAR_SOUND)
+            entry.sound:play_at_pos(db.actor,vector():set(p.x,p.y,p.z),0,0)
+            entry.sound.volume=1
+        end
+        return true
+    end)
+    if not ok then log("tearing_fx_error_"..tostring(fx):gsub("[\r\n]"," "));return nil,"tearing_fx_failed" end
+    return true
+end
+
+local function suspend() last_clock,last_frame,ready_frames=nil,nil,0 end
+local function read_saved()
+    stop_fx();suspend();loading=false;invalid_saved=false
+    local data=storage();local saved=data and data[SAVE]
+    if saved~=nil and not valid_saved(saved) then
+        invalid_saved=true;state=fresh();claims,active={},{};log("saved_state_invalid");return
+    end
+    state=saved and copy(saved) or fresh()
+    -- An offline/release request may not be part of a save. Re-resolve the
+    -- body and hand it to the stock cleaner again only after binder teardown.
+    -- A saved attempted blast is NEVER reissued.
+    for _,job in ipairs(state.jobs) do
+        for _,r in ipairs(job.targets) do
+            r.offline_sent,r.release_sent=nil,nil
+            if not r.blasted and (r.phase=="helper_wait" or r.phase=="blast") then
+                -- local.2 saved a waiting grenade. The new rupture needs no
+                -- spawned object: recheck the same body, retaining the series.
+                r.phase="queued";r.loot=nil;r.check_index=nil;r.wait_ms=0
+            end
+        end
+    end
+    for _,h in pairs(state.helpers) do h.release_sent=nil;if not h.fired then h.cancelled=true end end
+    if pickup_flags_to_reset then pickup_flags_to_reset.ret_value=true;pickup_flags_to_reset=nil end
+    rebuild();persist()
+end
+local function receipt(key)
+    for _,r in ipairs(state.receipts) do if r.key==key then return r.detail end end
+    for _,job in ipairs(state.jobs) do if job.key==key then return "corpse_blast_scheduled_"..#job.targets end end
+end
+local function remember(key,detail)
+    state.receipts[#state.receipts+1]={key=key,detail=detail}
+    while #state.receipts>MAX_RECEIPTS do table.remove(state.receipts,1) end
+end
+local function playable()
+    if loading or invalid_saved or not db or not db.actor then return end
+    local ok,a,frame,here=pcall(function()
+        local actor=db.actor;local d=device()
+        if not actor:alive() or not level.present() or d:is_paused() or (d.precache_frame or 0)>0 or
+            (d.f_time_delta or 0)<=0 or actor:is_talking() then return end
+        if type(app_ready)=="function" and not app_ready() then return end
+        if type(Check_UI)=="function" and Check_UI() then return end
+        if actor_menu and type(actor_menu.is_hud_free)=="function" and not actor_menu.is_hud_free() then return end
+        if type(_GUIs)=="table" and next(_GUIs) then return end
+        local menu=rawget(_G,"ActorMenu")
+        if menu and menu.get_actor_menu and menu.get_actor_menu():IsShown() then return end
+        local loot=rawget(_G,"ui_mutant_loot")
+        if loot and loot.GUI and loot.GUI:IsShown() then return end
+        local registry=anomaly_donation_bridge_registry
+        if registry.busy_reason and registry.busy_reason(ID) then return end
+        return actor,d.frame,level.name()
+    end)
+    if ok then return a,frame,here end
+end
+local function supported()
+    local ok,available=pcall(function()
+        return not invalid_saved and type(alife)=="function" and
+            type(alife_record)=="function" and type(system_ini)=="function" and storage()~=nil and
+            particles_object~=nil and type(getFS)=="function" and tear_resource()~=nil and
+            hit~=nil and hit.explosion~=nil and
+            level and type(level.object_by_id)=="function" and type(level.present)=="function" and
+            type(RegisterScriptCallback)=="function" and type(IsStalker)=="function" and type(IsMonster)=="function" and
+            type(IsItem)=="function" and type(get_object_story_id)=="function" and type(se_load_var)=="function" and
+            utils_item and type(utils_item.has_quest_item)=="function" and
+            release_body_manager and type(release_body_manager.get_release_body_manager)=="function" and
+            safe_release_manager and type(safe_release_manager.release)=="function" and
+            type(safe_release_manager.execute_destroy_callback)=="function" and
+            db and type(db.storage)=="table"
+    end)
+    return ok and available==true,"corpse_blast_tearing_or_cleanup_api_unavailable"
+end
+local function can_execute(context,params)
+    local common=anomaly_donation_bridge_common
+    local ok,why=common.params_only(params,{radius_meters=true,corpse_type=true,damage_actor=true,damage_npcs=true})
+    if not ok then return false,"rejected",why end
+    local radius,error_code=common.parse_integer(params.radius_meters,100,1,999,"corpse_blast_radius_invalid")
+    if not radius then return false,"rejected",error_code end
+    local kind=params.corpse_type or "both"
+    if kind~="npc" and kind~="mutant" and kind~="both" then return false,"rejected","corpse_blast_type_invalid" end
+    local actor_damage,npc_damage=params.damage_actor or "false",params.damage_npcs or "true"
+    if (actor_damage~="true" and actor_damage~="false") or (npc_damage~="true" and npc_damage~="false") then
+        return false,"rejected","corpse_blast_damage_invalid"
+    end
+    local key=context.command and context.command.command_id
+    if not text(key,128) then return false,"rejected","corpse_blast_command_id_missing" end
+    context.blast_key=key
+    if receipt(key) then return true end
+    if not supported() then return false,"rejected","corpse_blast_tearing_or_cleanup_api_unavailable" end
+    if #state.jobs>=MAX_JOBS then return false,"deferred","corpse_blast_pending_limit" end
+    local actor=playable()
+    if not actor then return false,"deferred","corpse_blast_waiting_for_gameplay" end
+    context.blast_options={radius=radius,kind=kind,damage_actor=actor_damage=="true",damage_npcs=npc_damage=="true"}
+    return true
+end
+local function collect_targets(origin,radius,selector,job)
+    -- Same client/identity/radius selection as "Собрать лут и убрать трупы".
+    -- Include the stock cleaner's body registry and native online query too:
+    -- some binders omit dead objects from db.storage. Never enumerate ALife
+    -- offline objects or add bodies discovered after this activation snapshot.
+    local targets,seen={},{}
+    local stats={checked=0,dead=0,range=0,identity=0,errors=0,claimed=0}
+    local function inspect(object)
+        if not object then return false end
+        local ok,record,reason=pcall(function()
+            local id=object:id()
+            if seen[id] then return end;seen[id]=true
+            stats.checked=stats.checked+1
+            local kind=kind_of(object)
+            -- game_object has no native __eq overload. Compare numeric IDs,
+            -- as the existing cleanup template does for object identity.
+            if not kind or (selector~="both" and selector~=kind) or id==db.actor:id() or object:alive()~=false then return end
+            stats.dead=stats.dead+1
+            local distance=origin:distance_to_sqr(object:position())
+            if not finite(distance) or distance>radius*radius then return nil,"range" end
+            local r=ref(object,false);r.kind=kind;r.distance=distance;r.phase="queued"
+            if not valid_ref(r) or not loaded_body(r) then return nil,"identity" end
+            if claims[claim_key(job,r)] then return nil,"claimed" end
+            return r
+        end)
+        if not ok then
+            stats.errors=stats.errors+1
+            log_once("scan_error","[ADB corpse blast] target_scan_error: %s",tostring(record):gsub("[\r\n]"," "))
+        elseif record then targets[#targets+1]=record
+        elseif reason then stats[reason]=stats[reason]+1 end
+        return false -- native iterate_nearest stops on TRUE
+    end
+    for id in pairs(db.storage) do inspect(client(id)) end
+    local manager_ok,manager=pcall(release_body_manager.get_release_body_manager)
+    if manager_ok and manager and type(manager.release_objects_table)=="table" then
+        for id in pairs(manager.release_objects_table) do inspect(client(id)) end
+    end
+    if type(level.iterate_nearest)=="function" then
+        local ok,why=pcall(level.iterate_nearest,origin,radius,inspect)
+        if not ok then log_once("native_scan_error","[ADB corpse blast] native_scan_error: %s",tostring(why)) end
+    end
+    table.sort(targets,function(a,b) return a.distance<b.distance or a.distance==b.distance and a.id<b.id end)
+    log(job.key.." snapshot selected="..#targets.." checked="..stats.checked.." dead="..stats.dead..
+        " outside="..stats.range.." identity="..stats.identity.." errors="..stats.errors.." claimed="..stats.claimed)
+    flush_log()
+    return targets,stats
+end
+local function execute(context)
+    local key=context.blast_key
+    if receipt(key) then return "executed",receipt(key) end
+    local o=context.blast_options;local actor=playable()
+    if not o or not actor then return "deferred","corpse_blast_waiting_for_gameplay" end
+    if #state.jobs>=MAX_JOBS then return "deferred","corpse_blast_pending_limit" end
+    local job={key=key,level=level.name(),damage_actor=o.damage_actor,damage_npcs=o.damage_npcs,
+        targets={},cursor=1,blown=0,removed=0,skipped=0,failed=0}
+    local targets,stats=collect_targets(actor:position(),o.radius,o.kind,job)
+    if #targets==0 and stats.errors>0 then
+        -- A failed scan is not a successful empty scan. Nothing was scheduled;
+        -- report the failure over IPC instead of silently claiming execution.
+        return "rejected","corpse_blast_target_scan_failed"
+    end
+    job.targets=targets
+    if #job.targets==0 then remember(key,"corpse_blast_no_eligible_bodies");persist();return "executed","corpse_blast_no_eligible_bodies" end
+    state.jobs[#state.jobs+1]=job
+    for _,r in ipairs(job.targets) do claims[claim_key(job,r)]=true end
+    persist()
+    return "executed","corpse_blast_scheduled_"..#job.targets
+end
+
+local function is_bolt(item,section)
+    if clsid and clsid.obj_bolt and type(item.clsid)=="function" then return item:clsid()==clsid.obj_bolt end
+    return section=="bolt" or section=="bolt_bullet"
+end
+local function children(body)
+    local ok,ids,reason=pcall(function()
+        local ids={}
+        for id in life():get_children(body) do
+            local item=server(id)
+            if item then ids[#ids+1]=id
+            else
+                -- Match stock cleanup's client-only bolt exception. Unknown
+                -- children never justify deleting an InventoryOwner underneath them.
+                local o=client(id);local parent=o and o:parent()
+                local section=o and o:section()
+                if not o or not parent or parent:id()~=body.id or not is_bolt(o,section) or
+                    anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(id)) or IsItem("quest",section) then
+                    return nil,"inventory_child_unavailable_"..id
+                end
+            end
+        end
+        table.sort(ids);return ids
+    end)
+    if not ok then return nil,"inventory_scan_failed" end
+    return ids,reason
+end
+local function item_protected(item)
+    local ok,keep=pcall(function()
+        return anomaly_donation_bridge_common.meaningful_story_id(get_object_story_id(item.id)) or
+            IsItem("quest",item:section_name())
+    end)
+    return not ok or keep==true
+end
+local function release_helper(r)
+    local h=r.helper_id and state.helpers[tostring(r.helper_id)]
+    if h and h.name==r.helper_name and not h.fired then h.cancelled=true end
+end
+local function restore_switches(r)
+    local se=server(r.id)
+    if not identity(se,r,true) then return end
+    if r.online_before~=nil then pcall(function() life():set_switch_online(r.id,r.online_before) end) end
+    if r.offline_before~=nil then pcall(function() life():set_switch_offline(r.id,r.offline_before) end) end
+end
+local function finish_body(job,r,phase,why)
+    if terminal(r) then return end
+    release_helper(r)
+    if phase~="done" then restore_switches(r) end
+    r.phase=phase;r.reason=why
+    r.loot=nil
+    claims[claim_key(job,r)]=nil
+    if phase=="done" then job.removed=job.removed+1
+    elseif phase=="skipped" then job.skipped=job.skipped+1
+    else job.failed=job.failed+1 end
+    if why then log(job.key.." body="..r.id.." "..why) end
+end
+local function body_client(job,r)
+    local se=server(r.id)
+    if not identity(se,r,true) then finish_body(job,r,"skipped","body_missing_or_changed");return end
+    local object=client(r.id)
+    if not object then
+        if not dead_identity(se,r,true) then finish_body(job,r,"skipped","offline_body_alive") end
+        return -- temporarily offline: retain the saved target
+    end
+    if not dead_identity(object,r,false) or kind_of(object)~=r.kind then
+        finish_body(job,r,"skipped","body_identity_changed");return
+    end
+    if protected(object) then finish_body(job,r,"skipped","protected_body");return end
+    return object,se
+end
+local function begin_check(job,r,se)
+    local ids,why=children(se)
+    if not ids then finish_body(job,r,"failed",why);return end
+    r.loot={};r.check_index=1;r.phase="checking"
+    for _,id in ipairs(ids) do
+        local item=server(id)
+        if not item then finish_body(job,r,"failed","inventory_changed_during_scan");return end
+        r.loot[#r.loot+1]=ref(item,true)
+    end
+end
+local function owned_item(body,item,known)
+    local current=server(item.id)
+    if not identity(current,item,true) then return end
+    local parent=current.parent_id;local visited={}
+    for _=1,32 do
+        if parent==body.id then return current end
+        if not integer(parent,0,65534) or parent==item.id or visited[parent] then return end
+        visited[parent]=true
+        local owner=server(parent)
+        if not identity(owner,known[parent],true) then return end
+        parent=owner.parent_id
+    end
+end
+local function own_source(h)
+    local object=h and h.draftsman
+    if not object then return end
+    local ok,r=pcall(function()
+        local r=state.helpers[tostring(object:id())]
+        return r and r.fired and identity(object,r,false) and r or nil
+    end)
+    return ok and r or nil
+end
+local function block_hit(hit,flags)
+    hit.power=0;hit.impulse=0
+    if type(flags)=="table" then flags.ret_value=false end
+end
+local function actor_hit(h,_,flags)
+    local source=own_source(h)
+    if source and not source.damage_actor then block_hit(h,flags) end
+end
+local function creature_hit(object,h,_,flags)
+    local source=own_source(h)
+    if source and not source.damage_npcs and kind_of(object) then block_hit(h,flags) end
+end
+local function helper_pickup(object,flags)
+    local ok,owned=pcall(function()
+        local r=state.helpers[tostring(object:id())]
+        return identity(object,r,false)
+    end)
+    if ok and owned and type(flags)=="table" then flags.ret_value=false;pickup_flags_to_reset=flags end
+end
+local function apply_damage(job,body,source)
+    if not job.damage_actor and not job.damage_npcs then return end
+    local p=source:position();local seen={}
+    local function hurt(target)
+        local ok,why=pcall(function()
+            if not target or seen[target:id()] then return end
+            seen[target:id()]=true
+            local is_actor=target:id()==db.actor:id()
+            if is_actor and not job.damage_actor or not is_actor and (not job.damage_npcs or not kind_of(target)) then return end
+            -- Native Alive() on an item/light/prop logs a stack trace instead
+            -- of throwing. Classify first; pcall cannot suppress that log spam.
+            if not target:alive() then return end
+            local q=target:position();local distance=p:distance_to_sqr(q)
+            if not finite(distance) or distance>=BLAST_RADIUS*BLAST_RADIUS then return end
+            local bone,fallback
+            for index,name in pairs(type(target.list_bones)=="function" and target:list_bones(false) or {}) do
+                if type(name)=="string" and name~="" then
+                    fallback=(index~=0 and fallback==nil) and name or fallback
+                    if name:lower():find("spine",1,true) then bone=name;break end
+                end
+            end
+            bone=bone or fallback
+            if not bone or type(target.hit)~="function" then return end
+            local length=math.sqrt(distance);local power=1-length/BLAST_RADIUS
+            local direction=length>0.01 and vector():set((q.x-p.x)/length,(q.y-p.y)/length,(q.z-p.z)/length) or vector():set(0,1,0)
+            local h=hit();h.type=hit.explosion;h.power=BLAST_POWER*power;h.impulse=BLAST_IMPULSE*power
+            h.direction=direction;h.bone=bone;h.weapon_id=65535
+            -- Stock ph_hit uses the affected object as draftsman for an
+            -- environmental hit. GE_HIT/GE_DIE are asynchronous: the source
+            -- corpse may already be gone when the server processes death.
+            -- A self source stays valid for as long as the victim exists and
+            -- never credits an NPC's death to the hero. Keep native armour,
+            -- health and death handling; do not force kill() or write HP.
+            h.draftsman=target
+            target:hit(h)
+        end)
+        if not ok then log("rupture_damage_failed_"..body.id.."_"..tostring(why):gsub("[\r\n]"," ")) end
+        return false
+    end
+    hurt(db.actor)
+    for _,entry in pairs(db.storage) do hurt(type(entry)=="table" and entry.object or nil) end
+    if type(level.iterate_nearest)=="function" then pcall(level.iterate_nearest,p,BLAST_RADIUS,hurt) end
+end
+local function step_body(job,r,elapsed,budget)
+    if terminal(r) then return budget end
+    if r.phase=="release_wait" then
+        r.wait_ms=math.max(0,(r.wait_ms or 0)-elapsed)
+        local se=server(r.id)
+        if not se then finish_body(job,r,"done");return budget end
+        if not identity(se,r,true) then finish_body(job,r,"failed","release_identity_changed");return budget end
+        local object=client(r.id)
+        if object and not dead_identity(object,r,false) or not object and not dead_identity(se,r,true) then
+            finish_body(job,r,"failed","release_body_alive");return budget
+        end
+        if object and protected(object) then finish_body(job,r,"skipped","protected_before_cleanup");return budget end
+        if se.online==false and not object and not (db.storage[r.id] and db.storage[r.id].object) then
+            if not r.release_sent then
+                r.release_sent=true
+                -- This is the stock corpse cleaner's whole-body path, including
+                -- its inventory. Never delete individual items or call clear(true)
+                -- on the global corpse list (that would touch unselected bodies).
+                -- Queue only AFTER net_destroy and drain the stock worker in this
+                -- same Lua call. Our request leaves no private ID-only stock queue
+                -- hanging across F9; the persistent identity-checked plan is ours.
+                local ok=pcall(function()
+                    safe_release_manager.release(se)
+                    safe_release_manager.execute_destroy_callback()
+                end)
+                if not ok then finish_body(job,r,"failed","stock_body_cleanup_failed") end
+            end
+        elseif not r.offline_sent then
+            r.offline_sent=true
+            if r.online_before==nil then
+                r.online_before=true;pcall(function() r.online_before=se:can_switch_online() end)
+                if type(r.online_before)~="boolean" then r.online_before=true end
+            end
+            if r.offline_before==nil then
+                r.offline_before=true;pcall(function() r.offline_before=se:can_switch_offline() end)
+                if type(r.offline_before)~="boolean" then r.offline_before=true end
+            end
+            local ok=pcall(function()
+                life():set_switch_online(r.id,false);life():set_switch_offline(r.id,true);se:switch_offline()
+            end)
+            if not ok then finish_body(job,r,"failed","switch_offline_failed") end
+        end
+        if not terminal(r) and r.wait_ms==0 then finish_body(job,r,"failed","body_release_timeout") end
+        return budget
+    end
+    local object,se=body_client(job,r)
+    if not object then return budget end
+    r.wait_ms=math.max(0,(r.wait_ms or 0)-elapsed)
+    if r.phase=="checking" then
+        -- Read-only quest checks, including nested containers. Stock cleanup
+        -- itself removes the complete body/inventory in its native release.
+        local known={};for _,item in ipairs(r.loot) do known[item.id]=item end
+        while budget>0 and r.check_index<=#r.loot do
+            local item=r.loot[r.check_index];local current=owned_item(r,item,known)
+            if current then
+                if item_protected(current) then finish_body(job,r,"skipped","protected_inventory");return budget-1 end
+                local nested,why=children(current)
+                if not nested then finish_body(job,r,"failed",why);return budget-1 end
+                for _,id in ipairs(nested) do
+                    if id==r.id or id==item.id then finish_body(job,r,"failed","inventory_cycle");return budget-1 end
+                    local child=server(id)
+                    if not child then finish_body(job,r,"failed","inventory_child_missing");return budget-1 end
+                    if not identity(child,known[id],true) then
+                        if #r.loot>=65535 then finish_body(job,r,"failed","inventory_size_invalid");return budget-1 end
+                        local added=ref(child,true);r.loot[#r.loot+1]=added;known[id]=added
+                    end
+                end
+            end
+            r.check_index=r.check_index+1;budget=budget-1
+        end
+        if r.check_index>#r.loot then
+            r.phase="blast";r.wait_ms=WAIT_MS
+        end
+    elseif r.phase=="blast" then
+        if state.cooldown_ms>0 then return budget end
+        -- Detect inventory changes while waiting for the shared slot. These
+        -- checks do not materialize random loot or remove a single owned item.
+        local ids,scan_error=children(se)
+        if not ids then finish_body(job,r,"failed",scan_error);return budget end
+        local known={};for _,item in ipairs(r.loot) do known[item.id]=item end
+        for _,id in ipairs(ids) do
+            if not identity(server(id),known[id],true) then begin_check(job,r,se);return budget end
+        end
+        -- A single atomic attempt per saved body: the same native meatgrinder
+        -- tearing_particles + sound as the controller's "Разорвать внутренности".
+        -- Mark before submission, so an uncertain native result is not replayed.
+        r.blasted=true;r.phase="release_wait";r.wait_ms=WAIT_MS
+        state.cooldown_ms=INTERVAL_MS
+        local played,why=spawn_rupture(object,time_global())
+        if not played then finish_body(job,r,"failed",why);return budget end
+        job.blown=job.blown+1
+        apply_damage(job,r,object)
+    end
+    return budget
+end
+local function prune_helpers(here,elapsed)
+    local budget=4
+    for key,h in pairs(state.helpers) do
+        local se=server(h.id)
+        if not identity(se,h,true) then
+            -- Keep a fired source through its short hit-callback grace period
+            -- on this level even if native grenade destruction removed ALife.
+            if h.fired and h.level==here then
+                h.remaining_ms=math.max(0,h.remaining_ms-elapsed)
+                if h.remaining_ms==0 then state.helpers[key]=nil end
+            else state.helpers[key]=nil end
+        elseif h.level==here then
+            if h.fired then h.remaining_ms=math.max(0,h.remaining_ms-elapsed) end
+            if (h.cancelled or h.fired and h.remaining_ms==0) and not h.release_sent and budget>0 then
+                h.release_sent=true;budget=budget-1
+                -- Only the owned blast helper is released here. Corpses and
+                -- their contents always go through safe_release_manager above.
+                local ok=pcall(function() life():release(se,true) end)
+                if not ok then log("helper_release_failed_"..h.id) end
+            end
+        end
+    end
+end
+local function complete_jobs()
+    for index=#state.jobs,1,-1 do
+        local job=state.jobs[index]
+        if job.removed+job.skipped+job.failed==#job.targets then
+            local detail="corpse_blast_finished_removed_"..job.removed.."_blown_"..job.blown..
+                "_skipped_"..job.skipped.."_failed_"..job.failed
+            remember(job.key,detail);log(job.key.." "..detail);flush_log()
+            table.remove(state.jobs,index)
+        end
+    end
+end
+local function activate_targets(here)
+    local count=0
+    for _,entry in ipairs(active) do
+        if entry.job.level==here and not terminal(entry.body) then count=count+1 end
+    end
+    local inspected=0
+    for _,job in ipairs(state.jobs) do
+        if job.level==here and count<MAX_ACTIVE then
+            local tried=0
+            while count<MAX_ACTIVE and tried<#job.targets and inspected<32 do
+                if job.cursor>#job.targets then job.cursor=1 end
+                local r=job.targets[job.cursor];job.cursor=job.cursor+1;tried=tried+1;inspected=inspected+1
+                if r.phase=="queued" then
+                    local object=body_client(job,r)
+                    if object then
+                        active[#active+1]={job=job,body=r};count=count+1
+                        begin_check(job,r,server(r.id))
+                    end
+                end
+            end
+        end
+    end
+end
+local function update()
+    if pickup_flags_to_reset then pickup_flags_to_reset.ret_value=true;pickup_flags_to_reset=nil end
+    local _,frame,here=playable()
+    if frame==nil then suspend();return end
+    if frame==last_frame then return end
+    last_frame=frame
+    local now=time_global()
+    update_fx(now)
+    ready_frames=ready_frames+1
+    if not last_clock or ready_frames<3 then last_clock=now;return end
+    local elapsed=math.max(0,math.floor(now-last_clock));last_clock=now
+    state.cooldown_ms=math.max(0,state.cooldown_ms-elapsed)
+    prune_helpers(here,elapsed)
+    local budget=CHECKS_PER_FRAME
+    for _,entry in ipairs(active) do
+        if entry.job.level==here and not terminal(entry.body) then
+            local ok,next_budget=pcall(step_body,entry.job,entry.body,elapsed,budget)
+            if not ok then
+                log("body_step_failed_"..tostring(next_budget):gsub("[\r\n]"," "))
+                finish_body(entry.job,entry.body,"failed","body_step_failed")
+            else budget=next_budget end
+        end
+    end
+    for index=#active,1,-1 do if terminal(active[index].body) then table.remove(active,index) end end
+    activate_targets(here);complete_jobs();persist()
+end
+
+function on_game_start()
+    if registered then return end
+    registered=true;read_saved()
+    local ok,why=anomaly_donation_bridge_registry.register(ID,{
+        can_execute=can_execute,execute=execute,is_supported=supported,
+        on_game_load=read_saved,on_level_changing=function() stop_fx();loading=true;suspend() end,
+        on_effect_save=function() persist();suspend();return true end
+    })
+    if not ok then log("registration_failed_"..tostring(why));return end
+    -- Frame-driven background work survives an app disconnect and does not
+    -- change the global bridge's 100ms tick or acquire its blocking lease.
+    RegisterScriptCallback("actor_on_update",update)
+    RegisterScriptCallback("actor_on_before_hit",actor_hit)
+    RegisterScriptCallback("npc_on_before_hit",creature_hit)
+    RegisterScriptCallback("monster_on_before_hit",creature_hit)
+    RegisterScriptCallback("actor_on_item_before_pickup",helper_pickup)
+    RegisterScriptCallback("save_state",function(data)
+        if not invalid_saved then
+            local target=data or storage();if target then target[SAVE]=copy(state) end
+        end
+    end)
+    RegisterScriptCallback("actor_on_net_destroy",function() stop_fx();loading=true;suspend() end)
+    for _,name in ipairs({"on_before_load_input","main_menu_on_init"}) do RegisterScriptCallback(name,function() stop_fx();suspend() end) end
+end

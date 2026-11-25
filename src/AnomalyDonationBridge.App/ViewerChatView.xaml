@@ -83,13 +83,26 @@
         </DockPanel>
         <Border x:Name="ConnectionsPanel" Grid.Row="1" Background="{DynamicResource SurfaceBrush}"
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="3" Padding="12" Margin="0,0,0,10">
-            <Expander x:Name="ConnectionsExpander" Header="Подключения" Style="{StaticResource ChatExpanderStyle}">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Expander x:Name="ConnectionsExpander" Header="Подключения" Style="{StaticResource ChatExpanderStyle}" Margin="0,0,8,0">
               <StackPanel>
                 <StackPanel x:Name="ConnectionRows"/>
                 <TextBlock Text="Публичные чаты читаются анонимно — аккаунт и свой API-ключ не нужны."
                            Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
               </StackPanel>
             </Expander>
+            <Button x:Name="ChatSettingsButton" Grid.Column="1" VerticalAlignment="Top" Width="32" Height="30" Padding="0"
+                    Style="{StaticResource GhostButtonStyle}" ToolTip="Настройки чата" Click="ChatSettings_Click"
+                    AutomationProperties.Name="Настройки чата">
+                <local:VectorIcon Glyph="&#xE713;" Width="15" Height="15"/>
+                <Button.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem x:Name="ShowTimestampsMenuItem" Header="Отображать временные метки" IsCheckable="True" Click="ShowTimestamps_Click"/>
+                    </ContextMenu>
+                </Button.ContextMenu>
+            </Button>
+          </Grid>
         </Border>
         <Grid Grid.Row="2">
             <Border Background="{DynamicResource InputBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="3">
@@ -109,10 +122,11 @@
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Grid ToolTip="{Binding Hint}">
+                            <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="23"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <local:ChatPlatformIcon Platform="{Binding Platform}" Width="16" Height="16" VerticalAlignment="Top" Margin="0,2,0,0"/>
                                 <TextBlock Grid.Column="1" TextWrapping="Wrap" Foreground="{DynamicResource TextBrush}" LineHeight="20">
+                                    <Run Text="{Binding TimestampText, Mode=OneWay}" Foreground="{DynamicResource MutedBrush}"/>
                                     <Run Text="{Binding Author, Mode=OneWay}" Foreground="{Binding NameBrush}" FontWeight="SemiBold"/><Run Text=": "/><Run Text="{Binding Text, Mode=OneWay}"/>
                                 </TextBlock>
                             </Grid>

@@ -73,6 +73,8 @@ public sealed class VotingRound
     public bool AllowYouTubeVoteChange { get; set; }
     public Dictionary<string, YouTubeVotingParticipant> YouTubeParticipants { get; set; } = new(StringComparer.Ordinal);
     public HashSet<string> SeenYouTubeMessageIds { get; set; } = new(StringComparer.Ordinal);
+    public long ChatRevision { get; set; }
+    public DateTimeOffset? ChatRulesChangedAt { get; set; }
     public VotingPhase Phase { get; set; }
     public string ProfileId { get; set; } = string.Empty;
     public DateTimeOffset? Deadline { get; set; }
@@ -111,6 +113,7 @@ public sealed class VotingRound
         YouTubeVoteWeight = YouTubeVoteWeight, AllowYouTubeVoteChange = AllowYouTubeVoteChange,
         YouTubeParticipants = YouTubeParticipants.ToDictionary(pair => pair.Key, pair => pair.Value.Clone(), StringComparer.Ordinal),
         SeenYouTubeMessageIds = new(SeenYouTubeMessageIds, StringComparer.Ordinal),
+        ChatRevision = ChatRevision, ChatRulesChangedAt = ChatRulesChangedAt,
         DrawnAt = DrawnAt, SuccessorStarted = SuccessorStarted,
         ProfileId = ProfileId, Deadline = Deadline, PausedAt = PausedAt, ClosedAt = ClosedAt,
         Intervals = Intervals.Select(interval => interval.Clone()).ToList(),
@@ -124,6 +127,25 @@ public sealed class VotingRound
         DeliveryNote = DeliveryNote, Notice = Notice
     };
 
+    // Published rounds are immutable. A chat transaction owns its counters and
+    // changed participants; preset definitions and archive objects can be shared.
+    internal Queue<string>? ChatReplayOrder { get; set; }
+
+    internal VotingRound CloneForChat()
+    {
+        var copy = (VotingRound)MemberwiseClone();
+        copy.YouTubeParticipants = new(YouTubeParticipants, StringComparer.Ordinal);
+        copy.SeenYouTubeMessageIds = new(SeenYouTubeMessageIds, StringComparer.Ordinal);
+        copy.ChatReplayOrder = ChatReplayOrder is null ? null : new(ChatReplayOrder);
+        copy.Options = Options.Select(option => new VotingOption
+        {
+            Id = option.Id, Enabled = option.Enabled, Command = option.Command, Preset = option.Preset,
+            Amount = option.Amount, AmountsByCurrency = new(option.AmountsByCurrency, StringComparer.Ordinal)
+        }).ToList();
+        copy.Intervals = Intervals.Select(interval => interval.Clone()).ToList();
+        return copy;
+    }
+
     public VotingRound ResultSnapshot()
     {
         var result = Clone();
@@ -135,7 +157,8 @@ public sealed class VotingRound
 
 public sealed class VotingDocument
 {
-    public int SchemaVersion { get; set; } = 7;
+    public int SchemaVersion { get; set; } = 8;
+    public string ChatJournalId { get; set; } = "";
     public string ActiveProfileId { get; set; } = string.Empty;
     public bool HasCollections { get; set; } = true;
     public VotingRound Current { get; set; } = new();
@@ -144,7 +167,7 @@ public sealed class VotingDocument
     public VotingAutomation Automation { get; set; } = new();
     public List<VotingRound> PreviousRounds { get; set; } = [];
     public HashSet<string> SeenDonationIds { get; set; } = new(StringComparer.Ordinal);
-    public VotingDocument Clone() => new() { SchemaVersion = SchemaVersion, ActiveProfileId = ActiveProfileId, HasCollections = HasCollections, Current = Current.Clone(),
+    public VotingDocument Clone() => new() { SchemaVersion = SchemaVersion, ChatJournalId = ChatJournalId, ActiveProfileId = ActiveProfileId, HasCollections = HasCollections, Current = Current.Clone(),
         OtherCollections = OtherCollections.Select(round => round.Clone()).ToList(), CollectionOrder = [.. CollectionOrder],
         Automation = Automation.Clone(),
         PreviousRounds = PreviousRounds.Select(round => round.Clone()).ToList(),
@@ -291,7 +314,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
     public async Task InitializeAsync(CancellationToken token = default)
     {
         var document = await store.LoadAsync(token).ConfigureAwait(false);
-        if (document.SchemaVersion is not (1 or 2 or 3 or 4 or 5 or 6 or 7) || document.Current is null || document.SeenDonationIds is null || document.ActiveProfileId is null ||
+        if (document.SchemaVersion is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8) || document.Current is null || document.SeenDonationIds is null || document.ActiveProfileId is null ||
             document.OtherCollections is null || document.CollectionOrder is null || document.Automation is null ||
             !Enum.IsDefined(document.Automation.Order) || !Enum.IsDefined(document.Automation.GameHudPosition) ||
             !Enum.IsDefined(document.Automation.GameHudFormat) || document.Automation.GameHudX is < 0 or > 1 ||
@@ -371,6 +394,19 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             document.SchemaVersion = 7;
             await store.SaveAsync(document, token).ConfigureAwait(false);
         }
+        if (document.SchemaVersion < 8)
+        {
+            // Votes and donor accounting are retained. Old non-command IDs are
+            // disposable once the old rules' live-message boundary is sealed.
+            foreach (var round in AllCollections(document))
+            {
+                round.ChatRulesChangedAt = _now();
+                VotingChatReplay.Trim(round);
+            }
+            CompactArchivedChatReplay(document);
+            document.SchemaVersion = 8;
+            await store.SaveAsync(document, token).ConfigureAwait(false);
+        }
         Volatile.Write(ref _document, document);
         await TickAsync(token).ConfigureAwait(false);
     }
@@ -395,6 +431,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             next.Command = VotingRules.NormalizeCommand(next.Command);
             return next;
         }).ToList();
+        if (ChatRulesDiffer(round, draft, options)) round.ChatRulesChangedAt = now;
         if (round.Phase != VotingPhase.Draft)
         {
             // Only an actual duration edit starts a fresh countdown. A paused
@@ -672,7 +709,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         var previous = original.Clone();
         var now = _now(); CloseInterval(previous, now); document.PreviousRounds.Add(previous);
         var next = previous.Clone(); next.Id = Guid.NewGuid().ToString("N");
-        next.YouTubeParticipants.Clear(); next.SeenYouTubeMessageIds.Clear();
+        ResetChatLedger(next);
         foreach (var option in next.Options) { option.Amount = 0; option.AmountsByCurrency.Clear(); }
         next.WinnerOptionId = string.Empty; next.WinnerFraction = 0; next.DeliveryAccepted = next.DeliveryCancelled = false; next.DeliveryNote = string.Empty; next.DrawnAt = null;
         ClearFrozenResult(next);
@@ -800,7 +837,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         }
         document.PreviousRounds.Add(target.Clone());
         var next = target.Clone(); next.Id = Guid.NewGuid().ToString("N");
-        next.YouTubeParticipants.Clear(); next.SeenYouTubeMessageIds.Clear();
+        ResetChatLedger(next);
         foreach (var option in next.Options) { option.Amount = 0; option.AmountsByCurrency.Clear(); }
         next.WinnerOptionId = string.Empty; next.WinnerFraction = 0; next.DeliveryAccepted = next.DeliveryCancelled = false; next.DeliveryNote = string.Empty;
         ClearFrozenResult(next);
@@ -857,8 +894,21 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
 
     private static bool Evaluate(VotingRound round, DateTimeOffset now)
     {
-        if (round.Phase is VotingPhase.Draft or VotingPhase.Drawn) return false;
+        var (complete, timeOver, moneyMet) = CompletionState(round, now);
+        if (!complete) return false;
         var previous = round.Phase;
+        var success = round.Total > 0 && (!(round.MoneyGoal && round.TimeGoal && round.Condition == VotingCondition.All) || moneyMet);
+        round.Phase = success ? VotingPhase.Ready : VotingPhase.Failed;
+        round.ClosedAt ??= timeOver ? round.Deadline : now;
+        CloseInterval(round, round.ClosedAt!.Value);
+        round.Notice = success ? "Голосование завершено. Нажмите «Крутить»." : round.Total == 0
+            ? "Голосование завершено без взносов; рулетка недоступна." : "За отведённое время сумма не собрана; рулетка недоступна.";
+        return previous != round.Phase;
+    }
+
+    private static (bool Complete, bool TimeOver, bool MoneyMet) CompletionState(VotingRound round, DateTimeOffset now)
+    {
+        if (round.Phase is VotingPhase.Draft or VotingPhase.Drawn) return (false, false, false);
         var timeOver = round.TimeGoal && round.Deadline is { } deadline && now >= deadline;
         if (round.Phase == VotingPhase.Paused) timeOver = false;
         var moneyMet = round.MoneyGoal && round.Total >= round.Target;
@@ -868,14 +918,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
         // Completed rounds remain closed while delayed in-window donations can
         // turn an unsuccessful ALL round into READY before manual drawing.
         if (round.ClosedAt is not null) complete = true;
-        if (!complete) return false;
-        var success = round.Total > 0 && (!(round.MoneyGoal && round.TimeGoal && round.Condition == VotingCondition.All) || moneyMet);
-        round.Phase = success ? VotingPhase.Ready : VotingPhase.Failed;
-        round.ClosedAt ??= timeOver ? round.Deadline : now;
-        CloseInterval(round, round.ClosedAt!.Value);
-        round.Notice = success ? "Голосование завершено. Нажмите «Крутить»." : round.Total == 0
-            ? "Голосование завершено без взносов; рулетка недоступна." : "За отведённое время сумма не собрана; рулетка недоступна.";
-        return previous != round.Phase;
+        return (complete, timeOver, moneyMet);
     }
 
     private async Task MutateAsync(Func<VotingDocument, bool> change, CancellationToken token)
@@ -891,6 +934,7 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             {
                 var draft = _document.Clone();
                 if (!change(draft)) return false;
+                CompactArchivedChatReplay(draft);
                 if (AllCollections(draft).Count(round => round.IsActive) > 1 || AllCollections(draft).Count(round => round.Phase == VotingPhase.Collecting) > 1 ||
                     draft.Automation.Enabled != AllCollections(draft).Any(round => round.IsActive))
                     throw new InvalidOperationException("Одновременно может работать только одно голосование.");
@@ -900,7 +944,12 @@ public sealed partial class VotingCoordinator(IVotingStore store, Func<DateTimeO
             }, token).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
-        if (changed && Changed is { } handlers)
+        if (changed) NotifyChanged();
+    }
+
+    private void NotifyChanged()
+    {
+        if (Changed is { } handlers)
             foreach (Action handler in handlers.GetInvocationList())
                 try { handler(); } catch { /* Presentation must not roll back durable accounting. */ }
     }

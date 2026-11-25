@@ -122,3 +122,23 @@ frags_r = 0
 destroy_time = 60000
 explode_duration = 1
 grenade_remove_time = 10000
+
+; Owned by explode_corpses. Source-specific callbacks gate actor/creature hits.
+; All visual/audio/blast settings are inherited from the merged game's RGD-5.
+[adb_corpse_blast]:grenade_rgd5
+can_take = false
+can_trade = false
+cost = 0
+frags = 0
+frag_hit = 0
+frags_r = 0
+destroy_time = 2147483647
+explode_duration = 1
+grenade_remove_time = 10000
+
+[adb_battle_royale_participant]:stalker_silent
+character_profile = actor_visual_stalker
+can_select_items = off
+going_item_detect_probability = 0
+search_item_detect_probability = 0
+

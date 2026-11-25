@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -116,12 +117,18 @@ public sealed class JsonLineHistoryStore : IEventHistorySink
 
     public async Task<IReadOnlyList<EventHistoryEntry>> LoadRecentAsync(int maximum = 500, CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(_paths.HistoryFile))
-        {
-            return [];
-        }
-
         var queue = new Queue<EventHistoryEntry>(Math.Max(1, maximum));
+        await foreach (var entry in ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            queue.Enqueue(entry);
+            if (queue.Count > maximum) queue.Dequeue();
+        }
+        return queue.Reverse().ToList();
+    }
+
+    public async IAsyncEnumerable<EventHistoryEntry> ReadAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(_paths.HistoryFile)) yield break;
         using var stream = new FileStream(_paths.HistoryFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var reader = new StreamReader(stream, Encoding.UTF8, true);
         while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
@@ -131,27 +138,15 @@ public sealed class JsonLineHistoryStore : IEventHistorySink
                 continue;
             }
 
-            try
-            {
-                var entry = JsonSerializer.Deserialize<EventHistoryEntry>(line, JsonDefaults.JsonLinesOptions);
-                if (entry is null)
-                {
-                    continue;
-                }
-
-                queue.Enqueue(entry);
-                while (queue.Count > maximum)
-                {
-                    queue.Dequeue();
-                }
-            }
+            EventHistoryEntry? entry;
+            try { entry = JsonSerializer.Deserialize<EventHistoryEntry>(line, JsonDefaults.JsonLinesOptions); }
             catch (JsonException)
             {
                 // A torn final JSONL line after a crash is ignored; previous records remain usable.
+                continue;
             }
+            if (entry is not null) yield return entry;
         }
-
-        return queue.Reverse().ToList();
     }
 
     public async Task<EventHistoryEntry?> FindCommandSnapshotAsync(
@@ -161,35 +156,14 @@ public sealed class JsonLineHistoryStore : IEventHistorySink
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(donationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(commandId);
-        if (!File.Exists(_paths.HistoryFile))
-        {
-            return null;
-        }
-
         EventHistoryEntry? latest = null;
-        using var stream = new FileStream(_paths.HistoryFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        using var reader = new StreamReader(stream, Encoding.UTF8, true);
-        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        await foreach (var entry in ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (string.IsNullOrWhiteSpace(line))
+            if (entry.State is DispatchState.Queued or DispatchState.Sent &&
+                string.Equals(entry.DonationId, donationId, StringComparison.Ordinal) &&
+                string.Equals(entry.CommandId, commandId, StringComparison.Ordinal))
             {
-                continue;
-            }
-
-            try
-            {
-                var entry = JsonSerializer.Deserialize<EventHistoryEntry>(line, JsonDefaults.JsonLinesOptions);
-                if (entry is not null &&
-                    entry.State is DispatchState.Queued or DispatchState.Sent &&
-                    string.Equals(entry.DonationId, donationId, StringComparison.Ordinal) &&
-                    string.Equals(entry.CommandId, commandId, StringComparison.Ordinal))
-                {
-                    latest = entry;
-                }
-            }
-            catch (JsonException)
-            {
-                // Match LoadRecentAsync: a damaged line must not discard earlier snapshots.
+                latest = entry;
             }
         }
 

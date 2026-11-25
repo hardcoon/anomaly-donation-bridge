@@ -1111,6 +1111,8 @@ local function initialize()
     end)
     RegisterScriptCallback("actor_on_net_destroy",function() az_hud().hide();cinema_clear() end)
     RegisterScriptCallback("actor_on_before_death",function(who,flags)
+        local battle=rawget(_G,"anomaly_donation_bridge_effect_hardcoon_adb_battle_royale")
+        if battle and battle.in_combat() then return end
         if azazel_before_death then
             local ok,reason=pcall(azazel_before_death,who,flags)
             if not ok then log("Azazel death callback: "..tostring(reason)) end

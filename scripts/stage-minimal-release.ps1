@@ -81,6 +81,18 @@ if (-not (Test-Path -LiteralPath $ReadmePath -PathType Leaf)) { throw 'Release R
 if (-not [string]::IsNullOrWhiteSpace($ReleaseNotesPath) -and -not (Test-Path -LiteralPath $ReleaseNotesPath -PathType Leaf)) { throw 'Release notes are missing.' }
 
 if (Test-Path -LiteralPath $releaseRoot) {
+    # Fail before deleting anything if the old portable app/observer is open.
+    # Check file locks rather than process paths, which may use a junction alias.
+    foreach ($binary in Get-ChildItem -LiteralPath $releaseRoot -File -Recurse -Force |
+        Where-Object { $_.Extension -in @('.exe','.dll') }) {
+        try {
+            $probe = [IO.File]::Open($binary.FullName, [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $probe.Dispose()
+        } catch {
+            throw "Release folder is in use or not writable; close the running app before staging: $($binary.FullName)"
+        }
+    }
     Remove-Item -LiteralPath $releaseRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
@@ -108,7 +120,7 @@ foreach ($tree in @($stageRoot)) {
         }
     }
 }
-$privateNames = @('settings.json','secrets.dpapi','history.jsonl','processed-donations.jsonl','pending-donations.json','pending-queue.json','voting.json','voting.json.bak','voting.json.tmp','bridge.log','crash-recovery.owner')
+$privateNames = @('settings.json','secrets.dpapi','history.jsonl','processed-donations.jsonl','pending-donations.json','pending-queue.json','voting.json','voting.json.bak','voting.json.tmp','voting-chat.wal','voting.before-chat-v8.json','bridge.log','crash-recovery.owner')
 foreach ($releaseFile in Get-ChildItem -LiteralPath $stageRoot -Recurse -File -Force) {
     if ($releaseFile.Name -in $privateNames -or $releaseFile.Extension -in @('.dmp','.pfx','.p12','.pem','.key','.log') -or
         $releaseFile.Name -eq 'AGENTS.md') { throw "Private/runtime file in release: $($releaseFile.Name)" }

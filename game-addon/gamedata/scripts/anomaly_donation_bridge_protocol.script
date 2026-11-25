@@ -139,6 +139,15 @@ function parse_command(fields)
 	end
 	local params, params_error = parse_params(fields[7])
 	if params == nil then return nil, params_error, command_id end
+	local replay_by, replay_from = params.adb_replay_by, params.adb_replay_from
+	params.adb_replay_by, params.adb_replay_from = nil, nil
+	if replay_by ~= nil or replay_from ~= nil then
+		if type(replay_by) ~= "string" or type(replay_from) ~= "string" or
+			#replay_by == 0 or #replay_from == 0 or #replay_by > 384 or #replay_from > 384 or
+			replay_by:find("[%z\1-\31\127]") or replay_from:find("[%z\1-\31\127]") then
+			return nil, "replay_names_invalid", command_id
+		end
+	end
 	local donor_name, action_name, batch_index, batch_size, save_flags = "", "", 1, 1, 0
 	local save_retention = 50
 	if #fields >= 12 then
@@ -184,6 +193,8 @@ function parse_command(fields)
 		amount_minor = amount_minor,
 		currency = currency,
 		donor_name = donor_name,
+		replay_by = replay_by,
+		replay_from = replay_from,
 		action_name = action_name,
 		batch_index = batch_index,
 		batch_size = batch_size,

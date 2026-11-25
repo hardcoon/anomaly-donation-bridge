@@ -235,6 +235,7 @@ public partial class CompactMainView : UserControl
     {
         var menu = new ContextMenu();
         if (_model is null) return menu;
+        if (MainWindow.BattleCancelItem(_model, action) is { } cancel) menu.Items.Add(cancel);
         if (action.IsBuiltInPreset)
             menu.Items.Add(CommandItem("В пользовательские", _model.SaveAsUserPresetCommand, action));
         else

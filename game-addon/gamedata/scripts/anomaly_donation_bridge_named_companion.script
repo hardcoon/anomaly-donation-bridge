@@ -580,7 +580,7 @@ local function companion_execute(context)
 		if type(member.set_character_name) ~= "function" then
 			error("companion_name_api_unavailable")
 		end
-		local encoded_name = anomaly_donation_bridge_common.game_text_cp1251(
+		local encoded_name = context.encoded_name or anomaly_donation_bridge_common.game_text_cp1251(
 			context.options.donor_name)
 		if encoded_name == nil or encoded_name == "" then
 			error("companion_name_encoding_invalid")
@@ -616,6 +616,7 @@ local function companion_execute(context)
 		squad:set_squad_relation("friend")
 		SIMBOARD:assign_squad_to_smart(squad, nil)
 		SIMBOARD:setup_squad_and_group(member)
+		if context.on_member_registered then context.on_member_registered(member) end
 		squad:refresh()
 		if context.options.community ~= nil then
 			apply_online_community(member.id, context.options.community)
@@ -630,7 +631,21 @@ local function companion_execute(context)
 	end
 
 	return "executed", "spawned_named_companion_" .. tostring(member_id) ..
-		(placement ~= "requested_ring" and "_" .. placement or "")
+		(placement ~= "requested_ring" and "_" .. placement or ""), member_id
+end
+
+function spawn_recruited(actor, section, name, on_member_registered)
+    local supported, reason = companion_supported({actor=actor}, false)
+    if not supported then return "deferred", reason end
+    if not anomaly_donation_bridge_catalog.is_available(section, "npc") then
+        return "rejected", "spawn_section_unsafe"
+    end
+    local community = player_faction(actor)
+    if not community then return "deferred", "companion_player_faction_unavailable" end
+    return companion_execute({actor=actor, on_member_registered=on_member_registered,
+        encoded_name=anomaly_donation_bridge_common.game_text_cp1251_lossy(name),
+        options={section=section, radius=25, donor_name=name, community=community,
+            show_3d_nick=false, nickname_key="PRIOR", incoming_damage_percent=100}})
 end
 
 -- NCF-003: default PageUp nickname toggle; explicit saved/rebound keys remain unchanged.

@@ -809,9 +809,7 @@ public sealed class ActionViewModel : ObservableObject
     public string Description => Model.Description;
     public string OriginLabel { get; private set; }
     public bool RequiresCatalog => CatalogRevisionEnforcement.RequiresCatalog(Model);
-    public bool IsSupported => _manifestAvailable && (!_catalogState.IsLive ||
-        ReferenceEquals(_catalogState.Capabilities, CapabilitySet.Empty) ||
-        _catalogState.Capabilities.SupportsHandler(HandlerId));
+    public bool IsSupported => _manifestAvailable && _catalogState.SupportsTemplate(HandlerId);
     private bool HasFreshCatalog => !RequiresCatalog ||
         _catalogState.IsLive &&
         _catalogState.Catalog is { } catalog &&

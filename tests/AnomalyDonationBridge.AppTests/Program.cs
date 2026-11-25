@@ -24,6 +24,10 @@ internal static class Program
         if (CrashWatchdog.TryRun(args, out var watchdogResult)) return watchdogResult;
         if (args is ["--named-observer-test", var helper]) return CrashRecoveryTests.RunNamedObserverAsync(helper).GetAwaiter().GetResult();
         if (args is ["--manual-replay-test"]) { ManualReplayTests.RunAsync().GetAwaiter().GetResult(); return 0; }
+        if (args is ["--file-presets-test"])
+        { FilePresetTests.RunAsync().GetAwaiter().GetResult(); Console.WriteLine("PASS file preset discovery and installation."); return 0; }
+        if (args is ["--donation-history-test"])
+        { DonationHistoryTests.RunAsync().GetAwaiter().GetResult(); Console.WriteLine("PASS donations from existing history."); return 0; }
         if (args.Length >= 2 && args[0] is "--crash-recovery-probe" or "--crash-loop-probe")
             return CrashRecoveryTests.RunProbe(args);
         if (args is ["--render-pda", var outputDirectory]) return PdaUiChecks.Run(outputDirectory);
@@ -82,6 +86,7 @@ internal static class Program
         await RunAsync("scenario editor order, hotkeys and persistence", SequenceEditorTests.RunAsync, failures);
         await RunAsync("selected active random editor, migration and persistence", SelectedRandomTests.RunAsync, failures);
         await RunAsync("file preset discovery and installation", FilePresetTests.RunAsync, failures);
+        await RunAsync("history-sourced repeat and battle recruitment", DonationHistoryTests.RunAsync, failures);
         await RunAsync("voting game UI acknowledgement and isolated winner delivery", VotingGameRuntimeTests.RunAsync, failures);
         await RunAsync("voting profiles, compact persistence and independent donation processing", VotingProfileRuntimeTests.RunAsync, failures);
         await RunAsync("catalog cache roundtrip", CatalogCacheRoundtripAsync, failures);
@@ -799,8 +804,8 @@ internal static class Program
             !sharedSource.Contains("register_builtin", StringComparison.Ordinal),
             "Direct-spawn shared logic unexpectedly registered a preset itself.");
         var effectRoot = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
-        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 73,
-            "The application delivery must contain 73 one-file templates, excluding the archived chimera and psy-dog.");
+        Assert(Directory.EnumerateFiles(effectRoot, "*.script").Count() == 77,
+            "The application delivery must contain 77 one-file templates, excluding the archived chimera and psy-dog.");
         var taskSource = await File.ReadAllTextAsync(Path.Combine(packageRoot,
             "gamedata", "configs", "misc", "task", "tm_anomaly_donation_bridge.ltx"));
         Assert(System.Text.RegularExpressions.Regex.Matches(taskSource,
@@ -842,6 +847,13 @@ internal static class Program
             heliConfig.Contains("[adb_stationary_mgun_blast]:grenade_rgd5") && heliConfig.Contains("can_take = false") &&
             !heliConfig.Contains("![stationary_mgun]") && !heliConfig.Contains("[deployable_mgun]"),
             "Private native gun and explosion must inherit game assets, keep infinite ammo and safe exit, without changing stock guns.");
+        var corpseBlast = System.Text.RegularExpressions.Regex.Match(heliConfig,
+            @"(?ms)^\[adb_corpse_blast\]:grenade_rgd5\r?\n.*?(?=^\[|\z)").Value;
+        Assert(corpseBlast.Contains("can_take = false") && corpseBlast.Contains("can_trade = false") &&
+            corpseBlast.Contains("frags = 0") && corpseBlast.Contains("frag_hit = 0") &&
+            corpseBlast.Contains("frags_r = 0") && corpseBlast.Contains("destroy_time = 2147483647") &&
+            !corpseBlast.Contains("blast_r =") && !corpseBlast.Contains("blast ="),
+            "Corpse blast must inherit stock RGD-5 blast, remove fragments and prevent autonomous fuse/pickup.");
         foreach (var type in new[] { "burn", "strike", "shock", "wound", "radiation", "telepatic", "chemical_burn", "fire_wound", "explosion" })
             Assert(System.Text.RegularExpressions.Regex.IsMatch(heliConfig,
                 @"(?m)^" + type + @"_immunity\s*=\s*0\.[1-9]" + "|^" + type + @"_immunity\s*=\s*0\.0[1-9]"),

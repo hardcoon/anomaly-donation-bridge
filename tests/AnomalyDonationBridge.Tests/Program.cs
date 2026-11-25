@@ -13,7 +13,7 @@ namespace AnomalyDonationBridge.Tests;
 
 internal static class Program
 {
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
         var tests = new (string Name, Func<Task> Run)[]
         {
@@ -23,6 +23,9 @@ internal static class Program
             ("voting conditions, accounting, atomic persistence and outbox", VotingTests.RunAsync),
             ("per-vote generation, template selection, unique commands, relaunch, persistence and sequence", VotingGenerationTests.RunAsync),
             ("YouTube voting sources, identity, atomic batches, round boundaries and HUD formats", YouTubeVotingTests.RunAsync),
+            ("chat flood filtering, replay limits, migration and command boundaries", ChatVotingFloodTests.RunAsync),
+            ("chat vote journal durability, recovery, corruption and checkpoints", ChatVotingJournalTests.RunAsync),
+            ("viewer chat 150-message pages and bounded history", ViewerChatPagingTests.RunAsync),
             ("default catalog", TestDefaultCatalogAsync),
             ("dynamic catalog fixtures", TestDynamicCatalogFixturesAsync),
             ("catalog quarantine and stale revision", TestCatalogQuarantineAndStaleRevisionAsync),
@@ -96,7 +99,9 @@ internal static class Program
         };
 
         var failures = 0;
-        foreach (var test in tests)
+        var selectedTests = tests.Where(test => args is not ["--filter", var filter] || test.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (selectedTests.Length == 0) throw new ArgumentException("No tests match the filter.");
+        foreach (var test in selectedTests)
         {
             try
             {
@@ -109,7 +114,7 @@ internal static class Program
                 Console.Error.WriteLine($"FAIL  {test.Name}: {exception.Message}");
             }
         }
-        Console.WriteLine($"RESULT {tests.Length - failures}/{tests.Length} passed");
+        Console.WriteLine($"RESULT {selectedTests.Length - failures}/{selectedTests.Length} passed");
         return failures == 0 ? 0 : 1;
     }
 

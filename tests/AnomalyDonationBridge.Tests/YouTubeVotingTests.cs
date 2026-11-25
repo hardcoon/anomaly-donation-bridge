@@ -145,7 +145,7 @@ internal static class YouTubeVotingTests
         var legacy = JsonSerializer.Deserialize<VotingDocument>("{\"SchemaVersion\":5}")!;
         var store = new MemoryStore { Data = legacy };
         var migrated = new VotingCoordinator(store); await migrated.InitializeAsync();
-        Check(migrated.Snapshot is { AcceptDonationVotes: true, AcceptYouTubeVotes: false, YouTubeVoteWeight: 1, AllowYouTubeVoteChange: false } && store.Data.SchemaVersion == 7,
+        Check(migrated.Snapshot is { AcceptDonationVotes: true, AcceptYouTubeVotes: false, YouTubeVoteWeight: 1, AllowYouTubeVoteChange: false } && store.Data.SchemaVersion == 8,
             "Legacy defaults and migration");
     }
 

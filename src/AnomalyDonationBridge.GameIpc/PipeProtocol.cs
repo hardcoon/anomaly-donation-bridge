@@ -41,6 +41,12 @@ public static class PipeProtocol
     {
         ArgumentNullException.ThrowIfNull(command);
         var parameters = new Dictionary<string, string>(command.Parameters, StringComparer.OrdinalIgnoreCase);
+        if (command.ActionId == BattleRoyalePipe.Handler)
+            parameters[BattleRoyalePipe.OpenedParameter] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                .ToString(CultureInfo.InvariantCulture);
+        if (command.ActionId == TraitorPipe.Handler)
+            parameters[TraitorPipe.OpenedParameter] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                .ToString(CultureInfo.InvariantCulture);
         var builtInDynamicHandler = CatalogRevisionEnforcement.RequiresCatalog(command.ActionId);
         if (builtInDynamicHandler && command.CatalogRevision is null)
         {
@@ -153,6 +159,8 @@ public static class PipeProtocol
             "STATUS" => ParseStatus(fields),
             "RESULT" => ParseResult(fields),
             "VOTING_STATUS" => VotingGameWire.ParseReply(fields),
+            "BATTLE_STATUS" => BattleRoyalePipe.Parse(fields),
+            "TRAITOR_STATUS" => TraitorPipe.Parse(fields),
             "CAPABILITIES" => ParseCapabilities(fields),
             "CATALOG_BEGIN" => ParseCatalogBegin(fields),
             "CATALOG_ENTRY" => ParseCatalogEntry(fields),

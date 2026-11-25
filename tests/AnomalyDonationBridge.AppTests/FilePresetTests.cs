@@ -30,12 +30,12 @@ internal static class FilePresetTests
             Assert(loader.Load(gameRoot).Presets.Count == 0, "Empty effects folder showed presets.");
             var shipped = Path.Combine(AppContext.BaseDirectory, "effects", "gamedata", "scripts");
             var shippedFiles = Directory.EnumerateFiles(shipped, "*.script").OrderBy(path => path).ToList();
-            Assert(shippedFiles.Count == 73 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 73,
-                "The app must ship 73 separate effect scripts; archived chimera and psy-dog must not return.");
+            Assert(shippedFiles.Count == 77 && shippedFiles.Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 77,
+                "The app must ship 77 separate effect scripts; archived chimera and psy-dog must not return.");
             var optionalRoot = FindOptionalRoot();
             var optional = new FilePresetLoader(optionalRoot).Load(null);
-            Assert(optional.SourcePaths.Count == 69 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
-                "Each additional Lua effect must have a valid self-describing header.");
+            Assert(optional.SourcePaths.Count == 73 && optional.Presets.Count == 0 && optional.Warnings.Count == 0,
+                "Each additional Lua effect must have a valid self-describing header. " + string.Join("; ", optional.Warnings));
             Assert(Directory.EnumerateFiles(Path.Combine(optionalRoot, "gamedata", "scripts"), "*.script")
                     .All(path => shippedFiles.Any(shipped => Path.GetFileName(shipped) == Path.GetFileName(path))),
                 "An additional effect was omitted from the application package.");
@@ -43,7 +43,7 @@ internal static class FilePresetTests
                 File.Copy(file, Path.Combine(effectsScripts, Path.GetFileName(file)));
 
             var candidates = loader.Load(gameRoot);
-            Assert(candidates.SourcePaths.Count == 73 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
+            Assert(candidates.SourcePaths.Count == 77 && candidates.Presets.Count == 0 && candidates.Warnings.Count == 0,
                 "Uninstalled scripts produced visible presets or invalid headers.");
             var v2Path = Path.Combine(effectsScripts, "anomaly_donation_bridge_effect_hardcoon_adb_mutant_companion_v2.script");
             var v2Text = await File.ReadAllTextAsync(v2Path);
@@ -76,12 +76,12 @@ internal static class FilePresetTests
 
             var manager = new EffectScriptManager(new AppPaths(Path.Combine(root, "data")), loader);
             var before = await manager.InspectAsync(gameRoot);
-            Assert(before.CanInstall && before.SourceCount == 73 && before.InstalledCount == 0,
+            Assert(before.CanInstall && before.SourceCount == 77 && before.InstalledCount == 0,
                 "Effect installer did not identify missing scripts.");
             await manager.PreflightAsync(gameRoot);
             var after = await manager.InstallAllAsync(gameRoot);
-            Assert(after.InstalledCount == 73 && loader.Load(gameRoot).Presets.Count == 73,
-                "Installing all effects did not reveal all 73 templates.");
+            Assert(after.InstalledCount == 77 && loader.Load(gameRoot).Presets.Count == 77,
+                "Installing all effects did not reveal all 77 templates.");
             var squads = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.show_squads");
             var kidnap = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.companion_kidnap");
             var kidnapNpcs = kidnap.ParameterDefinitions.Single(p => p.Key == "npc_sections");
@@ -93,6 +93,21 @@ internal static class FilePresetTests
                 kidnap.Parameters["alternative_start"] == "false" &&
                 new ActionViewModel(kidnap).Parameters.Single(p => p.Definition.Key == "alternative_start").IsBooleanChoice,
                 "Kidnapping must expose NPC selection, defaults and opt-in remote locations/alternative startup.");
+            var battle = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.battle_royale");
+            var battleNpcs = battle.ParameterDefinitions.Single(p => p.Key == "npc_sections");
+            var opponentCount = battle.ParameterDefinitions.Single(p => p.Key == "participant_count");
+            Assert(battleNpcs.Kind == ParameterKind.MultiChoice && battleNpcs.CatalogKind == CatalogEntryKind.Npc &&
+                battleNpcs.MinimumSelections == 1 && opponentCount.Minimum == 1 && opponentCount.Maximum == 32 &&
+                opponentCount.DefaultValue == "10",
+                "Battle royale must expose NPC appearance selection and the opponent count.");
+            var traitor = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.traitor");
+            var recruitNpcs = traitor.ParameterDefinitions.Single(p => p.Key == "npc_sections");
+            var minimumMembers = traitor.ParameterDefinitions.Single(p => p.Key == "minimum_members");
+            Assert(traitor.DisplayName == "Предатель в отряде" && recruitNpcs.Kind == ParameterKind.MultiChoice &&
+                recruitNpcs.CatalogKind == CatalogEntryKind.Npc && recruitNpcs.MinimumSelections == 1 &&
+                minimumMembers.Minimum == 3 && minimumMembers.DefaultValue == "5" &&
+                traitor.Parameters["interval_seconds"] == "60",
+                "Traitor must expose the regular NPC selector, minimum squad size and default timed kills.");
             var kick = loader.Load(gameRoot).Presets.Single(p => p.HandlerId == "hardcoon.adb.kick");
             var kickHeight = kick.ParameterDefinitions.Single();
             Assert(kick.DisplayName == "Дать пинка" && kickHeight.Key == "height_meters" &&
@@ -893,6 +908,21 @@ internal static class FilePresetTests
                 "Ammo must be discovered in the live weapon, without a client-selected ammunition list.");
             var cleanup = loader.Load(gameRoot).Presets.Single(preset =>
                 preset.HandlerId == "hardcoon.adb.cleanup_corpses");
+            var corpseBlast = loader.Load(gameRoot).Presets.Single(preset =>
+                preset.HandlerId == "hardcoon.adb.explode_corpses");
+            var blastRadius = corpseBlast.ParameterDefinitions.Single(p => p.Key == "radius_meters");
+            var corpseType = corpseBlast.ParameterDefinitions.Single(p => p.Key == "corpse_type");
+            Assert(corpseBlast.DisplayName == "Разорвать ближайшие трупы" && corpseBlast.CategoryId == "world" &&
+                corpseBlast.ParameterDefinitions.Count == 4 && blastRadius.Minimum == 1 && blastRadius.Maximum == 999 &&
+                blastRadius.DefaultValue == "100" && corpseBlast.Parameters["radius_meters"] == "100" &&
+                blastRadius.Validate("1") is null && blastRadius.Validate("999") is null &&
+                blastRadius.Validate("0") is not null && blastRadius.Validate("1000") is not null &&
+                corpseType.Options.SequenceEqual(new[] { "npc", "mutant", "both" }) &&
+                corpseType.DefaultValue == "both" && corpseType.OptionLabels["mutant"] == "Только мутанты" &&
+                corpseBlast.Parameters["damage_actor"] == "false" && corpseBlast.Parameters["damage_npcs"] == "true" &&
+                new ActionViewModel(corpseBlast).Parameters.Where(p => p.Definition.Key.StartsWith("damage_")).All(p => p.IsBooleanChoice) &&
+                !CatalogRevisionEnforcement.RequiresCatalog(corpseBlast),
+                "Corpse blast settings, checkboxes or live-catalog requirements differ from the agreed template.");
             var radius = cleanup.ParameterDefinitions.Single(definition => definition.Key == "radius_meters");
             var mutants = cleanup.ParameterDefinitions.Single(definition => definition.Key == "delete_mutant_corpses");
             Assert(cleanup.Parameters["radius_meters"] == "100" && radius.DefaultValue == "100" &&
@@ -998,9 +1028,9 @@ internal static class FilePresetTests
                     "The unified button is disabled when core and effect scripts are missing.");
                 await settings.InstallBridgeAsync();
                 Assert((await runtime.InspectAddonAsync(unifiedGameRoot)).State == AddonInstallState.Current &&
-                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 73 &&
+                    (await runtime.InspectEffectsAsync(unifiedGameRoot, string.Empty)).InstalledCount == 77 &&
                     !settings.CanInstallBridge,
-                    "The unified operation did not install both core and all 73 effect scripts.");
+                    "The unified operation did not install both core and all 77 effect scripts.");
                 Assert(!(await runtime.InspectBridgeAsync(unifiedGameRoot, string.Empty)).CanInstall,
                     "Header update button must be hidden for a verified current installation.");
                 await runtime.AddCatalogExclusionsAsync([new CatalogEntry

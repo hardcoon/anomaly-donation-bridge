@@ -56,6 +56,8 @@ local source={line_exist=function(_,s,k)return values[s] and values[s][k]~=nil e
 local function fresh()local out={};for _,e in ipairs(initial)do out[#out+1]=e end;return out end
 rows=fresh();local ok,count=env.append_special(rows,source)
 assert(ok and count==2 and #rows==8 and not next(temporary),'special packed profiles must deduplicate and subtract ordinary visuals')
+assert(env.models_for_npc('normal')[1]=='actors\\external_motion.ogf' and not env.models_for_npc('story'),
+    'regular model lookup must resolve enabled NPC profiles without including quarantined sections')
 local ids={};for i=7,#rows do ids[env.resolve(rows[i].section_id)]=rows[i].section_id;assert(rows[i].display_name:find('Name ',1,true)) end
 assert(ids['actors\\person.ogf'] and ids['pack\\custom_unique.ogf'],'do not hardcode actors folder or vanilla characters')
 assert(not ids['actors\\external_motion.ogf'] and not ids['actors\\invisible.ogf'] and not ids['actors\\orphan.ogf'])
@@ -66,6 +68,7 @@ assert(not env.resolve_icon(ids['pack\\custom_unique.ogf']),'missing profile por
 local unique=contents['gameplay\\unique.xml'];contents['gameplay\\unique.xml']='#include "gameplay\\characters.xml"'
 rows=fresh();ok=env.append_special(rows,source);assert(not ok and #rows==6 and env.failure_reason() and not env.resolve(old_id),'failed rebuild must not leave stale model IDs')
 assert(not env.resolve_icon(old_id),'failed rebuild must also invalidate portrait metadata')
+assert(not env.models_for_npc('normal'),'failed profile reload left a stale regular pool')
 contents['gameplay\\unique.xml']=unique
 values.normal.character_profile='missing_normal_profile'
 rows=fresh();assert(not env.append_special(rows,source) and #rows==6,'unresolved normal pools cannot become special appearances')

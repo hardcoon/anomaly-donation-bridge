@@ -9,6 +9,10 @@ namespace AnomalyDonationBridge.App;
 public partial class MainWindow
 {
     private ContextMenu? _templateContextMenu;
+    private MenuItem? _battleCancelItem;
+
+    internal static MenuItem? BattleCancelItem(MainViewModel model, ActionViewModel action) =>
+        model.CanCancelBattle(action) ? new MenuItem { Header = "Отменить набор", Command = model.CancelBattleCommand } : null;
 
     internal ContextMenu? GetTemplateContextMenu(DependencyObject source, out FrameworkElement? target)
     {
@@ -68,6 +72,12 @@ public partial class MainWindow
         if (target.ContextMenu is not { } menu) return;
         CloseTemplateContextMenu();
         _templateContextMenu = menu;
+        if (DataContext is MainViewModel model && target.DataContext is ActionViewModel action &&
+            BattleCancelItem(model, action) is { } cancel)
+        {
+            _battleCancelItem = cancel;
+            menu.Items.Insert(0, cancel);
+        }
         menu.Closed += TemplateMenu_Closed;
         menu.PlacementTarget = target;
         menu.Placement = atPointer ? PlacementMode.MousePoint : PlacementMode.Bottom;
@@ -79,7 +89,10 @@ public partial class MainWindow
     {
         if (sender is not ContextMenu menu) return;
         menu.Closed -= TemplateMenu_Closed;
-        if (ReferenceEquals(_templateContextMenu, menu)) _templateContextMenu = null;
+        if (!ReferenceEquals(_templateContextMenu, menu)) return;
+        _templateContextMenu = null;
+        if (_battleCancelItem is { } cancel) menu.Items.Remove(cancel);
+        _battleCancelItem = null;
     }
 
     private void CloseTemplateContextMenu()
@@ -89,5 +102,7 @@ public partial class MainWindow
         if (menu is null) return;
         menu.Closed -= TemplateMenu_Closed;
         menu.IsOpen = false;
+        if (_battleCancelItem is { } cancel) menu.Items.Remove(cancel);
+        _battleCancelItem = null;
     }
 }

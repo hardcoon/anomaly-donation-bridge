@@ -282,6 +282,7 @@ sections.adb_helicopter_companion={class="C_HLCP_S",visual="private_support.ogf"
 sections.adb_stationary_mgun={class="W_STMGUN",inv_name="MountedWeapon",["$spawn"]="weapons\\stationary_mgun"}
 sections.adb_stationary_mgun_r020={class="W_STMGUN",inv_name="MountedWeapon",["$spawn"]="weapons\\stationary_mgun"}
 sections.adb_stationary_mgun_blast={class="G_RGD5_S",inv_name="grenade",["$spawn"]="weapons\\grenades",cost="0",inv_weight="0.3"}
+sections.adb_corpse_blast={class="G_RGD5_S",inv_name="grenade",["$spawn"]="weapons\\grenades",cost="0",inv_weight="0.3"}
 -- Private pet sections must not affect the public catalog, including item-like metadata.
 sections.adb_mc2_private_normal = { class="SM_DOG_S", species="dog", visual="dog",
     ["$spawn"]="monsters\\dog", inv_name="Private", cost="100", can_trade=true }
@@ -332,6 +333,8 @@ assert(entries.adb_helicopter_companion==nil)
 assert(entries.adb_stationary_mgun==nil and entries.adb_stationary_mgun_r020==nil and entries.adb_stationary_mgun_blast==nil,
     "Private stationary gun/temporary explosion leaked into ordinary item spawning")
 assert(not catalog.is_available("adb_stationary_mgun","item") and not catalog.is_available("adb_stationary_mgun_blast","item"))
+assert(entries.adb_corpse_blast==nil and not catalog.is_available("adb_corpse_blast","item"),
+    "Private corpse blast leaked into item/grenade selection")
 assert(entries.mod_heli_custom and entries.mod_heli_custom.kind=="helicopter" and
     entries.mod_heli_custom.available and entries.mod_heli_custom.native_class=="C_HLCP_S")
 assert(entries.mod_heli_missing.quarantine_reason=="missing_required_fields" and not entries.story_helicopter.available)

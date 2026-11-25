@@ -140,7 +140,7 @@ public sealed partial class VotingCoordinator
         {
             document.PreviousRounds.Add(original.Clone());
             next = original.Clone(); next.Id = Guid.NewGuid().ToString("N");
-            next.YouTubeParticipants.Clear(); next.SeenYouTubeMessageIds.Clear();
+            ResetChatLedger(next);
             next.WinnerOptionId = ""; next.WinnerFraction = 0;
             next.DeliveryAccepted = next.DeliveryCancelled = false; next.DeliveryNote = "";
             next.DrawnAt = next.ClosedAt = next.PausedAt = next.Deadline = null;

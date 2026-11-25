@@ -88,6 +88,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         {
             UpdateCheckpointFromHistory(entry);
             UpdatePersistedQueueAvailability(entry);
+            OnBattleHistoryAdded(entry);
             HistoryAdded?.Invoke(entry);
         });
         _dispatcher = new DonationDispatcher(_processedStore, _notifyingHistory,
@@ -1387,6 +1388,21 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
 
     private async Task RetryActionUnderGateAsync(EventHistoryEntry entry, CancellationToken cancellationToken)
     {
+        var action = ResolveHistoryAction(entry);
+        await _dispatcher.EnqueueActionAsync(
+            CreateManualReplayDonation(entry, action),
+            action,
+            Settings.QueuePolicy,
+            cancellationToken,
+            Settings.Actions,
+            _presets,
+            CurrentEffectExecutionOptions()).ConfigureAwait(false);
+        await _dispatcher.DrainAsync(_gameServer, Settings.QueuePolicy, cancellationToken).ConfigureAwait(false);
+        await _settingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+    }
+
+    private ActionDefinition ResolveHistoryAction(EventHistoryEntry entry)
+    {
         var action = entry.ActionSnapshot?.Clone()
             ?? Settings.Actions.FirstOrDefault(item => item.Id == entry.ActionId)?.Clone()
             ?? Settings.Actions.FirstOrDefault(item =>
@@ -1399,7 +1415,11 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
             DynamicCatalogBinding.Apply(catalog, [action]);
         }
         EnsureActionCanExecute(action);
-        var donation = new DonationEvent
+        return action;
+    }
+
+    private DonationEvent CreateManualReplayDonation(EventHistoryEntry entry, ActionDefinition action) =>
+        new()
         {
             Id = $"manual:{entry.DonationId}:{Guid.NewGuid():N}",
             Username = ManualRetryDonor(entry, action.HandlerId, Settings.AnonymousDonorName),
@@ -1409,16 +1429,25 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
             CreatedAt = DateTimeOffset.UtcNow,
             ReceivedAt = DateTimeOffset.UtcNow
         };
-        await _dispatcher.EnqueueActionAsync(
-            donation,
-            action,
-            Settings.QueuePolicy,
-            cancellationToken,
-            Settings.Actions,
-            _presets,
-            CurrentEffectExecutionOptions()).ConfigureAwait(false);
-        await _dispatcher.DrainAsync(_gameServer, Settings.QueuePolicy, cancellationToken).ConfigureAwait(false);
-        await _settingsStore.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+
+    private async Task<HistoryReplayEffect?> ResolveHistoryReplayAsync(DonationEvent trigger, int offset, CancellationToken token)
+    {
+        try
+        {
+            var source = await DonationHistory.FindReplayTargetAsync(_historyStore, trigger, offset, token).ConfigureAwait(false);
+            if (source is null) return null;
+            var action = ResolveHistoryAction(source);
+            return new(action, CreateManualReplayDonation(source, action), source.Donor);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            await _logger.WriteAsync("WARN", "Повтор прошлого доната: " + error.Message, token).ConfigureAwait(false);
+            return null;
+        }
     }
 
     internal static string ManualRetryDonor(
@@ -1545,6 +1574,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
 
     private EffectExecutionOptions CurrentEffectExecutionOptions() => new()
     {
+        ResolveHistoryReplay = ResolveHistoryReplayAsync,
         SaveBeforeBatch = Settings.SaveBeforeDonationEffects,
         SaveAfterBatch = Settings.SaveAfterDonationEffects,
         EffectSaveRetentionCount = Settings.EffectSaveRetentionCount,
@@ -1684,6 +1714,8 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         }
         if (_donationSession is not null) await _donationSession.DisposeAsync().ConfigureAwait(false);
         if (_donateXSession is not null) await _donateXSession.DisposeAsync().ConfigureAwait(false);
+        try { await _battleUpdate.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
         await _gameServer.DisposeAsync().ConfigureAwait(false);
         if (_drainLoop is not null)
         {
@@ -1870,9 +1902,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
             throw new InvalidOperationException(
                 "Скрипт этого действия отсутствует или не установлен в игру.");
         }
-        if (_catalogState.IsLive &&
-            !ReferenceEquals(_catalogState.Capabilities, CapabilitySet.Empty) &&
-            !_catalogState.Capabilities.SupportsHandler(action.HandlerId))
+        if (!_catalogState.SupportsTemplate(action.HandlerId))
         {
             throw new InvalidOperationException("Установленная версия игрового аддона не объявила этот шаблон.");
         }
@@ -2049,6 +2079,7 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
                 {
                     DonationId = donation.Id,
                     DonationCreatedAt = donation.CreatedAt,
+                    DonationReceivedAt = donation.ReceivedAt,
                     Donor = donation.Username,
                     DonationMessage = donation.Message,
                     Amount = donation.Amount,
@@ -2439,6 +2470,8 @@ public sealed partial class BridgeRuntime : IAsyncDisposable
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
+            ScheduleBattleSync(cancellationToken);
+            ScheduleTraitorSync(cancellationToken);
             await DrainSafelyAsync().ConfigureAwait(false);
             if (!_votingLoaded) continue;
             try

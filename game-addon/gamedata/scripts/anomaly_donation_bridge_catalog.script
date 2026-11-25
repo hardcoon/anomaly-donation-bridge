@@ -468,7 +468,8 @@ local function classify(ini, section)
 	if not anomaly_donation_bridge_common.valid_section_id(section) then return nil end
     if section:find("^adb_mc2_") or section:find("^adb_stationary_mgun_r%d+$") then return nil end
     if section=="adb_wandering_trader" or section=="adb_btr_companion" or section=="adb_helicopter_boss" or section=="adb_helicopter_companion" or section=="adb_guitar_double" or
-        section=="adb_stationary_mgun" or section=="adb_stationary_mgun_blast" then return nil end
+        section=="adb_stationary_mgun" or section=="adb_stationary_mgun_blast" or section=="adb_corpse_blast" or
+        section=="adb_battle_royale_participant" then return nil end
 	local class_name = (ini_value(ini, section, "class") or ""):upper()
 	local props=anomaly_donation_bridge_props
 	if props then

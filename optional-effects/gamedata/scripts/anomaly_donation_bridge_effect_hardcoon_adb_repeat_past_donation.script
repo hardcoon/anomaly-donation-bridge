@@ -1,0 +1,16 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.repeat_past_donation",
+  "displayName":"Повторить прошлый донат",
+  "description":"Повторяет игровое действие из выбранной по счёту строки «Истории» с его сохранёнными параметрами. 1 — самое свежее действие. В отсчёт входят и локальные тесты, и ручные повторы.",
+  "category":"world",
+  "cooldownSeconds":0,
+  "parameterDefinitions":[
+    {"key":"donations_back","displayName":"На сколько действий назад","kind":"Integer","minimum":1,"maximum":999,"defaultValue":"2"}
+  ],
+  "parameters":{"donations_back":"2"}
+}
+ADB_PRESET_END]]
+
+-- The bridge resolves this template to an existing history action.

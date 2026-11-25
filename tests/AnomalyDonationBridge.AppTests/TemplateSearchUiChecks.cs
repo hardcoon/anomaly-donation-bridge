@@ -59,7 +59,7 @@ internal static class TemplateSearchUiChecks
         foreach (var file in Directory.EnumerateFiles(Path.Combine(effects, "gamedata", "scripts"), "*.script"))
             File.Copy(file, Path.Combine(gameScripts, Path.GetFileName(file)), overwrite: true);
         var presets = new FilePresetLoader(effects).Load(game).Presets;
-        if (presets.Count != 73) throw new InvalidOperationException("Performance fixture must use the actual shipped templates.");
+        if (presets.Count != 77) throw new InvalidOperationException("Performance fixture must use the actual shipped templates.");
         for (var index = 0; index < 84; index++)
         {
             var action = presets[index % presets.Count].CloneAsNewInstance();

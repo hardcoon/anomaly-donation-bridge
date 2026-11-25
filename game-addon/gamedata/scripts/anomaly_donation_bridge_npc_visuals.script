@@ -2,6 +2,7 @@
 -- No renderer objects are constructed during catalogue discovery.
 local paths={}
 local portraits={}
+local npc_models={}
 local function valid(path)
     return type(path)=="string" and #path<=180 and not path:find("..",1,true) and
         path:match("^[%w_][%w_%.%-%/\\]*$")~=nil
@@ -24,6 +25,9 @@ function resolve(id)
 end
 function resolve_icon(id)
     if resolve(id) then return portraits[id] end
+end
+function models_for_npc(section)
+    return npc_models[section]
 end
 
 -- Special appearances are derived exclusively from installed NPC profiles and
@@ -267,7 +271,8 @@ local function discover_special(entries,ini)
             end
         end
     end
-    local ordinary,candidates={},{}
+    local ordinary,candidates,models={},{},{}
+    local unresolved
     for _,entry in ipairs(entries) do
         if entry.kind=="npc" then
             local profile=ini_text(ini,entry.section_id,"character_profile")
@@ -275,8 +280,15 @@ local function discover_special(entries,ini)
             if entry.available then
                 -- Missing normal profile information would mislabel ordinary
                 -- models as special. Fail this optional catalogue, not all NPCs.
-                if #rows==0 then error("special_visual_ordinary_profile_unresolved_"..tostring(profile)) end
-                for _,row in ipairs(rows) do ordinary[row.visual]=true end
+                if #rows==0 then unresolved=unresolved or tostring(profile) end
+                local visuals={}
+                for _,row in ipairs(rows) do
+                    ordinary[row.visual]=true
+                    if not technical(row.id) and not technical(row.visual) then
+                        visuals[#visuals+1]=row.visual
+                    end
+                end
+                models[entry.section_id]=visuals
             elseif entry.quarantine_reason=="story_unique" or entry.quarantine_reason=="scripted" then
                 if not technical(entry.section_id) then
                     for _,row in ipairs(rows) do
@@ -289,6 +301,10 @@ local function discover_special(entries,ini)
             end
         end
     end
+    -- Regular NPC models are usable even when a different profile prevents
+    -- the special-appearance list from separating all ordinary models.
+    npc_models=models
+    if unresolved then error("special_visual_ordinary_profile_unresolved_"..unresolved) end
     local bases={}
     for _,entry in ipairs(entries) do if entry.kind=="npc" and entry.available then bases[#bases+1]=entry.section_id end end
     table.sort(bases)
@@ -331,7 +347,7 @@ local function discover_special(entries,ini)
 end
 
 function append_special(entries,ini)
-    paths={};portraits={};last_error=nil;spawn_base=nil;rejected={}
+    paths={};portraits={};npc_models={};last_error=nil;spawn_base=nil;rejected={}
     anomaly_donation_bridge_visual_safety.clear_cache()
     local ok,rows,new_paths,new_portraits=pcall(discover_special,entries,ini)
     if not ok then

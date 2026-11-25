@@ -1,0 +1,1015 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.battle_royale",
+  "displayName":"Батлл-роял",
+  "description":"Донат, запустивший набор, становится первым соперником. Остальные места заполняют следующие денежные донаты. Герой и соперники с никами зрителей получают лёгкие комплекты и высаживаются на краю локации. Внешность каждого соперника выбирается случайно из отмеченных NPC. Живые соперники отмечаются в КПК. Снаряжение героя хранится в скрытом тайнике, метка появляется после победы. Состав и ход матча записываются в сейв.",
+  "category":"world",
+  "cooldownSeconds":0,
+  "parameterDefinitions":[
+    {"key":"npc_sections","displayName":"Внешность соперников (случайно из отмеченных)","kind":"MultiChoice","catalogKind":"Npc","minimumSelections":1,"defaultValue":""},
+    {"key":"participant_count","displayName":"Количество соперников","kind":"Integer","minimum":1,"maximum":32,"defaultValue":"10"},
+    {"key":"effect_policy","displayName":"Другие эффекты от донатов","kind":"Choice","options":["continue","defer"],"optionLabels":{"continue":"Продолжать обработку","defer":"Отложить до конца матча"},"defaultValue":"continue"}
+  ],
+  "parameters":{"npc_sections":"","participant_count":"10","effect_policy":"continue"}
+}
+ADB_PRESET_END]]
+
+local ID = "hardcoon.adb.battle_royale"
+local SAVE = "adb_battle_royale_v1"
+local SECTION = "adb_battle_royale_participant"
+local OWNER = "adb_battle_royale_owner"
+local NPC_SPOT, LEGACY_NPC_SPOT = "ui_pda2_quest_npc_location", "ui_secondary_task_blink"
+local STASH_SPOT, STASH_HINT = "treasure", "Батл-Роял: Снаряжение"
+local WAIT = "npcx_beh_wait"
+local TRAVEL = {teleport_random_level=true, ["hardcoon.adb.new_life"]=true, ["hardcoon.adb.new_life_azazel"]=true}
+local READY_MESSAGES = {
+    stash="Ждём доступный тайник",
+    equipment="В игре нет подходящих лёгких комплектов",
+    appearance="Ждём доступные визуалы соперников",
+    map="Ждём подходящую локацию",
+    search="Ищем точки высадки",
+    mode="Ждём завершения текущего режима героя"
+}
+local registered, scan, next_scan, loaded_frame, running, recovery_at, danger_at, exit_check_at
+local pending_transfer, pending_slot, live_members, combat = {}, {}, {}, {}
+local move_sent, return_sent
+local hud, hud_signature, retired = nil, nil, {}
+
+local function common() return anomaly_donation_bridge_common end
+local function cp(text) return common().game_text_cp1251_lossy(text) or "" end
+local function now() return time_global() end
+local function log(text)
+    if type(printf)=="function" then pcall(printf,"[ADB battle royale] %s",tostring(text):gsub("[\r\n]"," ")) end
+end
+
+local function state(create)
+    local data = alife_storage_manager and alife_storage_manager.get_state()
+    if not data then return end
+    if not data[SAVE] and create then data[SAVE] = {recovery={}} end
+    return data[SAVE]
+end
+
+local function current()
+    local data = state()
+    return data and data.match
+end
+
+local function holds_effects(match)
+    return match and match.phase~="recruiting" and (match.phase~="fighting" or match.defer) or false
+end
+
+function enabled() return registered==true end
+function in_combat()
+    local match = current()
+    return match~=nil and match.phase~="recruiting"
+end
+
+function blocks(action_id)
+    local match = current()
+    return match and (action_id==ID or holds_effects(match) or in_combat() and TRAVEL[action_id]) or false
+end
+
+function status()
+    local match = current()
+    if not match then return {"BATTLE_STATUS","idle"} end
+    local keys = {}
+    for i, entry in ipairs(match.roster) do keys[i] = entry.key end
+    local phase = match.phase=="rollback" and "preparing" or match.phase
+    return {"BATTLE_STATUS",phase,match.id,match.opening,string.format("%.0f",match.opened),
+        tostring(match.slots),holds_effects(match) and "1" or "0",table.concat(keys,",")}
+end
+
+local function retire_hud()
+    for i=#retired,1,-1 do
+        if device().frame>=retired[i].frame then table.remove(retired,i) end
+    end
+end
+
+local function hide_hud()
+    retire_hud()
+    if not hud then return end
+    local old = hud
+    hud,hud_signature = nil,nil
+    retired[#retired+1] = {frame=device().frame+3,window=old}
+    old:Show(false)
+    local owner = get_hud()
+    if owner then owner:RemoveDialogToRender(old) end
+end
+
+function receive(fields)
+    local match = current()
+    if not match or match.phase~="recruiting" or fields[2]~=match.id then return end
+    if fields[1]=="BATTLE_CANCEL" and #fields==2 then
+        state().match,scan = nil,nil
+        hide_hud()
+        return
+    end
+    if fields[1]~="BATTLE_ROSTER" or #fields<4 or #fields%2~=0 or #fields>16 then return end
+    local keys = {}
+    for _, entry in ipairs(match.roster) do keys[entry.key]=true end
+    for i=3,#fields,2 do
+        local key, name = fields[i], fields[i+1]
+        if #match.roster>=match.slots then break end
+        if #key==64 and key:match("^[a-f0-9]+$") and not keys[key] and
+            #name>0 and #name<=128 and not name:find("[%z\1-\31\127%%\\]") and cp(name)~="" then
+            keys[key]=true
+            match.roster[#match.roster+1] = {key=key,name=name}
+        end
+    end
+end
+
+local function init_hud()
+    if adb_battle_royale_hud then return end
+    class "adb_battle_royale_hud" (CUIScriptWnd)
+    function adb_battle_royale_hud:__init()
+        super()
+        self:SetAutoDelete(false)
+        self:SetWndRect(Frect():set(0,0,1024,768))
+        self:Enable(false)
+        self.labels={}
+    end
+    function adb_battle_royale_hud:Update()
+        if hud==self then CUIScriptWnd.Update(self) end
+    end
+end
+
+local function label(index, text, x, y, width, color)
+    local pair = hud.labels[index]
+    if not pair then
+        pair={}
+        for layer=1,2 do
+            local item = CUITextWnd()
+            item:SetAutoDelete(true)
+            item:SetFont(GetFontLetterica16Russian())
+            item:SetTextAlignment(2)
+            item:SetTextComplexMode(false)
+            item:SetEllipsis(true)
+            hud:AttachChild(item)
+            pair[layer]=item
+        end
+        hud.labels[index]=pair
+    end
+    for i,item in ipairs(pair) do
+        local raised = i==1 and 1 or 0
+        item:SetWndPos(vector2():set(x+raised,y+raised))
+        item:SetWndSize(vector2():set(width,19))
+        item:SetTextColor(i==1 and 0xff000000 or color)
+        item:SetText(cp(text))
+        item:Show(true)
+    end
+end
+
+local function alive_count(match)
+    local alive = 0
+    for _, entry in ipairs(match.roster) do if not entry.out then alive=alive+1 end end
+    return alive
+end
+
+local function show_hud(match)
+    local owner = get_hud()
+    if not owner then return end
+    retire_hud()
+    local title, detail, names = "", nil, {}
+    if match.phase=="recruiting" then
+        title = "Набор участников: "..#match.roster.."/"..match.slots
+        detail = READY_MESSAGES[match.waiting]
+        for i, entry in ipairs(match.roster) do names[i]=entry.name end
+    elseif match.level~=level.name() then
+        title = "Батлл-роял ждёт возвращения на исходную локацию"
+    elseif match.phase=="fighting" then
+        title = "Осталось в живых: "..alive_count(match)
+    elseif match.phase=="rollback" then
+        title = #match.items>0 and "Возвращаем снаряжение" or "Подготовка матча отменена"
+    else
+        title = "Подготовка матча"
+    end
+    local signature = title.."\n"..(detail or "").."\n"..table.concat(names,"\n")
+    if hud and signature==hud_signature then return end
+    if not hud then
+        init_hud()
+        hud=adb_battle_royale_hud()
+        owner:AddDialogToRender(hud)
+        hud:Show(true)
+    end
+    hud_signature=signature
+    label(1,title,162,24,700,0xffffdfac)
+    local first = detail and 3 or 2
+    if detail then label(2,detail,162,45,700,0xffe8e8e8) end
+    local columns = #names>22 and 3 or #names>11 and 2 or 1
+    local rows, width = math.max(1,math.ceil(#names/columns)), 250
+    for i,name in ipairs(names) do
+        label(first+i-1,name,512-width*columns/2+math.floor((i-1)/rows)*width,
+            (detail and 66 or 46)+((i-1)%rows)*18,width,0xffe8e8e8)
+    end
+    for i=first+#names,#hud.labels do
+        for _,item in ipairs(hud.labels[i]) do item:Show(false) end
+    end
+end
+
+local function ref(object)
+    return {id=object.id,name=object:name(),section=object:section_name()}
+end
+
+local function server(reference)
+    if not reference then return end
+    local obj = alife():object(reference.id,true)
+    if obj and obj:name()==reference.name and obj:section_name()==reference.section then return obj end
+end
+
+local function client(reference)
+    if not reference then return end
+    local obj=level.object_by_id(reference.id)
+    if obj and obj:name()==reference.name and obj:section()==reference.section then return obj end
+end
+
+local function owned(reference, match_id)
+    local obj=server(reference)
+    if obj and se_load_var(obj.id,obj:name(),OWNER)==match_id then return obj end
+end
+
+local function tag(obj,match)
+    se_save_var(obj.id,obj:name(),OWNER,match.id)
+end
+
+local function cfg(section,key)
+    return common().ini_string(system_ini(),section,key)
+end
+
+local function collect_gear()
+    local suits, guns = {}, {}
+    for _, section in ipairs({"novice_outfit","bandit_novice_outfit","cs_novice_outfit","renegade_novice_outfit","stalker_outfit"}) do
+        if cfg(section,"kind")=="o_light" and tonumber(cfg(section,"slot"))==6 and not IsItem("quest",section) then
+            suits[#suits+1]=section
+        end
+    end
+    for _, section in ipairs({"wpn_pm","wpn_pb","wpn_fort","wpn_tt33","wpn_aps","wpn_mp5","wpn_bm16","wpn_toz34"}) do
+        local kind=cfg(section,"kind")
+        local slot,magazine=tonumber(cfg(section,"slot")),tonumber(cfg(section,"ammo_mag_size"))
+        local ammo=(cfg(section,"ammo_class") or ""):match("^%s*([%w_%.%-]+)")
+        local box=ammo and tonumber(cfg(ammo,"box_size"))
+        local tier=tonumber(cfg(section,"tier")) or 1
+        if (kind=="w_pistol" or kind=="w_smg" or kind=="w_shotgun") and tier<=2 and
+            (slot==1 or slot==2) and magazine and magazine>0 and box and box>=3 and
+            not IsItem("quest",section) and not IsItem("quest",ammo) then
+            guns[#guns+1]={section=section,slot=slot+1,magazine=magazine,ammo=ammo,box=box,
+                total=kind=="w_shotgun" and 30 or 120}
+        end
+    end
+    if #suits>0 and #guns>0 then return suits,guns end
+end
+
+local function random_gear(suits,guns)
+    local gun = guns[math.random(#guns)]
+    local result = {{section=suits[math.random(#suits)],slot=7},
+        {section=gun.section,slot=gun.slot,magazine=gun.magazine}}
+    local rounds=gun.total-gun.magazine
+    while rounds>0 do
+        local count=math.min(rounds,gun.box)
+        result[#result+1]={section=gun.ammo,ammo=count}
+        rounds=rounds-count
+    end
+    return result
+end
+
+local function plan_appearances(match)
+    local catalog=anomaly_donation_bridge_catalog
+    local snapshot=catalog.snapshot()
+    if not snapshot then return end
+    local selected={}
+    for _,section in ipairs(match.npc_sections or {}) do selected[section]=true end
+    local pool,seen={},{}
+    for _,entry in ipairs(snapshot.entries) do
+        local section=entry.section_id
+        if entry.kind=="npc" and entry.available and (not match.npc_sections or selected[section]) and
+            catalog.is_available(section,"npc") then
+            local models=anomaly_donation_bridge_npc_visuals.models_for_npc(section)
+            for _,path in ipairs(models or {}) do
+                if not seen[path] then
+                    seen[path]=true
+                    pool[#pool+1]=path
+                end
+            end
+        end
+    end
+    local plan,ini={},system_ini()
+    while #plan<match.slots and #pool>0 do
+        local index=math.random(#pool)
+        local path=pool[index]
+        if anomaly_donation_bridge_visual_safety.check(path,ini,SECTION) then
+            plan[#plan+1]=path
+        else
+            pool[index]=pool[#pool]
+            pool[#pool]=nil
+        end
+    end
+    if #plan==match.slots then return plan end
+end
+
+local function point(actor)
+    local p=actor:position()
+    return {x=p.x,y=p.y,z=p.z,vertex=actor:level_vertex_id(),game_vertex=actor:game_vertex_id()}
+end
+
+local function vector_at(p) return vector():set(p.x,p.y,p.z) end
+local function distance2(a,b) return (a.x-b.x)^2+(a.z-b.z)^2 end
+local function at(actor,p)
+    local q=actor:position()
+    return math.abs(q.y-p.y)<3 and distance2(q,p)<4
+end
+
+local function is_changer(o)
+    local class=o:clsid()
+    return class==clsid.level_changer or class==clsid.level_changer_s
+end
+
+local function crowded(p)
+    local blocked=false
+    level.iterate_nearest(vector_at(p),12,function(o)
+        local ok, result=pcall(function()
+            return is_changer(o) or type(IsAnomaly)=="function" and IsAnomaly(o) or
+                (IsStalker(o) or IsMonster(o)) and distance2(o:position(),p)<36
+        end)
+        blocked=ok and result==true
+        return blocked
+    end)
+    return blocked
+end
+
+local function scan_vertices(actor,count)
+    local origin=point(actor)
+    if not scan then
+        if not common().valid_vertex(origin.vertex) then return nil,true end
+        scan={nodes={origin.vertex},seen={[origin.vertex]=true},index=1,cells={},level=level.name(),
+            x0=origin.x,x1=origin.x,z0=origin.z,z1=origin.z}
+    end
+    for _=1,800 do
+        local id=scan.nodes[scan.index]
+        if not id then break end
+        scan.index=scan.index+1
+        local p=level.vertex_position(id)
+        local cell=math.floor(p.x/14)..":"..math.floor(p.z/14)
+        scan.cells[cell]=scan.cells[cell] or {x=p.x,y=p.y+0.10,z=p.z,vertex=id,game_vertex=origin.game_vertex}
+        scan.x0,scan.x1=math.min(scan.x0,p.x),math.max(scan.x1,p.x)
+        scan.z0,scan.z1=math.min(scan.z0,p.z),math.max(scan.z1,p.z)
+        for direction=0,3 do
+            local linked=level.vertex_link(id,direction)
+            if linked and linked>=0 and linked<0xffffffff and not scan.seen[linked] then
+                for reverse=0,3 do
+                    if level.vertex_link(linked,reverse)==id then
+                        scan.seen[linked]=true
+                        scan.nodes[#scan.nodes+1]=linked
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if scan.index<=#scan.nodes then return nil,false end
+    local rx,rz=(scan.x1-scan.x0)/2,(scan.z1-scan.z0)/2
+    if rx<20 or rz<20 or not scan.seen[origin.vertex] then return nil,true end
+    local cx,cz=(scan.x0+scan.x1)/2,(scan.z0+scan.z1)/2
+    local candidates={}
+    for _,p in pairs(scan.cells) do
+        if math.max(math.abs(p.x-cx)/rx,math.abs(p.z-cz)/rz)>=0.67 then
+            candidates[#candidates+1]={point=p,score=math.random()}
+        end
+    end
+    local points={}
+    local spacing=math.max(18,math.min(45,math.min(rx,rz)/4))
+    for pick_index=1,count do
+        local found
+        while not found do
+            local best
+            for i,candidate in ipairs(candidates) do
+                if not best or candidate.score>candidates[best].score then best=i end
+            end
+            if not best or pick_index>1 and candidates[best].score<spacing^2 then return nil,true end
+            local candidate=table.remove(candidates,best)
+            if not crowded(candidate.point) then found=candidate.point end
+        end
+        points[pick_index]=found
+        for _,candidate in ipairs(candidates) do
+            local distance=distance2(candidate.point,found)
+            candidate.score=pick_index==1 and distance or math.min(candidate.score,distance)
+        end
+    end
+    return points,true
+end
+
+local function caches() return treasure_manager and treasure_manager.caches end
+local function marked(id,spot) return level.map_has_object_spot(id,spot)~=0 end
+local function available_box(box,id)
+    return box and not box:inv_box_closed_status() and box:inv_box_can_take_status() and
+        not marked(id,STASH_SPOT) and not marked(id,"treasure_searched") and not marked(id,"treasure_unique")
+end
+
+local function find_stash()
+    local stock=caches()
+    if not stock then return end
+    local found, seen=nil,0
+    for id,available in pairs(stock) do
+        if available==false then
+            local obj,box=alife():object(id,true),level.object_by_id(id)
+            if obj and box and IsInvbox(nil,obj:clsid()) and available_box(box,id) then
+                local map=alife():level_name(game_graph():vertex(obj.m_game_vertex_id):level_id())
+                if map==level.name() then
+                    seen=seen+1
+                    if math.random(seen)==1 then found=ref(obj) end
+                end
+            end
+        end
+    end
+    return found
+end
+
+local function reserved(stash,owner)
+    local stock=caches()
+    local item=stock and stock[stash.id]
+    return type(item)=="table" and item.adb_battle==owner
+end
+
+local function protected(s,depth)
+    local section=s:section_name()
+    if common().protected_section(section) or common().meaningful_story_id(get_object_story_id(s.id)) or
+        IsItem("quest",section) or IsItem("anim",section) or section:match("^device_pda") or
+        section=="cash" or section=="bolt" or section=="bolt_bullet" or section=="device_flashlight" or
+        section=="wpn_binoc_inv" or cfg(section,"class")=="WP_KNIFE" or cfg(section,"kind")=="w_melee" or depth>=16 then
+        return true
+    end
+    for child_id in alife():get_children(s) do
+        local child=alife():object(child_id,true)
+        if not child or protected(child,depth+1) then return true end
+    end
+    return false
+end
+
+local function inventory(actor)
+    local items, slots={},{}
+    for i=1,17 do
+        local item=actor:item_in_slot(i)
+        if item then slots[item:id()]=i end
+    end
+    local failure
+    actor:iterate_inventory(function(_,item)
+        local ok,reason=pcall(function()
+            local id=item:id()
+            if item:clsid()==clsid.obj_bolt then return end
+            local obj=alife():object(id,true)
+            assert(obj and obj.parent_id==actor:id() and obj:name()==item:name(),"inventory_not_ready")
+            if not protected(obj,0) then
+                local row=ref(obj)
+                row.slot,row.belt=slots[id],actor:is_on_belt(item)
+                items[#items+1]=row
+            end
+        end)
+        if not ok then failure=reason end
+        return not ok
+    end,nil)
+    assert(not failure,failure)
+    return items
+end
+
+local function open_match(context, params)
+    if current() then return false,"deferred","battle_royale_waiting" end
+    local permitted,reason=common().params_only(params,{
+        participant_count=true,effect_policy=true,npc_sections=true,catalog_revision=true,adb_battle_opened_ms=true})
+    if not permitted then return false,"rejected",reason end
+    local count,err=common().parse_integer(params.participant_count,10,1,32,"battle_capacity_invalid")
+    if not count then return false,"rejected",err end
+    local policy=params.effect_policy or "continue"
+    if policy~="continue" and policy~="defer" then return false,"rejected","battle_effect_policy_invalid" end
+    local command=context.command
+    if not command or #command.command_id~=32 or not command.command_id:match("^[a-f0-9]+$") or
+        #command.donation_id==0 or #command.donation_id>256 then return false,"rejected","battle_command_invalid" end
+    if not state(true) then return false,"rejected","battle_save_unavailable" end
+    local sections
+    if params.npc_sections~=nil then
+        local entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"npc_sections","npc")
+        if not entries or #entries==0 then return false,"rejected",why or "battle_select_appearance" end
+        sections={}
+        for _,entry in ipairs(entries) do sections[#sections+1]=entry.section_id end
+    end
+    local open=os.time()*1000
+    local sent=tonumber(params.adb_battle_opened_ms)
+    if sent and sent>=open and sent<open+1000 then open=math.floor(sent) end
+    context.battle={id=command.command_id,opening=command.donation_id,opened=open,
+        slots=count,defer=policy=="defer",roster={},phase="recruiting",npc_sections=sections}
+    return true
+end
+
+local function start_match(context)
+    state().match=context.battle
+    scan,next_scan=nil,0
+    return "executed","battle_recruitment_open"
+end
+
+local function prepare(match,actor)
+    if now()<(next_scan or 0) then return end
+    if alife_storage_manager.get_state().enable_azazel_mode or anomaly_donation_bridge_registry.busy_reason(ID) then
+        match.waiting="mode"
+        return
+    end
+    if scan and scan.level~=level.name() then scan=nil end
+    if not scan then
+        local stash=find_stash()
+        if not stash then match.waiting="stash";next_scan=now()+5000;return end
+        local suits,guns=collect_gear()
+        if not suits then match.waiting="equipment";next_scan=now()+5000;return end
+        match.waiting="search"
+    end
+    local points,done=scan_vertices(actor,match.slots+1)
+    if not done then return end
+    scan=nil
+    if not points then match.waiting="map";next_scan=now()+5000;return end
+    local stash=find_stash()
+    if not stash then match.waiting="stash";next_scan=now()+5000;return end
+    local suits,guns=collect_gear()
+    if not suits then match.waiting="equipment";next_scan=now()+5000;return end
+    local appearances=plan_appearances(match)
+    if not appearances then match.waiting="appearance";next_scan=now()+5000;return end
+    match.stash,match.origin,match.points,match.level=stash,point(actor),points,level.name()
+    match.hero,match.exits,match.companions,match.items=random_gear(suits,guns),{},{},{}
+    for index,entry in ipairs(match.roster) do
+        entry.kit,entry.visual=random_gear(suits,guns),appearances[index]
+    end
+    -- A false stock cache is available. The treasure script only consumes
+    -- generated booleans and strings, leaving this match-owned entry alone.
+    caches()[stash.id]={adb_battle=match.id}
+    match.phase,match.step,match.index="preparing","npc",1
+    running,exit_check_at=nil,0
+end
+
+local function keep_online(obj)
+    alife():set_switch_online(obj.id,true)
+    alife():set_switch_offline(obj.id,false)
+end
+
+local function set_enemy(npc,other)
+    npc:force_set_goodwill(-5000,other)
+    npc:set_relation(game_object.enemy,other)
+end
+
+local function spawn(match,entry,p)
+    if type(alife_on_limit)=="function" and alife_on_limit() then error("alife_capacity",0) end
+    local obj=assert(alife_create(SECTION,vector_at(p),p.vertex,p.game_vertex),"participant_spawn_failed")
+    entry.object=ref(obj)
+    tag(obj,match)
+    live_members[obj.id]=entry
+    obj:set_character_name(cp(entry.name))
+    keep_online(obj)
+end
+
+local function visual_key(path)
+    return (path or ""):lower():gsub("/","\\"):gsub("%.ogf$","")
+end
+
+local function apply_appearance(npc,visual)
+    if not visual or visual_key(npc:get_visual_name())==visual_key(visual) then return end
+    local prepared,reason=anomaly_donation_bridge_npc_visuals.prepare_visual(visual,SECTION)
+    assert(prepared,reason or "battle_visual_unavailable")
+    -- Monolith exports the force argument. Stock Anomaly accepts only the path.
+    local ok=pcall(function() npc:set_visual_name(prepared,false) end)
+    if not ok and visual_key(npc:get_visual_name())~=visual_key(prepared) then
+        npc:set_visual_name(prepared)
+    end
+    assert(visual_key(npc:get_visual_name())==visual_key(prepared),"battle_visual_not_applied")
+end
+
+local function gear(match,owner,items,actor)
+    for _,row in ipairs(items) do
+        if not row.object then
+            if type(alife_on_limit)=="function" and alife_on_limit() then error("alife_capacity",0) end
+            local obj
+            if row.ammo then
+                -- alife_create_item returns a list for ammunition. Each kit row is one box.
+                obj=alife():create_ammo(row.section,owner:position(),owner:level_vertex_id(),
+                    owner:game_vertex_id(),owner:id(),row.ammo)
+            else
+                obj=alife_create_item(row.section,owner,{cond=1})
+            end
+            assert(obj,"equipment_spawn_failed")
+            row.object=ref(obj)
+            tag(obj,match)
+            if row.ammo and type(alife_record)=="function" then alife_record(obj,true) end
+            return false
+        end
+        local obj,item=owned(row.object,match.id),client(row.object)
+        if not obj or not item or obj.parent_id~=owner:id() then return false end
+        local id=row.object.id
+        if row.magazine and pending_slot[id]==nil then
+            item:set_ammo_elapsed(row.magazine)
+            pending_slot[id]="ammo"
+        end
+        if actor and row.slot and not owner:item_in_slot(row.slot) then
+            if pending_slot[id]~="slot" then
+                owner:move_to_slot(item,row.slot,true)
+                pending_slot[id]="slot"
+            end
+            return false
+        end
+    end
+    return true
+end
+
+local function set_exits(match, allow)
+    if allow then
+        for _,entry in pairs(match.exits) do
+            local obj=server(entry) and client(entry)
+            if obj and not obj:is_level_changer_enabled() then obj:enable_level_changer(true) end
+        end
+    else
+        for id,entry in pairs(db.storage) do
+            local obj=entry.object
+            if obj and is_changer(obj) and obj:is_level_changer_enabled() then
+                local s=alife():object(id,true)
+                if s and is_changer(s) then
+                    match.exits[id]=ref(s)
+                    obj:enable_level_changer(false)
+                end
+            end
+        end
+    end
+end
+
+local function put_companions_on_hold(match)
+    if not axr_companions or type(axr_companions.set_companion_to_wait_state)~="function" then return end
+    for id,entry in pairs(db.storage) do
+        local npc=entry.object
+        if npc and id~=db.actor:id() and IsStalker(npc) and npc:alive() and
+            npc:has_info("npcx_is_companion") and not npc:has_info(WAIT) then
+            local s=alife():object(id,true)
+            if s then
+                local row=ref(s)
+                row.hold_at,row.old= npc:level_vertex_id(),load_var(npc,"fight_from_point")
+                match.companions[#match.companions+1]=row
+                axr_companions.set_companion_to_wait_state(npc)
+            end
+        end
+    end
+end
+
+local function restore_companions(rows)
+    local waiting=false
+    for _,row in ipairs(rows) do
+        local obj,npc=server(row),client(row)
+        if obj and obj:alive() and not npc then waiting=true
+        elseif npc and npc:alive() and npc:has_info("npcx_is_companion") and npc:has_info(WAIT) and
+            load_var(npc,"fight_from_point")==row.hold_at then
+            npc:disable_info_portion(WAIT)
+            save_var(npc,"fight_from_point",row.old)
+        end
+    end
+    return not waiting
+end
+
+local function move_items(match,actor,back)
+    local box=reserved(match.stash,match.id) and client(match.stash)
+    if box and (box:inv_box_closed_status() or not box:inv_box_can_take_status()) then box=nil end
+    local from,to,expected=actor,box,match.stash.id
+    if back then from,to,expected=box,actor,actor:id() end
+    local source_id=back and match.stash.id or actor:id()
+    local sent,done=0,true
+    for _,row in ipairs(match.items) do
+        local obj=server(row)
+        local parent=obj and obj.parent_id
+        if (not back or row.sent) and parent~=expected then
+            local item=client(row)
+            if parent==source_id then
+                done=false
+                local owner=item and item:parent()
+                if from and to and owner and owner:id()==source_id and sent<10 and pending_transfer[row.id]~=source_id then
+                    pending_transfer[row.id],row.sent=source_id,true
+                    from:transfer_item(item,to)
+                    sent=sent+1
+                end
+            elseif parent==65535 and row.sent then
+                done=false
+                if back and item and not item:parent() and sent<10 and pending_transfer[row.id]~=expected then
+                    pending_transfer[row.id]=expected
+                    actor:take_item(item)
+                    sent=sent+1
+                end
+            elseif not back then
+                error("original_item_changed",0)
+            end
+        end
+    end
+    return done
+end
+
+local function set_step(match,step)
+    match.step=step
+    running=nil
+end
+
+local function timeout(key,limit)
+    if not running or running.key~=key then running={key=key,start=now(),frame=device().frame} end
+    return now()-running.start>=limit
+end
+
+local function advance_preparation(match,actor)
+    if now()>=(exit_check_at or 0) then
+        set_exits(match,false)
+        exit_check_at=now()+1000
+    end
+    if match.step=="npc" then
+        local entry=match.roster[match.index]
+        if not entry then match.items=inventory(actor);set_step(match,"stash");return end
+        if timeout("npc"..match.index,18000) then error("participant_not_ready",0) end
+        if not entry.object then spawn(match,entry,match.points[match.index+1]);return end
+        local obj,npc=owned(entry.object,match.id),client(entry.object)
+        if not obj then error("participant_changed",0) end
+        if not npc then keep_online(obj);return end
+        if not npc:alive() then error("participant_died_during_preparation",0) end
+        if not entry.ready then
+            npc:set_character_community("arena_enemy",0,0)
+            if type(npc.movement_enabled)=="function" then npc:movement_enabled(false) end
+            apply_appearance(npc,entry.visual)
+            entry.ready=true
+        end
+        if gear(match,npc,entry.kit,false) then match.index=match.index+1 end
+    elseif match.step=="stash" then
+        if timeout("stash",18000) then error("stash_transfer_timeout",0) end
+        if move_items(match,actor,false) then set_step(match,"hero") end
+    elseif match.step=="hero" then
+        if timeout("hero",14000) then error("hero_equipment_timeout",0) end
+        if gear(match,actor,match.hero,true) then set_step(match,"move") end
+    elseif match.step=="move" then
+        for _,row in ipairs(match.items) do
+            local obj=server(row)
+            if not obj or obj.parent_id~=match.stash.id then error("stash_contents_changed",0) end
+        end
+        if not match.companions_held then put_companions_on_hold(match);match.companions_held=true end
+        local target=match.points[1]
+        if at(actor,target) then
+            match.phase,match.step,danger_at="fighting",nil,0
+        else
+            if timeout("move",3500) then error("teleport_timeout",0) end
+            if not move_sent then
+                match.moved=true
+                actor:set_actor_position(vector_at(target))
+                move_sent=true
+            end
+        end
+    end
+end
+
+local function release_owned(reference,id,owner_id)
+    local obj=owned(reference,id)
+    if not obj or owner_id and obj.parent_id~=owner_id then return true end
+    alife_release_id(obj.id)
+    return not server(reference)
+end
+
+local function remove_npc_mark(match,entry)
+    local spot=entry.marked==true and LEGACY_NPC_SPOT or entry.marked
+    if spot and owned(entry.object,match.id) then level.map_remove_object_spot(entry.object.id,spot) end
+    entry.marked=nil
+end
+
+local function pda_message(actor,text)
+    if news_manager and type(news_manager.send_tip)=="function" then
+        pcall(news_manager.send_tip,actor,cp(text),nil,nil,5000)
+    end
+end
+
+local function finish(match,won)
+    set_exits(match,true)
+    local companions=not restore_companions(match.companions) and match.companions or nil
+    state().recovery[match.id]={stash=match.stash,items=match.items,companions=companions,victory=won or nil}
+    for _,entry in ipairs(match.roster) do remove_npc_mark(match,entry) end
+    state().match=nil
+    pending_transfer,pending_slot,live_members,combat={},{},{},{}
+    move_sent,return_sent,running,recovery_at=nil,nil,nil,0
+    log(match.id..(won and " won" or " rolled back"))
+end
+
+local function rollback(match,actor)
+    local expired=timeout("rollback",20000)
+    if now()-running.start<250 or device().frame<running.frame+3 then return end
+    local done=true
+    for _,entry in ipairs(match.roster) do if not release_owned(entry.object,match.id) then done=false end end
+    for _,row in ipairs(match.hero) do if not release_owned(row.object,match.id,actor:id()) then done=false end end
+    if match.moved and not at(actor,match.origin) then
+        done=false
+        if not return_sent then
+            actor:set_actor_position(vector_at(match.origin))
+            return_sent=true
+        end
+    end
+    if not move_items(match,actor,true) then done=false end
+    if done or expired then
+        for _,row in ipairs(match.items) do
+            local obj,item=server(row),client(row)
+            if row.sent and obj and obj.parent_id==actor:id() and item then
+                if row.slot and not actor:item_in_slot(row.slot) then actor:move_to_slot(item,row.slot,true)
+                elseif row.belt and not actor:is_on_belt(item) then actor:move_to_belt(item) end
+            end
+        end
+        finish(match,false)
+    end
+end
+
+local function recover_stashes(actor)
+    if now()<(recovery_at or 0) then return end
+    recovery_at=now()+1000
+    local records=state().recovery
+    for match_id,entry in pairs(records) do
+        if entry.companions and restore_companions(entry.companions) then entry.companions=nil end
+        if entry.stash then
+            local stash=entry.stash
+            local remaining=false
+            for _,row in ipairs(entry.items) do
+                local obj=server(row)
+                if obj and obj.parent_id==stash.id then remaining=true;break end
+            end
+            if remaining then
+                if server(stash) then
+                    if not marked(stash.id,STASH_SPOT) then
+                        level.map_add_object_spot_ser(stash.id,STASH_SPOT,cp(STASH_HINT))
+                        stash.marked=STASH_SPOT
+                    elseif stash.marked==true and reserved(stash,match_id) then
+                        level.map_change_spot_hint(stash.id,STASH_SPOT,cp(STASH_HINT))
+                        stash.marked=STASH_SPOT
+                    end
+                end
+            else
+                if reserved(stash,match_id) then
+                    if stash.marked and server(stash) then level.map_remove_object_spot(stash.id,STASH_SPOT) end
+                    caches()[stash.id]=false
+                end
+                entry.stash,entry.items=nil,nil
+            end
+            if entry.victory then
+                local has_marker=remaining and server(stash) and marked(stash.id,STASH_SPOT)
+                if has_marker or not remaining then
+                    entry.victory=nil
+                    pda_message(actor,has_marker and "Вы смогли выжить. Ваше снаряжение отмечено на карте в КПК." or
+                        "Вы смогли выжить.")
+                end
+            end
+        end
+        if not entry.stash and not entry.companions then records[match_id]=nil end
+    end
+end
+
+local function eliminated(match,entry,actor)
+    if entry.out then return end
+    entry.out=true
+    local obj=owned(entry.object,match.id)
+    if obj then alife():set_switch_offline(obj.id,true) end
+    remove_npc_mark(match,entry)
+    pda_message(actor,"%c[255,238,153,26]"..entry.name.."%c[default]: выбыл")
+end
+
+local function fight(match,actor)
+    if now()<(danger_at or 0) then return end
+    danger_at=now()+5000
+    set_exits(match,false)
+    local npcs,changed={},false
+    for _,entry in ipairs(match.roster) do
+        if not entry.out then
+            local obj,npc=owned(entry.object,match.id),client(entry.object)
+            if obj and (npc and not npc:alive() or not npc and not obj:alive()) then
+                eliminated(match,entry,actor)
+            elseif not obj then
+                if entry.missing then eliminated(match,entry,actor) else entry.missing=true end
+            else
+                entry.missing=nil
+                keep_online(obj)
+                if entry.marked==true then remove_npc_mark(match,entry) end
+                if not obj:visible_for_map() then obj:visible_for_map(true) end
+                if not marked(obj.id,NPC_SPOT) then
+                    level.map_add_object_spot_ser(obj.id,NPC_SPOT,cp(entry.name))
+                    entry.marked=NPC_SPOT
+                end
+                if npc then
+                    if not combat[obj.id] then
+                        set_enemy(npc,actor)
+                        if type(npc.movement_enabled)=="function" then npc:movement_enabled(true) end
+                        combat[obj.id],changed=true,true
+                    end
+                    npcs[#npcs+1]=npc
+                else
+                    combat[obj.id]=nil
+                end
+            end
+        end
+    end
+    for _,npc in ipairs(npcs) do
+        if changed then
+            for _,other in ipairs(npcs) do if npc:id()~=other:id() then set_enemy(npc,other) end end
+        end
+        if not npc:see(actor) then npc:memory_remove_links(actor) end
+        npc:make_object_visible_somewhen(actor)
+        npc:enable_memory_object(actor,true)
+    end
+end
+
+local function contestant(npc,match)
+    local entry=npc and live_members[npc:id()]
+    if entry and not entry.out and entry.object.name==npc:name() and entry.object.section==npc:section() and
+        owned(entry.object,match.id) then return entry end
+end
+
+local function tick()
+    if not state() or loaded_frame and device().frame<loaded_frame+8 then return end
+    local actor=db and db.actor
+    if not actor or not actor:alive() or not level.present() or device():is_paused() or
+        (device().precache_frame or 0)>0 or type(app_ready)=="function" and not app_ready() or
+        type(Check_UI)=="function" and Check_UI() then hide_hud();return end
+    recover_stashes(actor)
+    local match=current()
+    if not match then hide_hud();return end
+    if match.phase=="recruiting" then
+        if #match.roster==match.slots and not actor:is_talking() and not actor:get_current_holder() and
+            not actor:has_info("actor_is_sleeping") and not actor:has_info("sleep_active") then prepare(match,actor) end
+    elseif match.level==level.name() then
+        if match.phase=="preparing" then advance_preparation(match,actor)
+        elseif match.phase=="rollback" then rollback(match,actor)
+        else
+            fight(match,actor)
+            if alive_count(match)==0 then finish(match,true) end
+        end
+    end
+    match=current()
+    if match then show_hud(match) else hide_hud() end
+end
+
+local function update()
+    local ok,reason=pcall(tick)
+    if ok then return end
+    local match=current()
+    if match and match.phase=="preparing" then
+        match.phase,running="rollback",nil
+        log(match.id.." preparation "..match.step.." failed: "..tostring(reason))
+    elseif match and match.phase=="recruiting" then
+        match.waiting,scan,next_scan="map",nil,now()+5000
+        log(reason)
+    elseif match and match.phase=="rollback" and timeout("rollback",20000) then
+        pcall(finish,match,false)
+    end
+end
+
+local function on_load()
+    pcall(hide_hud)
+    scan,next_scan,loaded_frame,running,recovery_at,danger_at,exit_check_at=nil,0,device().frame,nil,0,0,0
+    pending_transfer,pending_slot,live_members,combat={},{},{},{}
+    move_sent,return_sent=nil,nil
+    local match=current()
+    if match then
+        for _,entry in ipairs(match.roster) do
+            if entry.object then live_members[entry.object.id]=entry end
+            if match.phase=="preparing" then entry.ready=nil end
+            entry.missing=nil
+        end
+    end
+end
+
+local function supported()
+    return USE_MARSHAL~=false and alife_storage_manager~=nil and level and type(level.vertex_link)=="function" and
+        type(level.map_add_object_spot_ser)=="function" and type(alife_create_item)=="function" and
+        type(se_save_var)=="function" and type(se_load_var)=="function" and type(IsItem)=="function" and
+        anomaly_donation_bridge_npc_visuals and type(anomaly_donation_bridge_npc_visuals.models_for_npc)=="function" and
+        system_ini():section_exist(SECTION) and CUIScriptWnd~=nil and CUITextWnd~=nil and
+        type(GetFontLetterica16Russian)=="function", "battle_royale_game_api_unavailable"
+end
+
+function on_game_start()
+    if registered then return end
+    local ok,reason=anomaly_donation_bridge_registry.register(ID,{
+        is_supported=supported,can_execute=open_match,execute=start_match,on_game_load=on_load,
+        is_blocking=function() return holds_effects(current()) end,
+        allow_while_blocking={[ID]=true},
+        on_level_changing=function()
+            pcall(hide_hud)
+            local match=current()
+            if match and match.phase~="recruiting" and match.level==level.name() then set_exits(match,true) end
+            scan=nil
+        end
+    })
+    if not ok then log(reason);return end
+    registered=true
+    RegisterScriptCallback("actor_on_update",update)
+    RegisterScriptCallback("actor_on_before_death",function() pcall(hide_hud) end)
+    RegisterScriptCallback("actor_on_net_destroy",function() pcall(hide_hud) end)
+    RegisterScriptCallback("on_before_load_input",function() pcall(hide_hud) end)
+    RegisterScriptCallback("npc_on_net_spawn",function(npc) combat[npc:id()]=nil end)
+    RegisterScriptCallback("npc_on_death_callback",function(npc)
+        local match=current()
+        if not match or match.phase~="fighting" or match.level~=level.name() then return end
+        local entry=contestant(npc,match)
+        if entry then pcall(eliminated,match,entry,db.actor) end
+    end)
+    RegisterScriptCallback("npc_on_before_hit",function(npc,_,_,flags)
+        local match=current()
+        if match and match.phase=="preparing" and type(flags)=="table" and contestant(npc,match) then flags.ret_value=false end
+    end)
+    RegisterScriptCallback("on_enemy_eval",function(npc,other,flags)
+        local match=current()
+        if not match or not other or type(flags)~="table" or not contestant(npc,match) then return end
+        flags.override=true
+        flags.result=match.phase=="fighting" and (db.actor and other:id()==db.actor:id() or contestant(other,match)~=nil) or false
+    end)
+end

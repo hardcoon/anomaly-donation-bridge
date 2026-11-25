@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "AnomalyDonationBridge",
-  "addonVersion": "1.0.191",
+  "addonVersion": "1.0.196",
   "protocolVersion": "1",
   "pipeName": "AnomalyDonationBridge.v1",
   "files": [
@@ -19,7 +19,7 @@
     },
     {
       "path": "gamedata/configs/mod_system_anomaly_donation_bridge.ltx",
-      "sha256": "44F544AC82051AD2D75ABBAB8A318B40AD8BC63CD6B6C811D4C79743B2F79BC9"
+      "sha256": "FD40A8C265DEA5C663DD8D566DAF680AB2400B6C7C3473920213C14D6F63BBB4"
     },
     {
       "path": "gamedata/configs/models/weapons/anomaly_donation_bridge_stationary_mgun.ltx",
@@ -91,7 +91,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_catalog.script",
-      "sha256": "AE52B9211775C546FCD0A02C464845AB5781737267C6C1B6D9121048AE90648C"
+      "sha256": "B52F7481D22A3D0C25F6C5908E098261E551ADE1CCC3AEE5C10C7EACE63B0AB0"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_common.script",
@@ -107,11 +107,11 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_named_companion.script",
-      "sha256": "D8F9A73BFDFED4EE980F7C46F5A37F1A903028AC09BEAB3BAEC30C12E0F27641"
+      "sha256": "283E7CC1DAA4DA9F93959CEA74A8EEDAF53E2630C2C3CD15438B68BEDB5601F7"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_npc_visuals.script",
-      "sha256": "357F9508BE315BC27128F2ADAC90CE7BE88D7AB3077B27A89A0667B60467745B"
+      "sha256": "D4DF41ECE2BDAFDB51BAAACCEBE465DFB9AECD9627A4443CDAF078B21B4DF15C"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_props.script",
@@ -119,7 +119,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_protocol.script",
-      "sha256": "2E8AF2C1B23BFE873DBA22E87578D514645B54010456AA4838D308738B239179"
+      "sha256": "6342B880F9056EBF95A1099F3908AC05F3341F74A62C0F6C2FDBBE09EFBE3BB4"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_registry.script",
@@ -127,7 +127,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_reincarnation.script",
-      "sha256": "DCC1677B285A3FD884A99F903AD1CDA9682C73BD2A58BBAD462B8B24D38F1FCA"
+      "sha256": "D006386FB2AE520EF1E4BAF232A222ED6EF1D4CDECCE8633BBA1675E1BC9C661"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_relife_companions.script",
@@ -155,7 +155,7 @@
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_runtime.script",
-      "sha256": "C77BB89853D866B407A6B587D92C02F841FDAF956158E679404301874944673F"
+      "sha256": "CEEDD7C2E23E3A6BAD43E00761DC0ECA6386A51CF5488E0E685539035CC13E27"
     },
     {
       "path": "gamedata/scripts/anomaly_donation_bridge_sha256.script",

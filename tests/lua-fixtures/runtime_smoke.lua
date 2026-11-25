@@ -441,5 +441,17 @@ for _,message in ipairs(runtime_logs) do
     if message:find("intentional_runtime_smoke_failure",1,true) then saw_failure=true end
 end
 assert(saw_failure,"Removing command traces also hid real execution errors")
+
+local enc=anomaly_donation_bridge_protocol.percent_encode
+local repeat_params=";adb_replay_by="..enc("Новый%")..";adb_replay_from="..enc("Прошлый")
+local replay={"COMMAND","cmd-replay","don-replay","author.test.action","100","RUB","value=1"..repeat_params}
+local messages_before=#pda_messages
+queued={replay};now=now+100;runtime.update()
+assert(#pda_messages==messages_before+1)
+assert(anomaly_donation_bridge_common.game_text_utf8(pda_messages[#pda_messages])==
+    "%c[255,238,153,26]Новый_%c[default] повторяет донат от %c[255,238,153,26]Прошлый%c[default]")
+queued={replay,{"COMMAND","cmd-replay-rejected","don-rejected","author.test.action","100","RUB","value=0"..repeat_params}}
+now=now+100;runtime.update()
+assert(#pda_messages==messages_before+1,"Rejected or duplicate commands repeated the PDA notice")
 for _, path in ipairs(created_save_paths) do os.remove(path) end
 print("runtime protocol smoke passed")

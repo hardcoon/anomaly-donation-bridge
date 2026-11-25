@@ -73,6 +73,7 @@ public sealed class MainViewModel : ObservableObject
         UserPresetBrowser.PreferencesChanged += SaveViewPreferences;
         PresetBrowser.PreferencesChanged += SaveViewPreferences;
         CodeCommand = new RelayCommand(parameter => Run(() => _runtime.OpenActionCode(((ActionViewModel)parameter!).Model)));
+        CancelBattleCommand = new AsyncRelayCommand(_ => RunAsync(_runtime.CancelBattleAsync));
         TestCommand = new AsyncRelayCommand(
             parameter => TestActionAsync((ActionViewModel)parameter!),
             parameter => parameter is ActionViewModel action && action.CanTest,
@@ -291,6 +292,8 @@ public sealed class MainViewModel : ObservableObject
     public Func<IReadOnlyList<CatalogEntry>, IReadOnlyList<CatalogEntry>?>? SelectCatalogExclusions { get; set; }
 
     public ICommand CodeCommand { get; }
+    internal ICommand CancelBattleCommand { get; }
+    internal bool CanCancelBattle(ActionViewModel action) => action.HandlerId == BattleRoyalePipe.Handler && _runtime.CanCancelBattle;
     public ICommand TestCommand { get; }
     public ICommand RunAsDonorCommand { get; }
     public ICommand TestPriceGroupCommand { get; }

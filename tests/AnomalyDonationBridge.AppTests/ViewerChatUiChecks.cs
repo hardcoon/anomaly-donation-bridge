@@ -31,6 +31,7 @@ internal static class ViewerChatUiChecks
         {
             foreach (var light in new[] { false, true })
             {
+                runtime.UpdateUiPreferencesAsync(preferences => preferences with { ViewerChatShowTimestamps = false }).GetAwaiter().GetResult();
                 ThemeManager.Apply(light);
                 runtime.Settings.UseLightTheme = light;
                 using var view = new ViewerChatView(runtime);
@@ -63,6 +64,9 @@ internal static class ViewerChatUiChecks
                 Layout(view, 1000, 680);
                 Check(((Border)view.FindName("ConnectionsPanel")).ActualHeight < expandedHeight - 100,
                     "The entire links block must collapse together");
+                var settingsButton = (Button)view.FindName("ChatSettingsButton");
+                Check(settingsButton.ContextMenu.Items.Count == 1 && settingsButton.TranslatePoint(new Point(), view).X > view.ActualWidth - 80,
+                    "Chat settings must be a small gear at the right of Connections");
                 Save(view, Path.Combine(output, $"chat-{(light ? "light" : "dark")}-empty.png"));
                 for (var i = 0; i < 15; i++)
                     runtime.ViewerChat.Publish(new((ChatPlatform)(i % 3), "channel", "sample-" + light + "-" + i, "user-" + (i % 5),
@@ -81,6 +85,7 @@ internal static class ViewerChatUiChecks
                 Layout(view, 510, 600);
                 Save(view, Path.Combine(output, $"chat-{(light ? "light" : "dark")}-narrow.png"));
                 Check(list.ActualWidth <= view.ActualWidth && list.ActualWidth > 0, "Chat overflows narrow pane");
+                CheckTimestamps(view, runtime, new AppPaths(Path.Combine(temporary.Path, "data")), light, output);
                 CheckAutoScroll(view, runtime, light);
             }
             ThemeManager.Apply(false);
@@ -123,10 +128,41 @@ internal static class ViewerChatUiChecks
             Save(root, Path.Combine(output, "chat-main-compact.png"));
             window.Close();
             Check(trace.ToString().Length == 0, "WPF chat binding errors: " + trace);
-            Console.WriteLine("PASS viewer chat rendering, lower-15-percent auto-scroll, paused history, incremental rows and embedded navigation.");
+            Console.WriteLine("PASS viewer chat rendering, 150-message paging, anchored history, timestamps, no message tooltip, auto-scroll and embedded navigation.");
             return 0;
         }
         finally { runtime.DisposeAsync().AsTask().GetAwaiter().GetResult(); app.Shutdown(); }
+    }
+    private static void CheckTimestamps(ViewerChatView view, BridgeRuntime runtime, AppPaths paths, bool light, string output)
+    {
+        var list = (ListBox)view.FindName("MessageList");
+        var first = (ChatDisplayRow)list.Items[0];
+        Check(first.TimestampText.Length == 0, "Timestamps should be hidden by default");
+        var rowGrid = Descendants<Grid>(list).First(item => item.DataContext is ChatDisplayRow);
+        Check(rowGrid.ToolTip is null, "Message metadata still appears as a hover tooltip");
+        var setting = (MenuItem)view.FindName("ShowTimestampsMenuItem");
+        setting.IsChecked = true; setting.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        var wait = Stopwatch.StartNew();
+        while (!setting.IsEnabled && wait.Elapsed < TimeSpan.FromSeconds(5))
+        { Settle(view, 510, 600); Thread.Sleep(5); }
+        view.Refresh(); Settle(view, 510, 600);
+        Check(setting.IsEnabled && first.TimestampText.StartsWith('[') && ReferenceEquals(first, list.Items[0]),
+            "Toggling timestamps rebuilt rows or failed to update existing messages");
+        Check(new JsonUiPreferencesStore(paths).LoadAsync().GetAwaiter().GetResult().ViewerChatShowTimestamps,
+            "Timestamp choice was not saved");
+        using var independent = new ViewerChatView(runtime);
+        Layout(independent, 1000, 680);
+        var other = (ListBox)independent.FindName("MessageList");
+        Check(other.Items.OfType<ChatDisplayRow>().All(row => row.TimestampText.Length > 0),
+            "New chat windows do not share the saved timestamp setting");
+        Save(view, Path.Combine(output, $"chat-{(light ? "light" : "dark")}-timestamps.png"));
+        setting.IsChecked = false; setting.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        wait.Restart();
+        while (!setting.IsEnabled && wait.Elapsed < TimeSpan.FromSeconds(5))
+        { Settle(view, 510, 600); Thread.Sleep(5); }
+        independent.Refresh();
+        Check(first.TimestampText.Length == 0 && other.Items.OfType<ChatDisplayRow>().All(row => row.TimestampText.Length == 0),
+            "Timestamp setting did not synchronize between independent windows");
     }
     private static void CheckAutoScroll(ViewerChatView view, BridgeRuntime runtime, bool light)
     {
@@ -138,8 +174,21 @@ internal static class ViewerChatUiChecks
         for (var i = 0; i < 400; i++) Publish(i);
         view.Refresh(); view.Refresh(); Settle(view, 510, 600);
         var scroll = Descendants<ScrollViewer>(list).First();
+        Check(list.Items.Count == 150 && ((ChatDisplayRow)list.Items[0]).Text == "Сообщение 250",
+            "Chat initially loaded more than its latest 150 messages");
         Check(scroll.ScrollableHeight > 30 && scroll.ScrollableHeight - scroll.VerticalOffset <= 1,
             "Chat did not initially follow the latest message");
+        var anchor = ((ChatDisplayRow)list.Items[0]).Sequence;
+        scroll.ScrollToTop(); Settle(view, 510, 600);
+        Check(list.Items.Count == 300 && ((ChatDisplayRow)list.Items[(int)scroll.VerticalOffset]).Sequence == anchor,
+            $"Prepending history did not add 150 messages and retain the visible row: rows={list.Items.Count}, offset={scroll.VerticalOffset}");
+        var oldestLoaded = ((ChatDisplayRow)list.Items[0]).Sequence;
+        scroll.ScrollToTop(); Settle(view, 510, 600);
+        Check(list.Items.Count == 400 && ((ChatDisplayRow)list.Items[(int)scroll.VerticalOffset]).Sequence == oldestLoaded,
+            "Final partial history page changed the reading position");
+        newMessages.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Settle(view, 510, 600);
+        Check(list.Items.Count == 150 && scroll.ScrollableHeight - scroll.VerticalOffset <= 1,
+            $"Returning to live did not restore a single 150-message page: rows={list.Items.Count}, offset={scroll.VerticalOffset}, range={scroll.ScrollableHeight}, follow={typeof(ViewerChatView).GetField("_followTail", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)}");
         var bottom = scroll.VerticalOffset;
         list.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, 120) { RoutedEvent = UIElement.PreviewMouseWheelEvent });
         scroll.LineUp(); Settle(view, 510, 600);

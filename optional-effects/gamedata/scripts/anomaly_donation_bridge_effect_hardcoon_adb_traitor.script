@@ -1,0 +1,613 @@
+--[[ADB_PRESET_V1
+{
+  "schemaVersion":1,
+  "handlerId":"hardcoon.adb.traitor",
+  "displayName":"Предатель в отряде",
+  "description":"В отряде скрывается предатель. Недостающие напарники получают ники из последних донатов в истории. После каждой гибели по таймеру в КПК приходит улика с выделенным условием. Попадания героя по участникам раунда и их гибель от этих попаданий или таймера не портят репутацию и отношения. Чтобы остановить убийства, предатель должен погибнуть, пока в отряде ещё есть невиновные.",
+  "category":"npc_mutants",
+  "cooldownSeconds":0,
+  "parameterDefinitions":[
+    {"key":"interval_seconds","displayName":"Убийства каждые N секунд","kind":"Integer","minimum":1,"maximum":2147483647,"defaultValue":"60"},
+    {"key":"minimum_members","displayName":"Минимум напарников для старта","kind":"Integer","minimum":3,"maximum":2147483647,"defaultValue":"5"},
+    {"key":"npc_sections","displayName":"Секции новых напарников (случайно из отмеченных)","kind":"MultiChoice","catalogKind":"Npc","minimumSelections":1,"defaultValue":""}
+  ],
+  "parameters":{"interval_seconds":"60","minimum_members":"5","npc_sections":""}
+}
+ADB_PRESET_END]]
+
+local ID="hardcoon.adb.traitor"
+local SAVE="adb_traitor_v1"
+local PINK="%c[255,255,140,196]"
+local GOLD="%c[255,238,153,26]"
+local DEFAULT="%c[default]"
+local registered,last_tick,loaded_frame,next_recruit,next_notice
+local proof_cache={}
+
+local function common() return anomaly_donation_bridge_common end
+local function cp(text) return common().game_text_cp1251_lossy(text) or "" end
+local function state()
+    return alife_storage_manager and alife_storage_manager.get_state()
+end
+local function current()
+    local data=state()
+    return data and data[SAVE]
+end
+local function valid_id(value)
+    return type(value)=="string" and #value>0 and #value<=256 and not value:find("[%z\1-\31\127]")
+end
+local function log(reason)
+    if type(printf)=="function" then printf("[ADB traitor] %s",tostring(reason)) end
+end
+
+local function uppercase(byte)
+    if byte>=97 and byte<=122 or byte>=224 then return byte-32 end
+    if byte==184 then return 168 end
+    return byte
+end
+local function name_key(value)
+    return (value:gsub(".",function(c) return string.char(uppercase(c:byte())) end))
+end
+local function clean_name(value)
+    return (tostring(value or ""):gsub("[%z\1-\31\127%%\\]","_"):match("^%s*(.-)%s*$"))
+end
+local vowels={}
+local function facts(name)
+    if not next(vowels) then
+        for byte in ("AEIOU"..cp("АЕЁИОУЫЭЮЯ")):gmatch(".") do vowels[byte:byte()]=true end
+    end
+    local counts,first,last,n={},nil,nil,0
+    for index=1,#name do
+        local byte=uppercase(name:byte(index))
+        if byte>=65 and byte<=90 or byte>=192 and byte<=223 or byte==168 then
+            first,last=first or byte,byte
+            counts[byte]=(counts[byte] or 0)+1
+            if vowels[byte] then n=n+1 end
+        end
+    end
+    local result={}
+    local function add(kind,value)
+        local key=kind..":"..value
+        result[key]={key=key,kind=kind,value=value}
+    end
+    for threshold=0,n-1 do add("vowels",threshold) end
+    for byte,count in pairs(counts) do
+        add("letter",byte)
+        if count>=2 then add("repeat",count) end
+    end
+    local function boundary(kind,byte)
+        -- Y, Ъ and Ь still count for presence and repeated letters.
+        if byte and byte~=89 and byte~=218 and byte~=220 then
+            add(kind,vowels[byte] and "vowel" or "consonant")
+        end
+    end
+    boundary("start",first)
+    boundary("end",last)
+    return result
+end
+
+local function clue_text(clue)
+    if clue.kind=="vowels" then
+        return cp("В нике предателя ")..PINK..cp("больше "..clue.value..(clue.value==1 and " гласной" or " гласных"))..DEFAULT.."."
+    elseif clue.kind=="repeat" then
+        local ones,tens=clue.value%10,clue.value%100
+        local ending=ones>=2 and ones<=4 and (tens<12 or tens>14) and " раза" or " раз"
+        return cp("Одна и та же буква в нике предателя ")..PINK..cp("встречается "..clue.value..ending)..DEFAULT.."."
+    elseif clue.kind=="letter" then
+        return cp("В нике предателя ")..PINK..cp("есть буква «")..string.char(clue.value)..cp("»")..DEFAULT.."."
+    end
+    local vowel=clue.value=="vowel"
+    local condition=clue.kind=="start" and ("начинается с "..(vowel and "гласной" or "согласной")) or
+        ("заканчивается на "..(vowel and "гласную" or "согласную"))
+    return cp("Ник предателя ")..PINK..cp(condition)..DEFAULT.."."
+end
+
+local function shuffle(rows)
+    for index=#rows,2,-1 do
+        local other=math.random(index)
+        rows[index],rows[other]=rows[other],rows[index]
+    end
+end
+
+local function make_proof(people,hints,first,last,shared,decoys)
+    local traitor=shared[math.random(#shared)]
+    local witness=decoys[math.random(#decoys)]
+    local variants,extra={},nil
+    for _,hint in ipairs(hints) do
+        if hint.matches[traitor] then
+            variants[#variants+1]=hint.clue
+            if first and not extra and hint~=first and hint~=last and hint.matches[witness] then extra=hint end
+        end
+    end
+
+    -- Preserve a plausible innocent until the last clue. Every other NPC
+    -- satisfying both clues is among the planned victims.
+    local victims,chosen={},{}
+    for _,index in ipairs(shared) do
+        if index~=traitor then victims[#victims+1]=index;chosen[index]=true end
+    end
+    local count=first and math.max(2,#victims) or 1
+    if extra and #people>=5 then count=math.max(3,count) end
+    local others={}
+    for index=1,#people do
+        if index~=traitor and index~=witness and not chosen[index] then others[#others+1]=index end
+    end
+    shuffle(others)
+    while #victims<count do victims[#victims+1]=table.remove(others) end
+    shuffle(victims)
+    local steps={}
+    for index,victim in ipairs(victims) do
+        local hint=index==count and last or index==1 and first or extra or first
+        steps[index]={victim=victim,clue=hint.clue}
+    end
+    return traitor,steps,variants,witness
+end
+
+local function plan_proof(people)
+    local by_key,hints={},{}
+    for index,row in ipairs(people) do
+        for key,clue in pairs(facts(row.name)) do
+            local hint=by_key[key]
+            if not hint then
+                hint={clue=clue,matches={},members={}}
+                by_key[key]=hint
+            end
+            hint.matches[index]=true
+            hint.members[#hint.members+1]=index
+        end
+    end
+    for _,hint in pairs(by_key) do
+        if #hint.members>1 and #hint.members<#people then hints[#hints+1]=hint end
+    end
+    table.sort(hints,function(a,b) return a.clue.key<b.clue.key end)
+    shuffle(hints)
+    local fallback
+    if #people>=4 then
+        for _,first in ipairs(hints) do
+            for _,last in ipairs(hints) do
+                if first~=last then
+                    local shared,decoys={},{}
+                    for _,index in ipairs(first.members) do
+                        local target=last.matches[index] and shared or decoys
+                        target[#target+1]=index
+                    end
+                    if #shared>0 and #decoys>0 then
+                        if #shared<=4 then return make_proof(people,hints,first,last,shared,decoys) end
+                        fallback=fallback or {first,last,shared,decoys}
+                    end
+                end
+            end
+        end
+    end
+    if fallback then return make_proof(people,hints,unpack(fallback)) end
+    for _,hint in ipairs(hints) do
+        if #hint.members==2 then
+            local decoys={}
+            for index=1,#people do if not hint.matches[index] then decoys[#decoys+1]=index end end
+            return make_proof(people,hints,nil,hint,hint.members,decoys)
+        end
+    end
+end
+
+local function proof_for(kind,people)
+    local names={}
+    for _,row in ipairs(people) do names[#names+1]=name_key(row.name) end
+    local signature=table.concat(names,"\0")
+    local cached=proof_cache[kind]
+    if not cached or cached.signature~=signature then
+        cached={signature=signature,solution={plan_proof(people)}}
+        proof_cache[kind]=cached
+    end
+    return unpack(cached.solution)
+end
+
+local function reference(object,name)
+    return {id=object.id,internal=object:name(),section=object:section_name(),name=name}
+end
+
+local function find_subject(row)
+    local object=alife():object(row.id,true)
+    if not object or object:name()~=row.internal or object:section_name()~=row.section then return end
+    local client=level.object_by_id(row.id)
+    if client and client:name()==row.internal and client:section()==row.section then return object,client end
+    return object
+end
+
+local function participant(round,npc)
+    local id=npc:id()
+    for index,row in ipairs(round.people) do
+        if row.id==id and row.internal==npc:name() and row.section==npc:section() then return row,index end
+    end
+end
+
+local function protects_death(round,row,index)
+    local pending=round.death
+    return row.neutral_actor_hit or pending and pending.victim==index and pending.phase=="requested"
+end
+
+local function sample_companion_reputation(round,refund)
+    local actor=db and db.actor
+    local statistics=game_statistics and game_statistics.actor_statistics
+    local statistic=statistics and statistics.killed_companions
+    if not actor or type(actor.character_reputation)~="function" or not statistic or
+        type(statistic.count)~="number" or type(statistic.rept)~="number" then return end
+    local reputation=actor:character_reputation()
+    -- Vanilla records a lost companion before emitting npc_on_death_callback,
+    -- even when that companion was not killed by the actor.
+    if refund and statistic.rept<0 and round.companion_losses==statistic.count-1 and
+        type(round.reputation)=="number" and reputation==math.max(-4000,math.min(4000,round.reputation+statistic.rept)) and
+        type(actor.set_character_reputation)=="function" then
+        actor:set_character_reputation(round.reputation)
+        reputation=round.reputation
+    end
+    round.companion_losses,round.reputation=statistic.count,reputation
+end
+
+local function eligible_people()
+    local people={}
+    for _,row in ipairs(anomaly_donation_bridge_relife_companions.capture({})) do
+        local object=alife():object(row.id,true)
+        if object and object:name()==row.internal then
+            local npc=level.object_by_id(row.id)
+            local name=clean_name(npc and npc:character_name() or object:character_name())
+            if name~="" then people[#people+1]=reference(object,name) end
+        end
+    end
+    return people
+end
+
+local function notice(actor, text, now)
+    if next_notice and now<next_notice then return false end
+    local ok,result=pcall(news_manager.send_tip,actor,text,0,nil,7000)
+    if ok and result~=false then return true end
+    next_notice=now+1000
+    return false
+end
+
+local function finish(round,outcome)
+    local data=state()
+    if data and data[SAVE]==round then data[SAVE]=nil end
+    log(round.id.." "..outcome)
+end
+
+local function opening_time(params)
+    local now=os.time()*1000
+    local sent=tonumber(params.adb_traitor_opened_ms)
+    return sent and sent>=now and sent<now+1000 and math.floor(sent) or now
+end
+
+local function supported()
+    return USE_MARSHAL~=false and alife_storage_manager and anomaly_donation_bridge_relife_companions and
+        anomaly_donation_bridge_named_companion and type(anomaly_donation_bridge_named_companion.spawn_recruited)=="function" and
+        anomaly_donation_bridge_catalog and news_manager and type(news_manager.send_tip)=="function"
+end
+
+local function can_execute(context,params)
+    if current() then return false,"deferred","traitor_round_in_progress" end
+    local valid,why=common().params_only(params,{interval_seconds=true,minimum_members=true,npc_sections=true,
+        catalog_revision=true,adb_traitor_opened_ms=true})
+    if not valid then return false,"rejected",why end
+    local interval;interval,why=common().parse_integer(params.interval_seconds,60,1,2147483647,"traitor_interval_invalid")
+    if not interval then return false,"rejected",why end
+    local minimum;minimum,why=common().parse_integer(params.minimum_members,5,3,2147483647,"traitor_minimum_invalid")
+    if not minimum then return false,"rejected",why end
+    local entries;entries,why=anomaly_donation_bridge_catalog.validate_sections(params,"npc_sections","npc")
+    if not entries or #entries==0 then return false,"rejected",why or "traitor_sections_empty" end
+    local command=context.command
+    if not command or not valid_id(command.donation_id) or not command.command_id or
+        #command.command_id~=32 or not command.command_id:match("^[a-f0-9]+$") then
+        return false,"rejected","traitor_command_invalid"
+    end
+    if not state() then return false,"rejected","traitor_save_unavailable" end
+    local sections={}
+    for _,entry in ipairs(entries) do sections[#sections+1]=entry.section_id end
+    local people=eligible_people()
+    context.traitor={id=command.command_id,opening=command.donation_id,opened=opening_time(params),cursor="",
+        phase="recruiting",interval=interval*1000,minimum=minimum,sections=sections,people=people,
+        recruits={},needed=math.max(0,minimum-#people)}
+    return true
+end
+
+local function execute(context)
+    state()[SAVE]=context.traitor
+    next_recruit,next_notice=0,0
+    proof_cache={}
+    return "executed","traitor_recruitment_open"
+end
+
+function enabled() return registered==true end
+
+function status()
+    local round=current()
+    if not round or round.phase~="recruiting" or round.needed<=0 then return {"TRAITOR_STATUS","idle"} end
+    return {"TRAITOR_STATUS","recruiting",round.id,round.opening,string.format("%.0f",round.opened),
+        tostring(round.needed),round.cursor}
+end
+
+function receive(fields)
+    local round=current()
+    if not round or round.phase~="recruiting" or round.needed<=0 or fields[1]~="TRAITOR_ROSTER" or
+        fields[2]~=round.id or fields[3]~=round.cursor or #fields<4 or #fields>18 or #fields%2~=0 or
+        (fields[4]~="last" and (fields[4]~="more" or #fields==4)) then return end
+    local names={}
+    for _,row in ipairs(round.people) do names[name_key(row.name)]=true end
+    for _,recruit in ipairs(round.recruits) do names[name_key(recruit.visible)]=true end
+    for index=5,#fields,2 do
+        local donation,name=fields[index],fields[index+1]
+        if not valid_id(donation) or #name>128 or not common().is_valid_utf8(name) then return end
+        local visible=clean_name(cp(name))
+        round.cursor=donation
+        if round.needed>0 and visible~="" and not names[name_key(visible)] and next(facts(visible)) then
+            round.recruits[#round.recruits+1]={name=name,visible=visible}
+            names[name_key(visible)]=true
+            round.needed=round.needed-1
+        end
+    end
+    round.history_exhausted=fields[4]=="last"
+end
+
+local function spawn_next(round,actor,recruit)
+    local sections={}
+    for _,section in ipairs(round.sections) do
+        if anomaly_donation_bridge_catalog.is_available(section,"npc") then sections[#sections+1]=section end
+    end
+    if #sections==0 or type(alife_on_limit)=="function" and alife_on_limit() then return end
+    local result,reason=anomaly_donation_bridge_named_companion.spawn_recruited(actor,
+        sections[math.random(#sections)],recruit.name,function(object) recruit.object=reference(object,recruit.visible) end)
+    if result=="deferred" then return end
+    table.remove(round.recruits,1)
+    if result~="executed" then log(reason) end
+end
+
+local function recruit(round,actor,now)
+    if next_recruit and now<next_recruit then return end
+    next_recruit=now+500
+    round.people=eligible_people()
+
+    if #round.people>=round.minimum then
+        local traitor,steps,clues,witness=proof_for("present",round.people)
+        if traitor then
+            round.phase,round.traitor,round.proof,round.clues,round.witness="running",traitor,steps,clues,witness
+            round.step,round.used,round.remaining,round.roster_notice=1,{},round.interval,1
+            round.recruits,round.needed=nil,nil
+            proof_cache={}
+            return
+        end
+    end
+
+    local forecast,names,pending={},{},{}
+    for _,row in ipairs(round.people) do
+        forecast[#forecast+1]=row
+        names[name_key(row.name)]=true
+    end
+    for _,member in ipairs(round.recruits) do
+        local key=name_key(member.visible)
+        if not names[key] and not (member.object and find_subject(member.object)) then
+            forecast[#forecast+1]={name=member.visible}
+            pending[#pending+1]=member
+            names[key]=true
+        end
+    end
+    round.recruits=pending
+    if #pending>0 and #forecast>=round.minimum and proof_for("forecast",forecast) then
+        round.needed=0
+        spawn_next(round,actor,pending[1])
+        return
+    end
+
+    if round.history_exhausted then
+        round.needed=0
+        local message=#forecast<round.minimum and "В истории не хватило подходящих ников для добора." or
+            "Из имён отряда не получилось составить однозначные улики."
+        if notice(actor,PINK..cp("Предатель в отряде")..DEFAULT..". "..cp(message),now) then
+            finish(round,"insufficient_roster")
+        end
+        return
+    end
+    round.needed=math.max(1,round.minimum-#forecast)
+end
+
+local function announce_roster(round,actor,now)
+    local first=round.roster_notice
+    local last=math.min(first+7,#round.people)
+    local names={}
+    for index=first,last do names[#names+1]=round.people[index].name end
+    if notice(actor,PINK..cp("Предатель в отряде")..DEFAULT..cp(". Участники: ")..table.concat(names,", "),now) then
+        round.roster_notice=last<#round.people and last+1 or nil
+    end
+end
+
+local function inspect(round,elapsed)
+    local live,targets={},{}
+    for index,row in ipairs(round.people) do
+        if not row.out then
+            local object,npc=find_subject(row)
+            if object and (npc and not npc:alive() or not npc and not object:alive()) then
+                if npc and protects_death(round,row,index) and (row.death_callback_wait or 0)<1000 then
+                    -- Health can reach zero before the engine delivers its death event.
+                    row.death_callback_wait=(row.death_callback_wait or 0)+elapsed
+                    live[index]=true
+                else
+                    row.out="dead"
+                end
+            elseif not object or not anomaly_donation_bridge_relife_companions.owned(object) then
+                row.missing=(row.missing or 0)+elapsed
+                if row.missing>=5000 then row.out="departed" else live[index]=true end
+            else
+                row.missing=nil
+                live[index]=true
+                if npc and index~=round.traitor and not anomaly_donation_bridge_relife_companions.protected(object,{}) then
+                    targets[#targets+1]=index
+                end
+            end
+        end
+    end
+    return live,targets
+end
+
+local function another_clue(round)
+    local fresh={}
+    for _,clue in ipairs(round.clues) do
+        if not round.used[clue.key] then fresh[#fresh+1]=clue end
+    end
+    if #fresh==0 then fresh=round.clues end
+    return fresh[math.random(#fresh)]
+end
+
+local function next_death(round,targets)
+    local step=round.proof[round.step]
+    if step then
+        local row=round.people[step.victim]
+        if not row.out then
+            local available={}
+            for _,index in ipairs(targets) do
+                available[index]=true
+                if index==step.victim then return {victim=index,clue=step.clue,proof=true,phase="selected"} end
+            end
+            -- A companion can take longer to switch online after a level
+            -- change. Another planned victim can go first.
+            for index=round.step+1,#round.proof do
+                local later=round.proof[index]
+                if available[later.victim] then
+                    step.victim,later.victim=later.victim,step.victim
+                    return {victim=step.victim,clue=step.clue,proof=true,phase="selected"}
+                end
+            end
+            return
+        end
+        local others={}
+        for _,index in ipairs(targets) do
+            if index~=round.witness then others[#others+1]=index end
+        end
+        if #others>0 then targets=others end
+    end
+    if #targets==0 then return end
+    return {victim=targets[math.random(#targets)],clue=step and step.clue or another_clue(round),
+        proof=step~=nil,phase="selected"}
+end
+
+local function update_death(round,actor,now,elapsed)
+    local death=round.death
+    local row=round.people[death.victim]
+    local object,npc=find_subject(row)
+    if row.out=="dead" and death.phase=="requested" then death.phase="confirmed" end
+    if death.phase=="confirmed" then
+        local text=cp("Погиб ")..GOLD..row.name..DEFAULT..". "..clue_text(death.clue)
+        if not notice(actor,text,now) then return end
+        round.used[death.clue.key]=true
+        if death.proof then round.step=round.step+1 end
+        round.death,round.remaining=nil,round.interval
+    elseif death.phase=="selected" then
+        if row.out then round.death=nil;return end
+        if not npc or not npc:alive() then return end
+        death.phase,death.wait="requested",2000
+        sample_companion_reputation(round)
+        local ok,reason=pcall(function() npc:kill(npc) end)
+        if not ok then log(reason) end
+    else
+        death.wait=death.wait-elapsed
+        if not object or death.wait<=0 then
+            round.death,round.remaining=nil,round.interval
+            log("scheduled death was not confirmed")
+        end
+    end
+end
+
+local function update(now)
+    local round=current()
+    if not round then last_tick=nil;return end
+    local actor=db and db.actor
+    if not actor or not actor:alive() or not level.present() or device():is_paused() or
+        (device().precache_frame or 0)>0 or loaded_frame and device().frame<loaded_frame+15 or
+        type(app_ready)=="function" and not app_ready() or type(Check_UI)=="function" and Check_UI() then
+        last_tick=nil
+        return
+    end
+    local elapsed=last_tick and math.max(0,now-last_tick) or 0
+    last_tick=now
+    if round.phase=="recruiting" then recruit(round,actor,now);return end
+
+    sample_companion_reputation(round)
+    local live,targets=inspect(round,elapsed)
+    if round.resume_death and round.death and round.death.phase=="requested" then
+        local row=round.people[round.death.victim]
+        local object,npc=find_subject(row)
+        if npc and npc:alive() or not npc and object and object:alive() then round.death.phase="selected" end
+        round.resume_death=nil
+    end
+    if round.death and round.death.phase~="selected" then
+        update_death(round,actor,now,elapsed)
+        if round.death then return end
+    end
+    if not live[round.traitor] then finish(round,round.people[round.traitor].out=="dead" and "won" or "departed");return end
+    if next(live)==round.traitor and not next(live,round.traitor) then finish(round,"lost");return end
+    if round.roster_notice then announce_roster(round,actor,now);return end
+    if round.death then update_death(round,actor,now,elapsed);return end
+    round.remaining=math.max(0,round.remaining-elapsed)
+    if round.remaining==0 then
+        round.death=next_death(round,targets)
+        if round.death then update_death(round,actor,now,0) end
+    end
+end
+
+local function suspend()
+    last_tick,next_recruit,next_notice=nil,0,0
+end
+
+local function on_load()
+    suspend()
+    proof_cache={}
+    loaded_frame=device().frame
+    local round=current()
+    if round and round.phase=="running" then
+        if round.death and round.death.phase=="requested" then round.resume_death=true end
+        for _,row in ipairs(round.people) do row.missing=nil end
+    end
+end
+
+local function on_before_hit(npc,damage,_,flags)
+    local round=current()
+    local actor=db and db.actor
+    if not round or round.phase~="running" or not actor or not npc or not damage or not damage.draftsman or
+        type(flags)=="table" and flags.ret_value==false then return end
+    local row=participant(round,npc)
+    if not row or row.out then return end
+
+    local source=damage.draftsman
+    local owner=type(source.parent)=="function" and source:parent() or nil
+    if source:id()~=actor:id() and (not owner or owner:id()~=actor:id()) then
+        row.neutral_actor_hit=nil
+        return
+    end
+    local object=find_subject(row)
+    if not anomaly_donation_bridge_relife_companions.owned(object) or
+        anomaly_donation_bridge_relife_companions.protected(object,{}) then return end
+
+    -- ApplyScriptHit copies the draftsman back to the native hit. Damage and
+    -- the normal death path stay intact, with no player attack attribution.
+    sample_companion_reputation(round)
+    damage.draftsman=npc
+    row.neutral_actor_hit=true
+end
+
+local function on_death(npc,killer)
+    local round=current()
+    if not round or round.phase~="running" or not npc then return end
+    local row,index=participant(round,npc)
+    sample_companion_reputation(round,row and not row.out and killer and killer:id()==row.id and
+        protects_death(round,row,index))
+    if row then row.out="dead" end
+end
+
+function on_game_start()
+    if registered then return end
+    local ok,reason=anomaly_donation_bridge_registry.register(ID,{
+        is_supported=supported,can_execute=can_execute,execute=execute,update=update,
+        on_game_load=on_load,on_level_changing=suspend
+    })
+    if not ok then log(reason);return end
+    RegisterScriptCallback("npc_on_before_hit",on_before_hit)
+    RegisterScriptCallback("npc_on_death_callback",on_death)
+    RegisterScriptCallback("actor_on_before_death",suspend)
+    RegisterScriptCallback("on_before_load_input",suspend)
+    registered=true
+end

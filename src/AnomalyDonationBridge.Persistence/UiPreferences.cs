@@ -16,6 +16,7 @@ public sealed record UiPreferences
     public bool ShowTemplateDescriptions { get; init; } = true;
     public bool VotingSettingsPanelCollapsed { get; init; }
     public bool VotingGenerationPanelCollapsed { get; init; }
+    public bool ViewerChatShowTimestamps { get; init; }
     public string ActiveCategory { get; init; } = "all";
     public string ActivePlayerSubcategory { get; init; } = "all";
     public string PresetCategory { get; init; } = "all";

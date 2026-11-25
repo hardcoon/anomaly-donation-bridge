@@ -540,6 +540,7 @@ public sealed class RuleMatch
     public required TriggerRule Trigger { get; init; }
     public ActionDefinition? SourceAction { get; init; }
     public string? HistoryActionId { get; init; }
+    internal HistoryReplayEffect? HistoryReplay { get; init; }
 }
 
 public sealed class GameCommand
@@ -568,12 +569,15 @@ public sealed class GameCommand
 
 public sealed class EffectExecutionOptions
 {
+    public Func<DonationEvent, int, CancellationToken, Task<HistoryReplayEffect?>>? ResolveHistoryReplay { get; init; }
     public bool SaveBeforeBatch { get; init; }
     public bool SaveAfterBatch { get; init; }
     public int EffectSaveRetentionCount { get; init; } = 50;
     public bool ShowGameEffectLog { get; init; } = true;
     public bool ShowPdaEffectMessage { get; init; }
 }
+
+public sealed record HistoryReplayEffect(ActionDefinition Action, DonationEvent Donation, string OriginalDonor);
 
 public sealed class GameExecutionResult
 {
@@ -615,6 +619,8 @@ public sealed class EventHistoryEntry
     public string EventId { get; set; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset DonationCreatedAt { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? DonationReceivedAt { get; set; }
     public string DonationId { get; set; } = string.Empty;
     public string CommandId { get; set; } = string.Empty;
     public string Donor { get; set; } = string.Empty;

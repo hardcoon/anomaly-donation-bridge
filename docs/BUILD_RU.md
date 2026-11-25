@@ -2,7 +2,7 @@
 
 [← Первый запуск](../README.md)
 
-В `main` опубликованы исходники программы **1.5.0** и аддона **1.0.190**. Готовый комплект доступен в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
+Версия **1.5.2** включает аддон **1.0.196** и 77 шаблонов. Публичные сборки доступны в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
 
 ## Требования
 
@@ -19,12 +19,12 @@
 | --- | --- |
 | `src` | Приложение, ядро, хранение данных, интеграции DonationAlerts и DonateX, чаты YouTube / Twitch / VK Видео Live, обмен с игрой, процесс восстановления после сбоя. |
 | `game-addon` | Аддон, манифест с контрольными суммами и необходимые ресурсы. |
-| `effects`, `optional-effects` | 73 поставляемых файловых шаблона; при сборке объединяются в одну папку эффектов. |
+| `effects`, `optional-effects` | 74 поставляемых файловых шаблона; при сборке объединяются в одну папку эффектов. |
 | `tests` | Тесты C# и Lua, искусственные каталоги и данные для проверок. |
 | `scripts` | Сборка, тесты, установка локального SDK и подготовка переносимого архива. |
 | `third-party` | Лицензии и сведения об используемых сторонних компонентах. |
 
-`game-addon/legacy-scripts` и отдельные файлы в `deferred-effects` нужны существующим регрессионным тестам. Они не устанавливаются в игру и не добавляются в комплект из 73 шаблонов.
+`game-addon/legacy-scripts` и отдельные файлы в `deferred-effects` используются регрессионными тестами. В игровой комплект входят 76 файловых шаблонов.
 
 ## Сборка EXE
 
@@ -79,14 +79,13 @@ Lua-проверки выполняются с подставными игров
 
 ```powershell
 ./scripts/stage-minimal-release.ps1 `
-    -Version '1.5.0' `
-    -ExpectedEffectCount 73 `
+    -Version '1.5.2' `
+    -ExpectedEffectCount 77 `
     -PublishedRoot './artifacts/portable-win-x64' `
-    -ReadmePath './README.md' `
-    -ReleaseNotesPath './docs/RELEASE_1.5.0_RU.md'
+    -ReleaseNotesPath './docs/RELEASE_1.5.2_RU.md'
 ```
 
-ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.5.0`. Повторная подготовка архива заменяет эту локальную папку. Подробные инструкции из `docs` доступны в репозитории, а в ZIP входит README.
+ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.5.2`. Повторная подготовка архива заменяет эту локальную папку. Перед этим закройте запущенную из неё программу. Упаковщик проверяет занятые EXE/DLL до удаления файлов и останавливается, если комплект используется. В ZIP входит README.
 
 ## Лицензия
 

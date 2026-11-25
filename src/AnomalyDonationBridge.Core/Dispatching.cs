@@ -412,10 +412,12 @@ public sealed class DonationDispatcher
                 return DispatchState.NoRule;
             }
 
+            executionOptions ??= new EffectExecutionOptions();
             var resolvedMatches = new List<RuleMatch>();
             foreach (var match in matches)
             {
-                var resolved = ResolveBridgeMetaAction(match, availableActions, availablePresets);
+                var resolved = await ResolveBridgeMetaActionAsync(match, availableActions, donation, executionOptions, cancellationToken)
+                    .ConfigureAwait(false);
                 if (resolved is null)
                 {
                     await AppendAsync(donation, match, DispatchState.Rejected,
@@ -443,7 +445,6 @@ public sealed class DonationDispatcher
                 }, cancellationToken).ConfigureAwait(false);
                 return DispatchState.Rejected;
             }
-            executionOptions ??= new EffectExecutionOptions();
             // Each donation gets its own group clock, independently of strict ordering.
             var groups = resolvedMatches.GroupBy(match => ActionPriceOrdering.GroupKey(match.SourceAction ?? match.Action))
                 .Where(group => group.Key is not null && group.Count() > 1)
@@ -501,10 +502,9 @@ public sealed class DonationDispatcher
                 return DispatchState.Duplicate;
             }
             var match = new RuleMatch { Action = action, Trigger = trigger };
-            var resolvedMatch = ResolveBridgeMetaAction(
-                match,
-                availableActions ?? [action],
-                availablePresets);
+            executionOptions ??= new EffectExecutionOptions();
+            var resolvedMatch = await ResolveBridgeMetaActionAsync(match, availableActions ?? [action],
+                syntheticEvent, executionOptions, cancellationToken).ConfigureAwait(false);
             if (resolvedMatch is null)
             {
                 await RecordTerminalAsync(
@@ -521,7 +521,7 @@ public sealed class DonationDispatcher
                 resolvedMatch,
                 policy,
                 cancellationToken,
-                executionOptions ?? new EffectExecutionOptions(),
+                executionOptions,
                 1,
                 1).ConfigureAwait(false);
         }
@@ -531,11 +531,32 @@ public sealed class DonationDispatcher
         }
     }
 
-    private RuleMatch? ResolveBridgeMetaAction(
+    public const string RepeatPastDonationHandlerId = "hardcoon.adb.repeat_past_donation";
+
+    private async ValueTask<RuleMatch?> ResolveBridgeMetaActionAsync(
         RuleMatch match,
         IEnumerable<ActionDefinition> availableActions,
-        IEnumerable<ActionDefinition>? availablePresets)
+        DonationEvent donation,
+        EffectExecutionOptions executionOptions,
+        CancellationToken token)
     {
+        if (match.Action.HandlerId == RepeatPastDonationHandlerId)
+        {
+            var parameters = match.Action.EffectiveParameters();
+            if (!int.TryParse(parameters.GetValueOrDefault("donations_back", "2"), out var offset) ||
+                offset is < 1 or > 999 || executionOptions.ResolveHistoryReplay is not { } resolve) return null;
+            var replay = await resolve(donation, offset, token).ConfigureAwait(false);
+            if (replay is null || IsBridgeMetaHandler(replay.Action.HandlerId)) return null;
+            return new RuleMatch
+            {
+                Action = replay.Action,
+                Trigger = match.Trigger,
+                SourceAction = match.Action,
+                HistoryActionId = match.Action.Id,
+                HistoryReplay = replay
+            };
+        }
+
         if (IsBridgeMetaHandler(match.Action.HandlerId))
         {
             var selectedOnly = match.Action.HandlerId == ActiveTemplateSelection.HandlerId;
@@ -580,14 +601,18 @@ public sealed class DonationDispatcher
         return Math.Clamp(_randomIndex(count), 0, count - 1);
     }
 
-    private static bool IsBridgeMetaHandler(string handlerId) =>
+    public static bool IsBridgeMetaHandler(string handlerId) =>
         string.Equals(handlerId, RandomActiveHandlerId, StringComparison.Ordinal) ||
-        string.Equals(handlerId, RandomAllPresetsHandlerId, StringComparison.Ordinal);
+        string.Equals(handlerId, RandomAllPresetsHandlerId, StringComparison.Ordinal) ||
+        string.Equals(handlerId, RepeatPastDonationHandlerId, StringComparison.Ordinal);
 
     private static string MetaActionUnavailableDetail(ActionDefinition action) =>
-        string.Equals(action.HandlerId, RandomAllPresetsHandlerId, StringComparison.Ordinal)
-            ? "Нет доступных выбранных активных шаблонов. Проверьте выбор, текущий профиль, настройки и паузы."
-            : "Для шаблона «Рандомный по активным шаблонам» нет доступных активных действий";
+        action.HandlerId switch
+        {
+            RepeatPastDonationHandlerId => "В истории нет доступного игрового действия на указанной позиции.",
+            RandomAllPresetsHandlerId => "Нет доступных выбранных активных шаблонов. Проверьте выбор, текущий профиль, настройки и паузы.",
+            _ => "Для шаблона «Рандомный по активным шаблонам» нет доступных активных действий"
+        };
 
     private static bool CanRetryUnavailableMetaActionManually(ActionDefinition action) =>
         !string.Equals(action.HandlerId, RandomAllPresetsHandlerId, StringComparison.Ordinal);
@@ -621,22 +646,28 @@ public sealed class DonationDispatcher
             }
 
             var now = _utcNow();
+            var effectDonation = match.HistoryReplay?.Donation ?? donation;
             var parameters = new Dictionary<string, string>(
                 match.Action.EffectiveParameters(), StringComparer.OrdinalIgnoreCase);
             if (UsesDonorName(match.Action.HandlerId))
-                parameters["donor_name"] = NormalizeDonorName(donation.Username);
+                parameters["donor_name"] = NormalizeDonorName(effectDonation.Username);
             if (UsesDonationMessage(match.Action.HandlerId))
-                parameters["donation_message"] = NormalizeDonationMessage(donation.Message);
+                parameters["donation_message"] = NormalizeDonationMessage(effectDonation.Message);
+            if (match.HistoryReplay is { } replay)
+            {
+                parameters["adb_replay_by"] = NormalizeDonorName(donation.Username);
+                parameters["adb_replay_from"] = NormalizeDonorName(replay.OriginalDonor);
+            }
             var command = new GameCommand
             {
                 DonationId = donation.Id,
                 ActionId = match.Action.HandlerId,
                 SourceHandlerId = match.SourceAction?.HandlerId ?? string.Empty,
-                AmountMinor = donation.AmountMinor,
-                Currency = Money.NormalizeCurrency(donation.Currency),
+                AmountMinor = effectDonation.AmountMinor,
+                Currency = Money.NormalizeCurrency(effectDonation.Currency),
                 Parameters = parameters,
                 CatalogRevision = match.Action.CatalogRevision,
-                DonorName = NormalizeDisplayText(donation.Username, _anonymousDonorName, 96),
+                DonorName = NormalizeDisplayText(effectDonation.Username, _anonymousDonorName, 96),
                 ActionName = NormalizeDisplayText(match.Action.DisplayName, match.Action.HandlerId, 160),
                 BatchIndex = batchIndex,
                 BatchSize = batchSize,
@@ -646,7 +677,7 @@ public sealed class DonationDispatcher
                 ShowGameEffectLog = executionOptions.ShowGameEffectLog,
                 // This template sends the actual message itself, even if generic
                 // effect announcements are disabled. Do not announce it twice.
-                ShowPdaEffectMessage = executionOptions.ShowPdaEffectMessage &&
+                ShowPdaEffectMessage = executionOptions.ShowPdaEffectMessage && match.HistoryReplay is null &&
                     match.Action.HandlerId != PdaMessageHandlerId,
                 CreatedAt = now
             };
@@ -1252,7 +1283,9 @@ public sealed class DonationDispatcher
             var needsWaiting = willRetry && IsNeedsWaitingResult(pending.Command, result.Reason);
             var vehicleWaiting = result.Status == GameResultStatus.Deferred && result.Reason is
                 BtrPassengerCommands.WaitingReason or "btr_spawn_point_waiting" or "btr_spawn_anchor_waiting";
-            if (vehicleWaiting) RestoreDispatchClocks(pending);
+            if (vehicleWaiting || willRetry && result.Reason is
+                "battle_royale_waiting" or "traitor_round_in_progress" or "traitor_waiting_for_recruitment_channel")
+                RestoreDispatchClocks(pending);
             if ((result.Status == GameResultStatus.Executed && IsSpawnPreparationRetry(pending)) ||
                 (pending.Command.ActionId == "change_needs" && result.Status is GameResultStatus.Executed or GameResultStatus.Uncertain))
                 UpdateDispatchClocks(pending, _utcNow());
@@ -1275,7 +1308,7 @@ public sealed class DonationDispatcher
                     ? "Ожидание достаточного запаса еды или воды; повторная проверка через 5 секунд."
                 : willRetry && pending.Command.ActionId == "hardcoon.adb.donor_thief" && result.Reason == "donor_thief_waiting_ui"
                     ? "Данат-воришка ждёт закрытия игрового окна."
-                    : willRetry && vehicleWaiting
+                : willRetry && vehicleWaiting
                     ? result.Reason == BtrPassengerCommands.WaitingReason
                         ? "Эффект ждёт выхода из БТР."
                         : "Ожидание безопасной точки рядом с БТР."
@@ -1443,6 +1476,7 @@ public sealed class DonationDispatcher
         {
             Timestamp = _utcNow(),
             DonationCreatedAt = donation.CreatedAt,
+            DonationReceivedAt = donation.ReceivedAt,
             DonationId = donation.Id,
             CommandId = commandId,
             Donor = NormalizeDonorName(donation.Username),

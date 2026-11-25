@@ -428,7 +428,7 @@ internal static class VotingTests
         Check(engine.Snapshot.Total == 123 && engine.Automation.Enabled && engine.Collections.Count == 1,
             "Legacy preview migration lost active progress");
         var edit = engine.Snapshot; edit.Title = "Migrated"; await engine.SaveSettingsAsync(edit);
-        Check(store.Data.SchemaVersion == 7 && store.Data.Current.Options[0].AmountsByCurrency["RUB"] == 123 &&
+        Check(store.Data.SchemaVersion == 8 && store.Data.Current.Options[0].AmountsByCurrency["RUB"] == 123 &&
             store.Data.SeenDonationIds.Contains("legacy-counted"), "Migration did not preserve accounting or protect it from old previews");
         store.Data.SchemaVersion = 3;
         var parallel = store.Data.Current.Clone(); parallel.Id = Guid.NewGuid().ToString("N"); parallel.CollectionId = Guid.NewGuid().ToString("N");

@@ -164,7 +164,12 @@ public sealed partial class NamedPipeGameServer : IGameCommandTransport, IGameCo
     public bool CanAttempt(GameCommand command)
     {
         lock (_stateGate)
-            return _lastReportedReason != BtrPassengerCommands.WaitingReason || BtrPassengerCommands.IsAllowed(command);
+            return _battle?.Blocks(command.ActionId) != true &&
+                (command.ActionId != BattleRoyalePipe.Handler ||
+                 !_capabilities.SupportsCapability(BattleRoyalePipe.Capability) || _battle is not null) &&
+                (command.ActionId != TraitorPipe.Handler ||
+                 !_capabilities.SupportsCapability(TraitorPipe.Capability) || _traitorRecruitment is not null) &&
+                (_lastReportedReason != BtrPassengerCommands.WaitingReason || BtrPassengerCommands.IsAllowed(command));
     }
 
     public int AwaitingResultCount => _awaitingResults.Count;
@@ -632,6 +637,14 @@ public sealed partial class NamedPipeGameServer : IGameCommandTransport, IGameCo
                 }
                 switch (message)
                 {
+                    case BattleRoyaleStatus battle:
+                        lock (_stateGate)
+                            if (_capabilities.SupportsCapability(BattleRoyalePipe.Capability)) _battle = battle;
+                        break;
+                    case TraitorRecruitmentStatus traitor:
+                        lock (_stateGate)
+                            if (_capabilities.SupportsCapability(TraitorPipe.Capability)) _traitorRecruitment = traitor;
+                        break;
                     case VotingGameReply voting:
                         if (_votingReplies.TryGetValue(voting.RoundId, out var reply)) reply.TrySetResult(voting);
                         break;
@@ -862,6 +875,8 @@ public sealed partial class NamedPipeGameServer : IGameCommandTransport, IGameCo
             _heartbeatSuspended = false;
             _addonVersion = string.Empty;
             _gameProcessId = 0;
+            _battle = null;
+            _traitorRecruitment = null;
             _capabilities = CapabilitySet.Empty;
             _catalog = null;
             _catalogInfo = null;

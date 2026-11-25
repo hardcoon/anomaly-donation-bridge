@@ -1,5 +1,5 @@
 local C = {
-	ADDON_VERSION = "1.0.191", PROTOCOL_VERSION = "1", UPDATE_MS = 100,
+	ADDON_VERSION = "1.0.196", PROTOCOL_VERSION = "1", UPDATE_MS = 100,
 	RETRY_MS = 1000, LOAD_GRACE_MS = 1500, MAX_EVENTS = 8,
 	RECENT_LIMIT = 256, CATALOG_RECORDS_PER_UPDATE = 32
 }
@@ -27,10 +27,22 @@ local function now_ms()
 	return time_global and time_global() or 0
 end
 
+local function battle_effect()
+	local effect=rawget(_G,"anomaly_donation_bridge_effect_hardcoon_adb_battle_royale")
+	return effect and effect.enabled() and effect or nil
+end
+
+local function traitor_effect()
+	local effect=rawget(_G,"anomaly_donation_bridge_effect_hardcoon_adb_traitor")
+	return effect and effect.enabled() and effect or nil
+end
+
 local function reset_session(disconnect_pipe)
 	if disconnect_pipe then anomaly_donation_bridge_transport.disconnect() end
 	state.welcomed, state.app_version = false, ""
 	state.last_status, state.last_reason, state.catalog_transfer = "", "", nil
+	state.battle_listening, state.battle_status = false, nil
+	state.traitor_listening, state.traitor_status = false, nil
 end
 
 local function send(fields)
@@ -181,6 +193,8 @@ end
 
 local function capability_ids(supported)
 	local result = { "named_pipe", "command_deduplication", "correlated_ping", "safe_zone_v1" }
+	if battle_effect() then result[#result+1]="battle_royale_v1" end
+	if traitor_effect() then result[#result+1]="traitor_recruitment_v1" end
 	if type(anomaly_donation_bridge_registry.get)=="function" then
 		local boost=anomaly_donation_bridge_registry.get("actor_boost")
 		if boost and boost.reset_to_defaults_supported==true then result[#result+1]="actor_boost_reset_v1" end
@@ -280,14 +294,20 @@ local function queue_hud_message(command)
 	while #state.hud_messages > 256 do table.remove(state.hud_messages, 1) end
 end
 
-local function send_pda_effect_message(command, actor)
-	if actor == nil or tostring(command.donor_name or "") == "" or
-		tostring(command.action_name or "") == "" then return false end
+local function send_pda_tip(actor, text)
+	if actor == nil then return false end
 	local manager = rawget(_G, "news_manager")
 	if type(manager) ~= "table" or type(manager.send_tip) ~= "function" then
 		log_failure("PDA message", "news_manager_unavailable")
 		return false
 	end
+	local sent, reason = pcall(manager.send_tip, actor, text, nil, nil, 6000)
+	if not sent then log_failure("PDA message", reason) end
+	return sent
+end
+
+local function send_pda_effect_message(command, actor)
+	if tostring(command.donor_name or "") == "" or tostring(command.action_name or "") == "" then return false end
 	local donor_utf8 = anomaly_donation_bridge_common.truncate_utf8(
 		tostring(command.donor_name), 384)
 	local action_utf8 = anomaly_donation_bridge_common.truncate_utf8(
@@ -300,9 +320,17 @@ local function send_pda_effect_message(command, actor)
 		donor, action = "Donation", tostring(command.action_id or "effect")
 	end
 	local text = "%c[255,238,153,26]" .. donor .. "%c[default]: " .. action
-	local sent, reason = pcall(manager.send_tip, actor, text, nil, nil, 6000)
-	if not sent then log_failure("PDA message", reason) end
-	return sent
+	return send_pda_tip(actor, text)
+end
+
+local function send_replay_tip(command, actor)
+	local common = anomaly_donation_bridge_common
+	local function gold(name)
+		local cleaned = name:gsub("[%%\\]", "_")
+		return "%c[255,238,153,26]" .. (common.game_text_cp1251_lossy(cleaned) or "") .. "%c[default]"
+	end
+	send_pda_tip(actor, gold(command.replay_by) .. common.game_text_cp1251_lossy(" повторяет донат от ") ..
+		gold(command.replay_from))
 end
 
 local function update_hud_messages(now)
@@ -425,6 +453,14 @@ local function handle_command(fields, now)
 	if not state.welcomed then
 		return send_result(command.command_id, "rejected", "handshake_required", true)
 	end
+	local battle=battle_effect()
+	if battle and (battle.blocks(command.action_id) or
+		command.action_id=="hardcoon.adb.battle_royale" and not state.battle_listening) then
+		return send_result(command.command_id, "deferred", "battle_royale_waiting", false)
+	end
+	if command.action_id=="hardcoon.adb.traitor" and traitor_effect() and not state.traitor_listening then
+		return send_result(command.command_id, "deferred", "traitor_waiting_for_recruitment_channel", false)
+	end
 	local ready, reason, actor = readiness(now)
 	if not ready then
 		return send_result(command.command_id, "deferred", reason, false)
@@ -442,6 +478,10 @@ local function handle_command(fields, now)
 		status, action_reason = "uncertain", "action_dispatch_failed"
 	end
 	complete_effect_batch_command(command, status, now)
+	if status == "executed" and command.replay_by and command.replay_from then
+		local ok, reason = pcall(send_replay_tip, command, actor)
+		if not ok then log_failure("PDA repeat", reason) end
+	end
 	return send_result(command.command_id, status, action_reason, status ~= "deferred")
 end
 
@@ -507,6 +547,16 @@ local function send_catalog_step()
 	end
 end
 
+local function send_round_status(effect,listening,key)
+	if not state.welcomed or not listening or not effect then return true end
+	local fields=effect.status()
+	local signature=table.concat(fields,"\n")
+	if signature==state[key] then return true end
+	if not send(fields) then return false end
+	state[key]=signature
+	return true
+end
+
 local function handle_event(fields, now)
 	local kind = tostring(fields[1] or "")
 	if kind == "WELCOME" then
@@ -541,6 +591,22 @@ local function handle_event(fields, now)
 		return send({ "PONG" })
 	elseif kind == "COMMAND" then
 		return handle_command(fields, now)
+	elseif kind=="BATTLE_STATUS_QUERY" and #fields==1 then
+		if not state.welcomed then reset_session(true);return false end
+		state.battle_listening,state.battle_status=true,nil
+		return send_round_status(battle_effect(),state.battle_listening,"battle_status")
+	elseif kind=="BATTLE_ROSTER" or kind=="BATTLE_CANCEL" then
+		local battle=battle_effect()
+		if state.welcomed and state.battle_listening and battle then battle.receive(fields) end
+		return true
+	elseif kind=="TRAITOR_STATUS_QUERY" and #fields==1 then
+		if not state.welcomed then reset_session(true);return false end
+		state.traitor_listening,state.traitor_status=true,nil
+		return send_round_status(traitor_effect(),state.traitor_listening,"traitor_status")
+	elseif kind=="TRAITOR_ROSTER" then
+		local traitor=traitor_effect()
+		if state.welcomed and state.traitor_listening and traitor then traitor.receive(fields) end
+		return true
 	elseif kind:match("^VOTING_") then
 		if not state.welcomed then reset_session(true) return false end
 		if not anomaly_donation_bridge_voting or type(anomaly_donation_bridge_voting.handle)~="function" then return true end
@@ -564,6 +630,8 @@ local function update_once(now)
 		return
 	end
 	send_catalog_step()
+	if not send_round_status(battle_effect(),state.battle_listening,"battle_status") or
+		not send_round_status(traitor_effect(),state.traitor_listening,"traitor_status") then return end
 	send_status(now, false)
 end
 
@@ -591,6 +659,7 @@ function on_game_load()
 	state.catalog_error = ""
 	state.loading_until_ms = now + C.LOAD_GRACE_MS
 	state.last_status, state.last_reason = "", ""
+	state.battle_status, state.traitor_status = nil, nil
 	state.next_update_ms = 0
 	state.hud_message_until_ms = 0
 	if not anomaly_donation_bridge_transport.is_connected() then

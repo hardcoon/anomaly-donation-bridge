@@ -16,4 +16,9 @@ public sealed record CatalogRuntimeState(
 
     public bool HasCatalog => Catalog is not null;
     public bool IsOfflineCache => Catalog is not null && !IsLive;
+
+    internal bool SupportsTemplate(string handlerId) =>
+        handlerId == DonationDispatcher.RepeatPastDonationHandlerId ||
+        !IsLive || ReferenceEquals(Capabilities, CapabilitySet.Empty) ||
+        Capabilities.SupportsHandler(handlerId);
 }

@@ -16,12 +16,15 @@ public partial class ViewerChatView : UserControl, IDisposable
 {
     private readonly BridgeRuntime _runtime;
     private readonly ObservableCollection<ChatDisplayRow> _rows = [];
+    private readonly ViewerChatPageWindow _pages = new();
     private readonly Dictionary<ChatPlatform, ConnectionRow> _connections = new();
     private readonly DispatcherTimer _timer;
     private long _revision = -1;
     private bool _followTail = true, _disposed, _light, _tailScrollPending;
     private ScrollViewer? _messageScroll;
     private bool _tailScrollInProgress;
+    private bool _historyScrollInProgress, _historyPagePending, _showTimestamps, _savingTimestamps;
+    private int _restoreVersion;
 
     public ViewerChatView(BridgeRuntime runtime)
     {
@@ -111,27 +114,78 @@ public partial class ViewerChatView : UserControl, IDisposable
             _light = ThemeManager.IsLightTheme;
             foreach (var row in _rows) row.SetTheme(_light);
         }
+        if (_showTimestamps != _runtime.UiPreferences.ViewerChatShowTimestamps)
+        {
+            _showTimestamps = _runtime.UiPreferences.ViewerChatShowTimestamps;
+            foreach (var row in _rows) row.SetShowTimestamp(_showTimestamps);
+        }
+        if (!_savingTimestamps) ShowTimestampsMenuItem.IsChecked = _showTimestamps;
         var snapshot = _runtime.ViewerChat.Snapshot;
         if (_revision == snapshot.Revision) return;
-        var present = snapshot.Messages.Select(item => item.Sequence).ToHashSet();
-        for (var i = _rows.Count - 1; i >= 0; i--) if (!present.Contains(_rows[i].Sequence)) _rows.RemoveAt(i);
-        var existing = _rows.Select(row => row.Sequence).ToHashSet();
-        var incoming = snapshot.Messages.Where(item => !existing.Contains(item.Sequence)).ToArray();
-        // Bound each dispatcher turn. The rest is appended by the next tick,
-        // preserving existing rows instead of resetting/repainting the entire list.
-        foreach (var item in incoming.Take(250)) _rows.Add(new ChatDisplayRow(item, _light));
-        if (incoming.Length <= 250) _revision = snapshot.Revision;
+        ApplyPage(_pages.Select(snapshot, _followTail));
+        _revision = snapshot.Revision;
         EmptyHint.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FeedCount.Text = $"В ленте: {_rows.Count} · получено: {snapshot.ReceivedCount}";
+        FeedCount.Text = $"В ленте: {_rows.Count} из {snapshot.Messages.Count} · получено: {snapshot.ReceivedCount}";
         if (_rows.Count == 0) { _followTail = true; NewMessagesButton.Visibility = Visibility.Collapsed; }
         if (_followTail) QueueTailScroll();
-        else if (incoming.Length > 0) NewMessagesButton.Visibility = Visibility.Visible;
+        else NewMessagesButton.Visibility = _pages.HasNewer(snapshot) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ApplyPage(IReadOnlyList<ViewerChatEntry> entries)
+    {
+        if (_rows.Count == entries.Count && _rows.Select(row => row.Sequence).SequenceEqual(entries.Select(item => item.Sequence))) return;
+        long? anchor = null;
+        var fraction = 0d;
+        if (!_followTail && _messageScroll is { } scroll && _rows.Count > 0)
+        {
+            var index = Math.Clamp((int)scroll.VerticalOffset, 0, _rows.Count - 1);
+            anchor = _rows[index].Sequence; fraction = scroll.VerticalOffset - Math.Floor(scroll.VerticalOffset);
+        }
+        var version = ++_restoreVersion;
+        _historyScrollInProgress = true;
+        var present = entries.Select(item => item.Sequence).ToHashSet();
+        for (var i = _rows.Count - 1; i >= 0; i--)
+            if (!present.Contains(_rows[i].Sequence)) _rows.RemoveAt(i);
+        for (var i = 0; i < entries.Count; i++)
+            if (i >= _rows.Count || _rows[i].Sequence != entries[i].Sequence)
+                _rows.Insert(i, new ChatDisplayRow(entries[i], _light, _showTimestamps));
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            if (_disposed || version != _restoreVersion) return;
+            if (!_followTail && anchor is { } id && _messageScroll is { } scroll)
+            {
+                var index = 0;
+                while (index < _rows.Count && _rows[index].Sequence < id) index++;
+                scroll.ScrollToVerticalOffset(index + fraction);
+            }
+            Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
+            { if (version == _restoreVersion) _historyScrollInProgress = false; }));
+        }));
+    }
+
+    private void QueueOlderPage()
+    {
+        if (_historyPagePending || _disposed || !_pages.HasOlder(_runtime.ViewerChat.Snapshot)) return;
+        _historyPagePending = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _historyPagePending = false;
+            if (_disposed || _followTail) return;
+            var snapshot = _runtime.ViewerChat.Snapshot;
+            ApplyPage(_pages.LoadOlder(snapshot));
+            _revision = -1;
+            Refresh();
+        }));
     }
 
     private void Clear_Click(object sender, RoutedEventArgs e) { _runtime.ViewerChat.Clear(); Refresh(); }
     private void Messages_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (e.Delta > 0) _followTail = false;
+        if (e.Delta > 0)
+        {
+            _followTail = false;
+            if (_messageScroll is { VerticalOffset: <= 2 }) QueueOlderPage();
+        }
         else if (e.Delta < 0 && _messageScroll is { } scroll && NearChatEnd(scroll))
         {
             _followTail = true; NewMessagesButton.Visibility = Visibility.Collapsed;
@@ -144,6 +198,7 @@ public partial class ViewerChatView : UserControl, IDisposable
     {
         if (e.OriginalSource is not ScrollViewer scroll) return;
         _messageScroll = scroll;
+        if (_historyScrollInProgress) return;
         if (!_tailScrollInProgress && e.VerticalChange < 0 &&
             (Mouse.LeftButton == MouseButtonState.Pressed && scroll.IsMouseCaptureWithin ||
              e.ExtentHeightChange == 0 && e.ViewportHeightChange == 0 || !NearChatEnd(scroll)))
@@ -160,25 +215,68 @@ public partial class ViewerChatView : UserControl, IDisposable
             NewMessagesButton.Visibility = Visibility.Collapsed;
             QueueTailScroll();
         }
+        else if (e.VerticalChange < 0 && scroll.VerticalOffset <= 2) QueueOlderPage();
     }
-    private void QueueTailScroll()
+    private void QueueTailScroll(int corrections = 3)
     {
         if (_tailScrollPending || _disposed || !_followTail || _rows.Count == 0) return;
         _tailScrollPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
         {
-            _tailScrollPending = false;
-            if (_disposed || !_followTail || _rows.Count == 0) return;
+            if (_disposed || !_followTail || _rows.Count == 0) { _tailScrollPending = false; return; }
             _tailScrollInProgress = true;
+            if (_pages.HasNewer(_runtime.ViewerChat.Snapshot) || _rows.Count > ViewerChatPageWindow.PageSize)
+            { _revision = -1; Refresh(); MessageList.UpdateLayout(); }
             if (_messageScroll is { } scroll) scroll.ScrollToEnd();
             else MessageList.ScrollIntoView(_rows[^1]);
-            Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() => _tailScrollInProgress = false));
+            _tailScrollPending = false;
+            Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() =>
+            {
+                _tailScrollInProgress = false;
+                // Recycling wrapped rows can change the logical viewport after
+                // ScrollToEnd. Finish positioning once layout has measured it.
+                if (corrections > 0 && _followTail && _messageScroll is { } settled &&
+                    settled.ScrollableHeight - settled.VerticalOffset > 1)
+                    QueueTailScroll(corrections - 1);
+            }));
         }));
     }
     private void NewMessages_Click(object sender, RoutedEventArgs e)
     {
         _followTail = true; NewMessagesButton.Visibility = Visibility.Collapsed;
+        _revision = -1; Refresh();
         QueueTailScroll();
+    }
+
+    private void ChatSettings_Click(object sender, RoutedEventArgs e)
+    {
+        var menu = ChatSettingsButton.ContextMenu;
+        menu.PlacementTarget = ChatSettingsButton;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private async void ShowTimestamps_Click(object sender, RoutedEventArgs e)
+    {
+        if (_savingTimestamps) return;
+        var enabled = ShowTimestampsMenuItem.IsChecked;
+        _savingTimestamps = true; ShowTimestampsMenuItem.IsEnabled = false;
+        string? failure = null;
+        try
+        {
+            await _runtime.UpdateUiPreferencesAsync(preferences => preferences with { ViewerChatShowTimestamps = enabled }).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is System.IO.IOException or UnauthorizedAccessException)
+        { failure = "Не удалось сохранить настройки чата."; }
+        finally
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                _savingTimestamps = false; ShowTimestampsMenuItem.IsEnabled = true;
+                if (failure is not null) ErrorHint.Text = failure;
+                if (!_disposed) Refresh();
+            });
+        }
     }
     public void Dispose() { _disposed = true; _timer.Stop(); }
     private sealed class ConnectionRow(TextBox input, Button button, TextBlock status)
@@ -201,21 +299,26 @@ public sealed class ChatDisplayRow : INotifyPropertyChanged
     private readonly ViewerMessage _message;
     private readonly int _colorIndex;
     private Brush _nameBrush = Brushes.White;
-    public ChatDisplayRow(ViewerChatEntry item, bool light)
+    private bool _showTimestamp;
+    public ChatDisplayRow(ViewerChatEntry item, bool light, bool showTimestamp = false)
     {
         Sequence = item.Sequence; _message = item.Message;
         var identity = _message.Platform + ":" + (_message.UserId.Length > 0 ? _message.UserId : _message.Author);
         _colorIndex = SHA256.HashData(Encoding.UTF8.GetBytes(identity))[0] % Dark.Length;
         SetTheme(light);
+        _showTimestamp = showTimestamp;
     }
     public long Sequence { get; }
     public ChatPlatform Platform => _message.Platform;
     public string Author => _message.Author;
     public string Text => _message.Text;
     public Brush NameBrush => _nameBrush;
-    public string Hint => $"{PlatformLabel(Platform)} · {_message.ChannelId} · " +
-        (_message.PublishedAt?.ToLocalTime().ToString("HH:mm:ss") ?? "Время не указано") +
-        (_message.IsHistorical ? " · история чата" : "") + (_message.IsMirrored ? " · отражено из Twitch" : "");
+    public string TimestampText => _showTimestamp && _message.PublishedAt is { } at ? at.ToLocalTime().ToString("[HH:mm:ss] ") : "";
+    internal void SetShowTimestamp(bool enabled)
+    {
+        if (_showTimestamp == enabled) return;
+        _showTimestamp = enabled; PropertyChanged?.Invoke(this, new(nameof(TimestampText)));
+    }
     internal void SetTheme(bool light)
     {
         var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString((light ? Light : Dark)[_colorIndex]));
