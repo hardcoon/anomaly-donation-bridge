@@ -121,6 +121,14 @@ internal static class DonationHistoryTests
         Check(TraitorPipe.Roster(traitor with { Cursor = candidates[^1].DonationId }, [], last: true)
                 == $"TRAITOR_ROSTER\t{matchId}\t100\tlast",
             "An exhausted history could not be reported without waiting for a new payment.");
+
+        var largeRoster = Enumerable.Range(1, 9).Select(index => new RecruitmentDonation($"donatex:{index}", $"Зритель {index}"));
+        var pages = largeRoster.Chunk(TraitorPipe.ParticipantsPerMessage).ToArray();
+        var first = TraitorPipe.Roster(traitor with { Needed = 9 }, pages[0], last: false).Split('\t');
+        var second = TraitorPipe.Roster(traitor with { Needed = 3, Cursor = pages[0][^1].DonationId }, pages[1], last: true).Split('\t');
+        Check(pages.Length == 2 && first.Length == 16 && second.Length == 10 &&
+            first[3] == "more" && second[3] == "last" && PipeProtocol.PercentDecode(second[2]) == "donatex:6",
+            "A nine-person roster must fit the addon's sixteen-field limit and preserve the resume cursor.");
     }
 
     private static EventHistoryEntry Paid(string id, string name, DateTimeOffset time, ActionDefinition? action,

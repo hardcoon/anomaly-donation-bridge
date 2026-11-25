@@ -22,6 +22,8 @@ public static class PipeProtocol
     public const string ProtocolVersion = "1";
     public const string CatalogSchemaVersion = "1";
     public const int MaximumLineBytes = 16 * 1024;
+    // Mirrors MAX_FIELDS in the addon's wire decoder.
+    internal const int MaximumFields = 16;
     public const int MaximumCatalogEntries = 100_000;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 

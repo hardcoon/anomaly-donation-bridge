@@ -21,6 +21,7 @@ local function copy(value)
 end
 
 local common = load_module(core, "common")
+local protocol = load_module(core, "protocol")
 local function cp(text) return common.game_text_cp1251_lossy(text) end
 local function round() return alife_storage_manager.get_state()[save_key] end
 local clock, frame, paused, ui, loading, objects, online, cb, news, deaths, logs, saves
@@ -254,6 +255,26 @@ assert(#round().people==5 and spawns==2 and objects[101].shown=="Lemon" and obje
 until_true(function() return not round() end,"last living traitor did not end the round")
 assert(#deaths==4 and clues()==4 and logs[#logs]:find(" lost",1,true) and saves==0)
 assert(reputation==240,"the timed series accumulated a companion-death penalty")
+
+reset({})
+start(9,60)
+local function receive_wire_page(cursor, last, names, first)
+    local fields={"TRAITOR_ROSTER",round_id,cursor,last and "last" or "more"}
+    for index,name in ipairs(names) do
+        fields[#fields+1]="paid-"..(first+index-1)
+        fields[#fields+1]=name
+    end
+    local line=assert(protocol.encode_fields(fields))
+    traitor.receive(assert(protocol.decode_line(line:sub(1,-2))))
+end
+receive_wire_page("",false,{"Барабан","Караул","Полярис","Стрелец","Сокол","Ворон"},1)
+assert(traitor.status()[6]=="3" and traitor.status()[7]=="paid-6" and spawns==0)
+reload()
+assert(traitor.status()[6]=="3" and traitor.status()[7]=="paid-6")
+receive_wire_page("paid-6",true,{"Lemon","Boo","Ёжик"},7)
+until_true(function() return round().phase=="running" and not round().roster_notice end,
+    "the wire could not complete a nine-member roster across two pages")
+assert(#round().people==9 and spawns==9 and #deaths==0)
 
 reset(group)
 start(5,60)

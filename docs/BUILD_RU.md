@@ -2,7 +2,7 @@
 
 [← Первый запуск](../README.md)
 
-Версия **1.5.2** включает аддон **1.0.196** и 77 шаблонов. Публичные сборки доступны в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
+Версия **1.5.3** включает аддон **1.0.196** и 77 шаблонов. Публичные сборки доступны в [GitHub Releases](https://github.com/hardcoon/anomaly-donation-bridge/releases/latest).
 
 ## Требования
 
@@ -79,13 +79,13 @@ Lua-проверки выполняются с подставными игров
 
 ```powershell
 ./scripts/stage-minimal-release.ps1 `
-    -Version '1.5.2' `
+    -Version '1.5.3' `
     -ExpectedEffectCount 77 `
     -PublishedRoot './artifacts/portable-win-x64' `
-    -ReleaseNotesPath './docs/RELEASE_1.5.2_RU.md'
+    -ReleaseNotesPath './docs/RELEASE_1.5.3_RU.md'
 ```
 
-ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.5.2`. Повторная подготовка архива заменяет эту локальную папку. Перед этим закройте запущенную из неё программу. Упаковщик проверяет занятые EXE/DLL до удаления файлов и останавливается, если комплект используется. В ZIP входит README.
+ZIP и `SHA256SUMS.txt` появятся в `artifacts/release-1.5.3`. Повторная подготовка архива заменяет эту локальную папку. Перед этим закройте запущенную из неё программу. Упаковщик проверяет занятые EXE/DLL до удаления файлов и останавливается, если комплект используется. В ZIP входит README.
 
 ## Лицензия
 

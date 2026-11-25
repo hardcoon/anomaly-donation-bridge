@@ -18,13 +18,16 @@ public static class TraitorPipe
     public const string Capability = "traitor_recruitment_v1";
     public const string Query = "TRAITOR_STATUS_QUERY";
     public const string OpenedParameter = "adb_traitor_opened_ms";
-    public const int ParticipantsPerMessage = 7;
+    private const int RosterHeaderFields = 4;
+    public const int ParticipantsPerMessage = (PipeProtocol.MaximumFields - RosterHeaderFields) / 2;
 
     public static string Roster(TraitorRecruitmentStatus status, IEnumerable<RecruitmentDonation> donations, bool last)
     {
         var fields = new List<string> { "TRAITOR_ROSTER", status.RoundId, status.Cursor, last ? "last" : "more" };
         foreach (var donation in donations)
         {
+            if (fields.Count + 2 > PipeProtocol.MaximumFields)
+                throw new ArgumentOutOfRangeException(nameof(donations), "The traitor roster exceeds the addon's field limit.");
             fields.Add(donation.DonationId);
             fields.Add(donation.Name);
         }
